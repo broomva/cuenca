@@ -120,12 +120,13 @@ impl Store {
     /// Ingest a blob that claims to be `claimed`, streaming `size` bytes from
     /// `content`. The bytes are hashed as git does (with SHA-1 collision detection);
     /// unless they are exactly `size` bytes hashing to `claimed`, nothing is stored.
-    /// The SHA-256 is derived from the same verified bytes. Ingesting a blob the store
-    /// already holds reads nothing and returns its record. Blobs are never removed.
+    /// The SHA-256 is derived from the same verified bytes. A blob the store already
+    /// holds is ingested the same way, every byte read, verified, written and synced
+    /// again: an ingest takes as long, and fails the same way, whether or not the store
+    /// had the blob, so its outcome and timing do not say which (an authority that
+    /// serves ingests to principals must not tell one what another stored). Blobs are
+    /// never removed.
     pub fn ingest_blob(&self, claimed: GitOid, size: u64, content: impl Read) -> Result<BlobInfo> {
-        if let Some(info) = self.blob_info(claimed)? {
-            return Ok(info);
-        }
         let blob = self.blobs.write(claimed, size, content)?;
         let txn = self.begin()?;
         txn.open_table(BLOBS)?
@@ -427,8 +428,15 @@ impl Store {
     }
 
     pub fn fork(&self, name: &ForkName) -> Result<Option<Fork>> {
-        let txn = self.db.begin_read()?;
-        get_json(&txn.open_table(FORKS)?, name.as_str())
+        self.snapshot()?.fork(name)
+    }
+
+    /// A consistent view: every read through it sees the store at one moment, so a
+    /// decision made on one read (who may see a fork) holds for the others (its history).
+    pub fn snapshot(&self) -> Result<Snapshot> {
+        Ok(Snapshot {
+            txn: self.db.begin_read()?,
+        })
     }
 
     pub fn forks(&self) -> Result<Vec<Fork>> {
@@ -450,17 +458,7 @@ impl Store {
     /// landing intents and moves of main by it, and drafts fenced into or out of it.
     /// Reads the whole log.
     pub fn fork_history(&self, fork: &ForkName) -> Result<Vec<Record>> {
-        let txn = self.db.begin_read()?;
-        let log = txn.open_table(LOG)?;
-        let mut out = Vec::new();
-        for item in log.iter()? {
-            let (k, v) = item?;
-            let record = decode_record(k.value(), v.value())?;
-            if record.event.forks().contains(&fork) {
-                out.push(record);
-            }
-        }
-        Ok(out)
+        self.snapshot()?.fork_history(fork)
     }
 
     /// The tree a location's main is at.
@@ -729,6 +727,31 @@ fn decode_record(offset: u64, bytes: &[u8]) -> Result<Record> {
         });
     }
     Ok(record)
+}
+
+/// The store at one moment ([`Store::snapshot`]).
+pub struct Snapshot {
+    txn: redb::ReadTransaction,
+}
+
+impl Snapshot {
+    pub fn fork(&self, name: &ForkName) -> Result<Option<Fork>> {
+        get_json(&self.txn.open_table(FORKS)?, name.as_str())
+    }
+
+    /// As [`Store::fork_history`], at this snapshot.
+    pub fn fork_history(&self, fork: &ForkName) -> Result<Vec<Record>> {
+        let log = self.txn.open_table(LOG)?;
+        let mut out = Vec::new();
+        for item in log.iter()? {
+            let (k, v) = item?;
+            let record = decode_record(k.value(), v.value())?;
+            if record.event.forks().contains(&fork) {
+                out.push(record);
+            }
+        }
+        Ok(out)
+    }
 }
 
 fn get_json<T: for<'de> Deserialize<'de>>(

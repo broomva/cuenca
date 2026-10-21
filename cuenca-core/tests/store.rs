@@ -36,8 +36,23 @@ fn a_blob_is_stored_under_its_git_id_with_a_derived_sha256() {
     assert_eq!(info.size, 6);
     assert_eq!(store.blob_info(oid).unwrap(), Some(info));
     assert_eq!(store.read_blob(oid).unwrap(), content);
-    // A second ingest reads nothing: an empty reader would otherwise fail the hash.
-    assert_eq!(store.ingest_blob(oid, 6, &b""[..]).unwrap(), info);
+    // A second ingest of the same bytes stores the same record.
+    assert_eq!(store.ingest_blob(oid, 6, &content[..]).unwrap(), info);
+}
+
+/// An ingest of a blob the store already holds takes the same path as a new one: it
+/// reads and verifies every byte, so wrong bytes fail it exactly as they would fail a
+/// new blob, and the blob stays as it was.
+#[test]
+fn a_held_blob_is_ingested_like_a_new_one() {
+    let (_d, store) = store();
+    let content = b"hello\n";
+    let oid = GitOid::for_blob(content);
+    store.ingest_blob(oid, 6, &content[..]).unwrap();
+    for (size, bytes) in [(6, &b""[..]), (6, &b"other!"[..]), (5, &b"hello"[..])] {
+        assert!(store.ingest_blob(oid, size, bytes).is_err(), "{bytes:?}");
+    }
+    assert_eq!(store.read_blob(oid).unwrap(), content);
 }
 
 #[test]
@@ -475,4 +490,24 @@ fn main_follows_a_fork_draft_by_draft() {
         assert_eq!(store.main_tree(&loc("l")).unwrap().git_tree_id(), cs.target);
     }
     assert_eq!(store.replay_check().unwrap().records, 8);
+}
+
+/// A snapshot keeps seeing the store as it was when it was taken, across later writes.
+#[test]
+fn a_snapshot_sees_one_moment() {
+    let (_d, store) = store();
+    let main = tree(&store, &[("a", b"a")]);
+    store.add_location(&loc("l"), None, &main).unwrap();
+    store.create_fork(&fork("f"), &loc("l"), &agent()).unwrap();
+    let before = store.snapshot().unwrap();
+    let cs = write(&store, &main, &[("b", b"b")]);
+    store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
+    assert_eq!(
+        before.fork(&fork("f")).unwrap().unwrap().head,
+        main.git_tree_id()
+    );
+    assert_eq!(before.fork_history(&fork("f")).unwrap().len(), 1);
+    let after = store.snapshot().unwrap();
+    assert_eq!(after.fork(&fork("f")).unwrap().unwrap().head, cs.target);
+    assert_eq!(after.fork_history(&fork("f")).unwrap().len(), 2);
 }
