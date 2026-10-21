@@ -87,7 +87,7 @@ mutate src/state.rs 'if changeset.base != loc.main {' 'if false {' --test store
 mutate src/state.rs 'state.landing_intent
         && last == id' 'state.landing_intent
         && false' --test store
-mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(id) {' 'if false {' --test store
+mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(id) {' 'if false {' --lib
 # One writer per fork: holders, fencing epochs, takeover, sibling forks, revocation.
 mutate src/state.rs 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {
     not_revoked(view, &writer.holder.principal)?;' 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {' --test forks

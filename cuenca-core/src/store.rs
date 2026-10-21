@@ -1289,6 +1289,39 @@ mod tests {
         assert!(corrupt(&store).contains("duplicates the record at 2"));
     }
 
+    /// The transition rules refuse an intent for a changeset that is not the fork's
+    /// head: a log that says otherwise does not replay.
+    #[test]
+    fn replay_refuses_a_landing_intent_for_a_changeset_that_is_not_the_head() {
+        use crate::gates::{AuthorKind, LandingRequest};
+        let (_d, store, cs) = setup();
+        let (_, f) = ids();
+        let gates = store
+            .evaluate_at(
+                &f,
+                ChangesetId::of(&cs),
+                &LandingRequest::new(AuthorKind::Agent),
+                0,
+            )
+            .unwrap();
+        let other = Changeset::new(&Tree::new(), vec![]).unwrap();
+        inject_event(
+            &store,
+            4,
+            Event::LandingIntent {
+                fork: f,
+                writer: w1(),
+                changeset: ChangesetId::of(&other),
+                gates: Box::new(gates),
+            },
+        );
+        assert!(
+            corrupt(&store).contains("is not the head"),
+            "{}",
+            corrupt(&store)
+        );
+    }
+
     #[test]
     fn replay_refuses_a_draft_under_a_wrong_id() {
         let (_d, store, cs) = setup();
