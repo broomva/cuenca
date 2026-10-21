@@ -46,9 +46,7 @@ fn child_writer() {
         // Land the head, every time: after a restart these are retries of what the
         // killed child may already have recorded, and must append nothing.
         if let Some((head, _)) = store.fork(&fork("f")).unwrap().unwrap().head_changeset {
-            store
-                .record_landing_intent(&fork("f"), &w1(), head)
-                .unwrap();
+            land(&store, &fork("f"), &w1(), head).unwrap();
             store.advance_main(&fork("f"), head).unwrap();
         }
         let head = store.fork_head(&fork("f")).unwrap();

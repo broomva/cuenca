@@ -15,9 +15,14 @@ use serde::{Deserialize, Serialize};
 use crate::blobs::BlobFiles;
 use crate::error::{CoreError, Result};
 use crate::event::{ChangesetId, Event, Record};
+use crate::gates::{
+    CHECKS_PATH, Engine, Evaluation, History, Input, LandingRequest, MAX_POLICY_BYTES, POLICY_PATH,
+};
 use crate::names::{ForkName, LocationName, PrincipalName};
 use crate::owner::{Holder, Writer};
-use crate::state::{Applied, Fork, Location, Memory, View, apply, check_writer, fenced_target};
+use crate::state::{
+    Applied, Fork, Location, Memory, View, apply, check_landing, check_writer, fenced_target,
+};
 
 type Bytes = &'static [u8];
 
@@ -65,6 +70,22 @@ pub struct Published {
     /// appends nothing and returns the first publish's offset.
     pub fresh: bool,
 }
+
+/// The result of a landing request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
+pub struct Landed {
+    /// The offset of the intent's record.
+    pub offset: u64,
+    /// False when this intent already was the fork's latest: a retry, which appends
+    /// nothing and returns the first request's offset and verdict.
+    pub fresh: bool,
+    /// The gates' verdict, as journaled (log-only: it refused nothing).
+    pub gates: Evaluation,
+}
+
+/// How many times a landing request re-evaluates when main moves under it.
+const LANDING_TRIES: usize = 8;
 
 /// What [`Store::replay_check`] rebuilt from the log.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -380,21 +401,197 @@ impl Store {
         Ok(self.record(event, |_| Ok(()))?.0)
     }
 
-    /// Record the holder's intent to land `id`, which must be the fork's head.
-    /// Recording the same intent again while it is the latest is a retry and appends
-    /// nothing.
+    /// Record the holder's intent to land `id`, which must be the fork's head, with the
+    /// gates' verdict on it ([`crate::gates`], log-only: the intent is recorded whatever
+    /// the verdict). Recording the same intent again while it is the latest is a retry
+    /// and appends nothing; it returns the first request's verdict.
+    ///
+    /// The gates run outside the write lock, on a snapshot, and the intent is appended
+    /// only if main has not moved since that snapshot, so the journaled verdict is
+    /// always against the main the intent was recorded on. If main keeps moving, the
+    /// request gives up with [`CoreError::MainMoved`] after a few tries.
     pub fn record_landing_intent(
         &self,
         fork: &ForkName,
         writer: &Writer,
         id: ChangesetId,
-    ) -> Result<u64> {
-        let event = Event::LandingIntent {
-            fork: fork.clone(),
-            writer: writer.clone(),
-            changeset: id,
+        request: &LandingRequest,
+    ) -> Result<Landed> {
+        self.record_landing_with(fork, writer, id, |store| {
+            store.evaluate_at(fork, id, request, now_ms())
+        })
+    }
+
+    /// [`Store::record_landing_intent`] with the evaluation supplied, so a test can
+    /// move main between the evaluation and the append.
+    fn record_landing_with(
+        &self,
+        fork: &ForkName,
+        writer: &Writer,
+        id: ChangesetId,
+        mut evaluate: impl FnMut(&Self) -> Result<Evaluation>,
+    ) -> Result<Landed> {
+        for _ in 0..LANDING_TRIES {
+            // The writer and the head are checked before any gate runs, in the order
+            // the transition rules check them; a repeat returns the journaled verdict.
+            let txn = self.db.begin_read()?;
+            let view = ReadTables {
+                forks: txn.open_table(FORKS)?,
+                revoked: txn.open_table(REVOKED)?,
+            };
+            if let Some(offset) = check_landing(&view, fork, writer, id)? {
+                return self.journaled_landing(offset);
+            }
+            drop((view, txn));
+            let gates = evaluate(self)?;
+            let seen = gates.log_len;
+            let event = Event::LandingIntent {
+                fork: fork.clone(),
+                writer: writer.clone(),
+                changeset: id,
+                gates: Box::new(gates.clone()),
+            };
+            let recorded = self.record_with(
+                |t| {
+                    let location = t
+                        .fork(fork)?
+                        .ok_or_else(|| CoreError::UnknownFork(fork.to_string()))?
+                        .location;
+                    let loc = t
+                        .location(&location)?
+                        .ok_or_else(|| CoreError::UnknownLocation(location.to_string()))?;
+                    if loc.main_moved.is_some_and(|m| m.offset >= seen) {
+                        return Err(CoreError::MainMoved);
+                    }
+                    Ok(event)
+                },
+                |_| Ok(()),
+            );
+            return match recorded {
+                Err(CoreError::MainMoved) => continue,
+                Err(e) => Err(e),
+                Ok((offset, true)) => Ok(Landed {
+                    offset,
+                    fresh: true,
+                    gates,
+                }),
+                Ok((offset, false)) => self.journaled_landing(offset),
+            };
+        }
+        Err(CoreError::MainMoved)
+    }
+
+    /// The landing intent recorded at `offset`, for a request that repeats it.
+    fn journaled_landing(&self, offset: u64) -> Result<Landed> {
+        match self.records(offset, 1)?.pop().map(|r| r.event) {
+            Some(Event::LandingIntent { gates, .. }) => Ok(Landed {
+                offset,
+                fresh: false,
+                gates: *gates,
+            }),
+            other => Err(CoreError::CorruptLog {
+                offset,
+                reason: format!("a repeated landing intent points at {other:?}"),
+            }),
+        }
+    }
+
+    /// The gates' verdict on `writer` landing `id`, the head of `fork`, now: a dry run,
+    /// "would this land?". The writer is checked as for a landing request; nothing is
+    /// recorded. Against the same log state it returns the verdict
+    /// [`Store::record_landing_intent`] would journal.
+    pub fn evaluate_landing(
+        &self,
+        fork: &ForkName,
+        writer: &Writer,
+        id: ChangesetId,
+        request: &LandingRequest,
+    ) -> Result<Evaluation> {
+        let txn = self.db.begin_read()?;
+        let view = ReadTables {
+            forks: txn.open_table(FORKS)?,
+            revoked: txn.open_table(REVOKED)?,
         };
-        Ok(self.record(event, |_| Ok(()))?.0)
+        check_landing(&view, fork, writer, id)?;
+        drop((view, txn));
+        self.evaluate_at(fork, id, request, now_ms())
+    }
+
+    /// The gates' verdict at a given clock, all of it read from one snapshot. Who asks
+    /// is not checked here: the callers check it first.
+    ///
+    /// The accepted base is the location's main in that snapshot, never the fork's
+    /// tree: the policy the gates are compiled from and the check manifest are read
+    /// from it. Main's history (every blob it has held at each path, and each move) is
+    /// rebuilt from the whole log, so an evaluation costs a read of the log.
+    fn evaluate_at(
+        &self,
+        fork: &ForkName,
+        id: ChangesetId,
+        request: &LandingRequest,
+        at_ms: u64,
+    ) -> Result<Evaluation> {
+        let txn = self.db.begin_read()?;
+        let forks = txn.open_table(FORKS)?;
+        let trees = txn.open_table(TREES)?;
+        let log = txn.open_table(LOG)?;
+        let state: Fork = get_json(&forks, fork.as_str())?
+            .ok_or_else(|| CoreError::UnknownFork(fork.to_string()))?;
+        if state.head_changeset.map(|(head, _)| head) != Some(id) {
+            return Err(CoreError::NotHead {
+                fork: fork.to_string(),
+                changeset: id.to_hex(),
+            });
+        }
+        let loc: Location = get_json(&txn.open_table(LOCATIONS)?, state.location.as_str())?
+            .ok_or_else(|| CoreError::UnknownLocation(state.location.to_string()))?;
+        let changeset = indexed_changeset(&txn.open_table(CHANGESETS)?, &log, id)?
+            .ok_or_else(|| CoreError::UnknownChangeset(id.to_hex()))?;
+        let base = load_tree(&trees, loc.main)?;
+        let changeset_base = load_tree(&trees, changeset.base)?;
+        let log_len = last_offset(&log)?.map_or(0, |last| last + 1);
+        let history = main_history(&log, &txn.open_table(CHANGESETS)?, &trees, &loc.name)?;
+
+        let policy = self.base_file(&base, POLICY_PATH)?;
+        let checks = self.base_file(&base, CHECKS_PATH)?.unwrap_or(None);
+        let engine = Engine::compile(policy.as_ref().map(|b| b.as_deref()).map_err(Clone::clone));
+        let read = |oid: GitOid| self.read_blob(oid).map_err(|e| e.to_string());
+        Ok(engine.evaluate(&Input {
+            base: &base,
+            base_oid: loc.main,
+            log_len,
+            at_ms,
+            checks: checks.as_deref(),
+            changeset: &changeset,
+            changeset_base: &changeset_base,
+            read: &read,
+            history: &history,
+            request,
+        }))
+    }
+
+    /// A file of the base the gates read: `Ok(None)` when absent, an inner `Err` when
+    /// something is there that is not a readable regular file of at most
+    /// [`MAX_POLICY_BYTES`].
+    fn base_file(
+        &self,
+        base: &Tree,
+        path: &str,
+    ) -> Result<std::result::Result<Option<Vec<u8>>, String>> {
+        let entry = match base.get(path) {
+            None => return Ok(Ok(None)),
+            Some(Entry::Symlink(_)) => return Ok(Err(format!("{path} is a symlink"))),
+            Some(entry) => entry,
+        };
+        let oid = entry.oid();
+        let info = self.blob_info(oid)?.ok_or(CoreError::MissingBlob(oid))?;
+        if info.size > MAX_POLICY_BYTES as u64 {
+            return Ok(Err(format!(
+                "{path} is {} bytes, over the {MAX_POLICY_BYTES}-byte limit",
+                info.size
+            )));
+        }
+        Ok(Ok(Some(self.read_blob(oid)?)))
     }
 
     /// Move the main of `fork`'s location by `id`, the fork's head, as a
@@ -669,6 +866,50 @@ impl View for Tables<'_> {
     }
 }
 
+/// The tables [`check_landing`] reads, read-only, for checks made before a write.
+struct ReadTables {
+    forks: redb::ReadOnlyTable<&'static str, Bytes>,
+    revoked: redb::ReadOnlyTable<&'static str, u64>,
+}
+
+impl View for ReadTables {
+    fn location(&self, _: &LocationName) -> Result<Option<Location>> {
+        Err(read_only())
+    }
+
+    fn fork(&self, name: &ForkName) -> Result<Option<Fork>> {
+        get_json(&self.forks, name.as_str())
+    }
+
+    fn revoked(&self, principal: &PrincipalName) -> Result<Option<u64>> {
+        Ok(self.revoked.get(principal.as_str())?.map(|v| v.value()))
+    }
+
+    fn put_revoked(&mut self, _: &PrincipalName, _: u64) -> Result<()> {
+        Err(read_only())
+    }
+
+    fn changeset(&self, _: ChangesetId) -> Result<Option<Changeset>> {
+        Err(read_only())
+    }
+
+    fn put_location(&mut self, _: &Location) -> Result<()> {
+        Err(read_only())
+    }
+
+    fn put_fork(&mut self, _: &Fork) -> Result<()> {
+        Err(read_only())
+    }
+
+    fn index_changeset(&mut self, _: ChangesetId, _: u64, _: &Changeset) -> Result<()> {
+        Err(read_only())
+    }
+}
+
+fn read_only() -> CoreError {
+    CoreError::Inconsistent("a pre-write check read past the forks and revocations".into())
+}
+
 fn indexed_changeset(
     index: &impl ReadableTable<Bytes, u64>,
     log: &impl ReadableTable<u64, Bytes>,
@@ -805,6 +1046,51 @@ fn store_tree(trees: &mut redb::Table<Bytes, Bytes>, tree: &Tree) -> Result<()> 
         )?;
     }
     Ok(())
+}
+
+/// Main's history for `location`: every `(path, blob)` its main has held, and each
+/// move with its time and the paths it touched.
+fn main_history(
+    log: &impl ReadableTable<u64, Bytes>,
+    index: &impl ReadableTable<Bytes, u64>,
+    trees: &impl ReadableTable<Bytes, Bytes>,
+    location: &LocationName,
+) -> Result<History> {
+    let mut history = History::default();
+    let mut moved: Vec<(u64, ChangesetId)> = Vec::new();
+    for item in log.iter()? {
+        let (k, v) = item?;
+        let record = decode_record(k.value(), v.value())?;
+        match record.event {
+            Event::LocationAdded {
+                location: l, main, ..
+            } if l == *location => {
+                for (path, entry) in load_tree(trees, main)?.entries() {
+                    history.held.insert((path.clone(), entry.oid()));
+                }
+            }
+            Event::MainAdvanced {
+                location: l,
+                changeset,
+                ..
+            } if l == *location => moved.push((record.at_ms, changeset)),
+            _ => {}
+        }
+    }
+    for (at, id) in moved {
+        let changeset = indexed_changeset(index, log, id)?
+            .ok_or_else(|| CoreError::UnknownChangeset(id.to_hex()))?;
+        for op in &changeset.ops {
+            if let Op::Put { path, entry } = op {
+                history.held.insert((path.clone(), entry.oid()));
+            }
+        }
+        history.moves.push((
+            at,
+            changeset.ops.iter().map(|op| op.path().clone()).collect(),
+        ));
+    }
+    Ok(history)
 }
 
 /// Rebuild the tree `root` from its stored objects, and check that it hashes back to
@@ -1306,5 +1592,169 @@ mod tests {
         }
         txn.commit().unwrap();
         assert!(matches!(store.tree(cs.target), Err(CoreError::CorruptTree(o)) if o == cs.target));
+    }
+
+    /// A landing request whose main moved between the evaluation and the append is
+    /// evaluated again, so the journaled verdict is always against the main the intent
+    /// was recorded on; a main that never stops moving gives up.
+    #[test]
+    fn a_landing_request_re_evaluates_when_main_moves_under_it() {
+        use crate::gates::{AuthorKind, LandingRequest};
+        let (_dir, store, cs) = setup();
+        let (_, f) = ids();
+        let g = ForkName::new("g").unwrap();
+        let put = |c: &[u8]| {
+            let oid = GitOid::for_blob(c);
+            store.ingest_blob(oid, c.len() as u64, c).unwrap();
+            Entry::File(oid)
+        };
+        let main = store.main_tree(&ids().0).unwrap();
+        let other = Changeset::new(
+            &main,
+            vec![Op::put(RepoPath::new("d/b").unwrap(), put(b"3"))],
+        )
+        .unwrap();
+        let other_id = store.publish_draft(&g, &w1(), &other).unwrap().id;
+        let request = LandingRequest::new(AuthorKind::Agent);
+        let mut calls = 0;
+        let landed = store
+            .record_landing_with(&g, &w1(), other_id, |s| {
+                calls += 1;
+                let eval = s.evaluate_at(&g, other_id, &request, 0)?;
+                if calls == 1 {
+                    s.advance_main(&f, ChangesetId::of(&cs)).unwrap();
+                }
+                Ok(eval)
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(landed.gates.base, cs.target);
+        assert!(
+            landed
+                .gates
+                .results
+                .iter()
+                .any(|r| r.gate == "fast_forward" && !r.passed())
+        );
+
+        // Main moves on every try: the request gives up and records nothing.
+        let third = Changeset::new(
+            &store.fork_head(&g).unwrap(),
+            vec![Op::put(RepoPath::new("d/c").unwrap(), put(b"4"))],
+        )
+        .unwrap();
+        let third_id = store.publish_draft(&g, &w1(), &third).unwrap().id;
+        let len = store.len().unwrap();
+        let mut stale = store.evaluate_at(&g, third_id, &request, 0).unwrap();
+        stale.log_len = 0;
+        let r = store.record_landing_with(&g, &w1(), third_id, |_| Ok(stale.clone()));
+        assert!(matches!(r, Err(CoreError::MainMoved)), "{r:?}");
+        assert_eq!(store.len().unwrap(), len);
+    }
+
+    /// The time-dependent gates read the evaluation's clock: a governance change older
+    /// than the window no longer counts, and a file exactly at the size limit passes.
+    #[test]
+    fn the_governance_window_and_the_size_limit_have_edges() {
+        use crate::gates::{AuthorKind, LandingRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let put = |c: &[u8]| {
+            let oid = GitOid::for_blob(c);
+            store.ingest_blob(oid, c.len() as u64, c).unwrap();
+            Entry::File(oid)
+        };
+        let policy = b"auto_merge:\n  gates:\n    governance:\n      paths: [GOV]\n      l3_max_per_window: 1\n      l3_window_seconds: 60\ncuenca:\n  gates:\n    max_file_bytes: 8\n";
+        let main = Tree::from_entries([
+            (RepoPath::new(".control/policy.yaml").unwrap(), put(policy)),
+            (RepoPath::new("GOV").unwrap(), put(b"0")),
+        ])
+        .unwrap();
+        let (l, f) = ids();
+        store.add_location(&l, None, &main).unwrap();
+        store.create_fork(&f, &l, &agent()).unwrap();
+        let first = Changeset::new(
+            &main,
+            vec![Op::put(RepoPath::new("GOV").unwrap(), put(b"1"))],
+        )
+        .unwrap();
+        let first_id = store.publish_draft(&f, &w1(), &first).unwrap().id;
+        store.advance_main(&f, first_id).unwrap();
+        let moved_at = store.records(store.len().unwrap() - 1, 1).unwrap()[0].at_ms;
+
+        let g = ForkName::new("g").unwrap();
+        store.create_fork(&g, &l, &agent()).unwrap();
+        let main = store.main_tree(&l).unwrap();
+        let next = Changeset::new(
+            &main,
+            vec![
+                Op::put(RepoPath::new("GOV").unwrap(), put(b"2")),
+                Op::put(RepoPath::new("eight").unwrap(), put(b"12345678")),
+            ],
+        )
+        .unwrap();
+        let id = store.publish_draft(&g, &w1(), &next).unwrap().id;
+        let request = LandingRequest::new(AuthorKind::Agent);
+        let fails = |at: u64| -> Vec<String> {
+            store
+                .evaluate_at(&g, id, &request, at)
+                .unwrap()
+                .results
+                .into_iter()
+                .filter(|r| !r.passed())
+                .map(|r| r.gate)
+                .collect()
+        };
+        assert_eq!(fails(moved_at), ["governance_rate"]);
+        assert_eq!(fails(moved_at + 60_000), ["governance_rate"]);
+        assert!(fails(moved_at + 60_001).is_empty());
+    }
+
+    /// A base whose policy is a symlink is not read through the link: the evaluation
+    /// fails on `policy`, and records no policy hash.
+    #[test]
+    fn a_symlinked_base_policy_is_a_policy_failure() {
+        use crate::gates::{AuthorKind, LandingRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let ingest = |c: &[u8]| {
+            let oid = GitOid::for_blob(c);
+            store.ingest_blob(oid, c.len() as u64, c).unwrap();
+            oid
+        };
+        let main = Tree::from_entries([
+            (
+                RepoPath::new(".control/policy.yaml").unwrap(),
+                Entry::Symlink(ingest(b"real.yaml")),
+            ),
+            (
+                RepoPath::new("real.yaml").unwrap(),
+                Entry::File(ingest(b"cuenca: {}\n")),
+            ),
+        ])
+        .unwrap();
+        let (l, f) = ids();
+        store.add_location(&l, None, &main).unwrap();
+        store.create_fork(&f, &l, &agent()).unwrap();
+        let cs = Changeset::new(
+            &main,
+            vec![Op::put(
+                RepoPath::new("x").unwrap(),
+                Entry::File(ingest(b"x")),
+            )],
+        )
+        .unwrap();
+        let id = store.publish_draft(&f, &w1(), &cs).unwrap().id;
+        let eval = store
+            .evaluate_at(&f, id, &LandingRequest::new(AuthorKind::Agent), 0)
+            .unwrap();
+        assert_eq!(eval.policy.sha256, None);
+        let failed: Vec<_> = eval
+            .results
+            .iter()
+            .filter(|r| !r.passed())
+            .map(|r| r.gate.as_str())
+            .collect();
+        assert_eq!(failed, ["policy"]);
     }
 }

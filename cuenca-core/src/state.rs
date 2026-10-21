@@ -143,6 +143,33 @@ fn not_revoked(view: &impl View, principal: &PrincipalName) -> Result<()> {
     }
 }
 
+/// Whether `writer` may ask to land `id` on fork `name`: `Some(offset)` when the
+/// request repeats the fork's latest intent, recorded at that offset. The writer is
+/// checked before the changeset, so a writer that does not hold the fork learns nothing
+/// about its head. The store runs this before the gates evaluate a request, and
+/// [`apply`] runs it again in the transaction that records it.
+pub(crate) fn check_landing(
+    view: &impl View,
+    name: &ForkName,
+    writer: &Writer,
+    id: ChangesetId,
+) -> Result<Option<u64>> {
+    let state = fork(view, name)?;
+    check_writer(view, &state, writer)?;
+    if let Some((last, at)) = state.landing_intent
+        && last == id
+    {
+        return Ok(Some(at));
+    }
+    if state.head_changeset.map(|(head, _)| head) != Some(id) {
+        return Err(CoreError::NotHead {
+            fork: name.to_string(),
+            changeset: id.to_hex(),
+        });
+    }
+    Ok(None)
+}
+
 /// Whether `writer` may write `state` now. A writer whose principal is revoked is
 /// refused first; then the holder under the fork's current epoch may write; the holder
 /// of an earlier epoch is told its epoch is stale (its publish goes to a sibling fork);
@@ -332,20 +359,12 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             fork: name,
             writer,
             changeset: id,
+            gates: _,
         } => {
-            let mut state = fork(view, name)?;
-            check_writer(view, &state, writer)?;
-            if let Some((last, at)) = state.landing_intent
-                && last == *id
-            {
+            if let Some(at) = check_landing(view, name, writer, *id)? {
                 return Ok(Applied::Repeat(at));
             }
-            if state.head_changeset.map(|(head, _)| head) != Some(*id) {
-                return Err(CoreError::NotHead {
-                    fork: name.to_string(),
-                    changeset: id.to_hex(),
-                });
-            }
+            let mut state = fork(view, name)?;
             state.landing_intent = Some((*id, offset));
             view.put_fork(&state)?;
         }

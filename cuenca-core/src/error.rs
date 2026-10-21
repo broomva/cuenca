@@ -77,6 +77,8 @@ pub enum CoreError {
     },
     #[error("remote {0:?} is not a plausible git remote")]
     BadRemote(String),
+    #[error("main kept moving while the gates evaluated the landing request; try again")]
+    MainMoved,
     #[error("log record {offset} is unreadable: {reason}")]
     CorruptLog { offset: u64, reason: String },
     #[error("the tables disagree with a replay of the log: {0}")]

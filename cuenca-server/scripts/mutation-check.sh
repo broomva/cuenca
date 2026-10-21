@@ -130,4 +130,29 @@ mutate src/http.rs 'let info = a.guarded(&c.key.principal, || {
             let info = a.store.ingest_blob(oid, size, content)?;' 'let info = a.guarded(&cuenca_core::PrincipalName::new("unrevoked").unwrap(), || {
             let info = a.store.ingest_blob(oid, size, content)?;' --test api
 
+# Gate engine (BRO-3313): each built-in gate fails what it should, the base policy
+# (never the candidate's) is the one compiled, main's history is read from the log, and
+# the author the gates see is the key's kind.
+mutate ../cuenca-core/src/gates/builtin.rs '.filter(|re| re.is_match(file.path.as_str()))' '.filter(|_| false)' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs '.filter(|(_, re)| re.is_match(content))' '.filter(|_| false)' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'Some(before) if before.oid() == entry.oid() => None,' 'Some(_) if false => None,' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'Some(c) if c.len() as u64 > self.0 =>' 'Some(c) if false && c.is_empty() =>' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'if cx.author == AuthorKind::Human {' 'if false {' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs '.filter(|rule| path.contains(rule.as_str()))' '.filter(|_| false)' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'let path = format!("/{}", file.path.as_str().to_lowercase());' 'let path = file.path.as_str().to_lowercase();' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'if recent < self.max {' 'if true {' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'Op::Delete { path } if !covered(path.as_str(), &cx.declarations.deletes) => {' 'Op::Delete { path } if false && path.as_str().is_empty() => {' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'let held = cx.history.held.contains(&(path.clone(), oid));' 'let held = false;' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'let unchanged = cx.base.get(path.as_str()).is_some_and(|e| e.oid() == oid);' 'let unchanged = false;' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'if change.from == change.main {' 'if true {' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'if self.0.iter().any(|w| inside(w, cx.at_ms)) {' 'if true {' --test gate_log
+mutate ../cuenca-core/src/gates/mod.rs 'if let Some(error) = &self.policy_error {' 'if let Some(error) = None::<&String> {' --test gate_log
+mutate ../cuenca-core/src/gates/mod.rs 'Some(_) => path.starts_with(d),' 'Some(_) => false,' --test gate_log
+mutate ../cuenca-core/src/store.rs 'let policy = self.base_file(&base, POLICY_PATH)?;' 'let policy = self.base_file(&self.tree(changeset.target)?, POLICY_PATH)?;' --test gate_log
+mutate ../cuenca-core/src/store.rs '                for (path, entry) in load_tree(trees, main)?.entries() {
+                    history.held.insert((path.clone(), entry.oid()));
+                }' '' --test gate_log
+mutate src/http.rs 'PrincipalKind::OwnerDevice => AuthorKind::Human,' 'PrincipalKind::OwnerDevice => AuthorKind::Agent,' --test gate_log
+mutate src/http.rs '        let gates = a.store.evaluate_landing(&name, &writer, id, &request)?;' '        let gates = a.store.evaluate_landing(&name, &writer, id, &LandingRequest::new(AuthorKind::Agent))?;' --test gate_log
+
 exit $survived

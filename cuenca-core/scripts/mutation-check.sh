@@ -192,4 +192,20 @@ mutate src/store.rs 'let (Some(sha), Some(size)) = (bytes.get(..32), bytes.get(3
 # Commits are durable before they return: without it, a kill loses acknowledged drafts.
 mutate src/store.rs 'txn.set_durability(Durability::Immediate);' 'txn.set_durability(Durability::None);' --test crash
 
+# Gate engine (BRO-3313): the intent is journaled against the main it was recorded
+# on, the writer is checked before any gate runs, the governance window and size limit
+# have edges, findings are capped, and the policy compiler refuses what it must.
+mutate src/store.rs 'if loc.main_moved.is_some_and(|m| m.offset >= seen) {' 'if false {' --lib
+mutate src/store.rs '            if let Some(offset) = check_landing(&view, fork, writer, id)? {
+                return self.journaled_landing(offset);
+            }' '' --test forks
+mutate src/gates/builtin.rs '*at >= since && ' '' --lib
+mutate src/gates/builtin.rs 'let since = cx.at_ms.saturating_sub(self.window_ms);' 'let since = 0;' --lib
+mutate src/gates/builtin.rs 'Some(c) if c.len() as u64 > self.0 =>' 'Some(c) if c.len() as u64 >= self.0 =>' --lib
+mutate src/gates/mod.rs 'findings.truncate(MAX_FINDINGS_PER_GATE);' '' --lib
+mutate src/gates/policy.rs '            Ok((Event::Alias(_), mark)) => {' '            Ok((Event::Alias(_), mark)) if false => {' --lib
+mutate src/gates/policy.rs 'if bytes.len() > MAX_POLICY_BYTES {' 'if false {' --lib
+mutate src/gates/policy.rs '                    _ => return Err(format!("cuenca.gates: unknown key {key:?}")),' '                    _ => {}' --lib
+mutate src/store.rs '            Some(Entry::Symlink(_)) => return Ok(Err(format!("{path} is a symlink"))),' '' --lib
+
 exit $survived

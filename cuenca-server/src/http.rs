@@ -27,7 +27,12 @@
 //! | GET | `/v1/forks/{fork}/blobs/{oid}` | a blob of that tree |
 //! | GET | `/v1/forks/{fork}/history` | the log records naming the fork (and only forks the caller reads) |
 //! | POST | `/v1/forks/{fork}/drafts` | `{epoch, changeset}`: publish a draft |
-//! | POST | `/v1/forks/{fork}/landing` | `{epoch, changeset}` (an id): ask to land |
+//! | POST | `/v1/forks/{fork}/landing` | `{epoch, changeset, declarations?}` (an id): ask to land; answers the gates' verdict, journaled with the intent |
+//! | POST | `/v1/forks/{fork}/landing/dry-run` | the same body: the verdict a landing request would get now, recording nothing |
+//!
+//! The gates are log-only (spec section 4, phase 2): a failing verdict is recorded and
+//! refuses nothing. The author the gates see is the key's kind: an agent key is an
+//! agent, an owner device a human.
 //! | PUT | `/v1/blobs/{oid}` | upload a blob; `Content-Length` is its size |
 
 use std::net::SocketAddr;
@@ -50,6 +55,8 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use crate::authority::{AuthError, Authority, Caller};
+use crate::keys::PrincipalKind;
+use cuenca_core::gates::{AuthorKind, Declarations, LandingRequest};
 
 /// Largest JSON request body (a changeset of tens of thousands of ops fits).
 const MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
@@ -70,6 +77,7 @@ pub fn router(authority: Arc<Authority>) -> Router {
         .route("/v1/forks/{fork}/history", get(history))
         .route("/v1/forks/{fork}/drafts", post(publish))
         .route("/v1/forks/{fork}/landing", post(landing))
+        .route("/v1/forks/{fork}/landing/dry-run", post(landing_dry_run))
         .route(
             "/v1/blobs/{oid}",
             put(upload_blob).layer(DefaultBodyLimit::max(MAX_BLOB_BYTES as usize)),
@@ -181,6 +189,7 @@ impl From<CoreError> for ApiError {
             | CoreError::UnknownChangeset(_) => return Self::not_found(),
             CoreError::LocationExists(_) | CoreError::ForkExists(_) => (S::CONFLICT, "exists"),
             CoreError::NotHead { .. } => (S::CONFLICT, "not_head"),
+            CoreError::MainMoved => (S::CONFLICT, "main_moved"),
             CoreError::StaleEpoch { .. } => (S::CONFLICT, "stale_epoch"),
             CoreError::EpochMismatch { .. } => (S::CONFLICT, "epoch_mismatch"),
             CoreError::NotHolder { .. } => (S::FORBIDDEN, "not_holder"),
@@ -440,9 +449,20 @@ async fn publish(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Landing {
     epoch: u64,
     changeset: String,
+    #[serde(default)]
+    declarations: Declarations,
+}
+
+/// The author the gates see: what the key says the caller is, never what it claims.
+fn author(c: &Caller) -> AuthorKind {
+    match c.key.kind {
+        PrincipalKind::Agent => AuthorKind::Agent,
+        PrincipalKind::OwnerDevice => AuthorKind::Human,
+    }
 }
 
 async fn landing(
@@ -457,10 +477,41 @@ async fn landing(
     blocking(&a, move |a| {
         writable_fork(a, &c, &name)?;
         let writer = Writer::new(c.holder.clone(), req.epoch);
-        let offset = a.guarded(&c.key.principal, || {
-            a.store.record_landing_intent(&name, &writer, id)
+        let request = LandingRequest {
+            author: author(&c),
+            declarations: req.declarations,
+        };
+        let landed = a.guarded(&c.key.principal, || {
+            a.store.record_landing_intent(&name, &writer, id, &request)
         })?;
-        Ok(Json(json!({ "offset": offset })))
+        Ok(Json(json!({
+            "offset": landed.offset,
+            "fresh": landed.fresh,
+            "gates": landed.gates,
+        })))
+    })
+    .await
+}
+
+/// "Would this land?": the gates' verdict on a landing request now, recorded nowhere.
+async fn landing_dry_run(
+    State(a): Shared,
+    Extension(c): Me,
+    Path(fork): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let name = parse(&fork, ForkName::new)?;
+    let req: Landing = json_body(&body)?;
+    let id = parse(&req.changeset, ChangesetId::from_hex)?;
+    blocking(&a, move |a| {
+        writable_fork(a, &c, &name)?;
+        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let request = LandingRequest {
+            author: author(&c),
+            declarations: req.declarations,
+        };
+        let gates = a.store.evaluate_landing(&name, &writer, id, &request)?;
+        Ok(Json(json!({ "gates": gates })))
     })
     .await
 }

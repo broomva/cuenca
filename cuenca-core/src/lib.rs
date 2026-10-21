@@ -39,6 +39,13 @@
 //! `tailscale whois`) is the authority's to establish (BRO-3251); this layer trusts
 //! the [`Writer`] it is given.
 //!
+//! # Gates
+//!
+//! A landing intent carries the gate engine's verdict on it ([`gates`], spec section
+//! 4): compiled from the policy of the main it lands onto, never the candidate's,
+//! journaled in the same record, and log-only, so it refuses nothing until phase 3
+//! (BRO-3307). [`Store::evaluate_landing`] is the dry run.
+//!
 //! # Why not `lago-journal`
 //!
 //! `lago-journal` stores Lago's `EventEnvelope`s keyed by session, branch and sequence,
@@ -49,6 +56,7 @@
 mod blobs;
 mod error;
 mod event;
+pub mod gates;
 mod names;
 mod owner;
 mod state;
@@ -60,4 +68,4 @@ pub use event::{ChangesetId, Event, Record};
 pub use names::{ForkName, LocationName, MAX_NAME_BYTES, NameError, PrincipalName};
 pub use owner::{Holder, MAX_NODE_BYTES, NodeId, Writer, sibling_name};
 pub use state::{Fork, Location, MainMove};
-pub use store::{BlobInfo, Published, ReplaySummary, Snapshot, Store};
+pub use store::{BlobInfo, Landed, Published, ReplaySummary, Snapshot, Store};

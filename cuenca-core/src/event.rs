@@ -1,6 +1,7 @@
 use cuenca_tree::{Changeset, ContentHash, GitOid};
 use serde::{Deserialize, Serialize};
 
+use crate::gates::Evaluation;
 use crate::names::{ForkName, LocationName, PrincipalName};
 use crate::owner::{Holder, Writer};
 
@@ -98,11 +99,14 @@ pub enum Event {
         changeset: ChangesetId,
     },
     /// The fork's holder asked to land the fork's head changeset; landing itself
-    /// (BRO-3255) records what happened to it.
+    /// (BRO-3255) records what happened to it. `gates` is the gate engine's verdict on
+    /// it against the main of the moment ([`crate::gates`]): log-only, so a failing
+    /// verdict is recorded and refuses nothing.
     LandingIntent {
         fork: ForkName,
         writer: Writer,
         changeset: ChangesetId,
+        gates: Box<Evaluation>,
     },
 }
 

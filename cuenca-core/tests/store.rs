@@ -302,20 +302,13 @@ fn a_landing_intent_names_the_head_and_a_retry_appends_nothing() {
     let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
     let unknown = ChangesetId::of(&write(&store, &main, &[("z", b"z")]));
     assert!(matches!(
-        store.record_landing_intent(&fork("f"), &w1(), unknown),
+        land(&store, &fork("f"), &w1(), unknown),
         Err(CoreError::NotHead { .. })
     ));
-    let at = store
-        .record_landing_intent(&fork("f"), &w1(), p.id)
-        .unwrap();
+    let at = land(&store, &fork("f"), &w1(), p.id).unwrap();
     store.create_fork(&fork("g"), &loc("l"), &agent()).unwrap();
     let len = store.len().unwrap();
-    assert_eq!(
-        store
-            .record_landing_intent(&fork("f"), &w1(), p.id)
-            .unwrap(),
-        at
-    );
+    assert_eq!(land(&store, &fork("f"), &w1(), p.id).unwrap(), at);
     assert_eq!(store.len().unwrap(), len);
     assert_eq!(
         store.fork(&fork("f")).unwrap().unwrap().landing_intent,
@@ -361,9 +354,7 @@ fn state_survives_reopen_and_matches_a_replay_of_the_log() {
         )
         .unwrap();
         let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
-        store
-            .record_landing_intent(&fork("f"), &w1(), p.id)
-            .unwrap();
+        land(&store, &fork("f"), &w1(), p.id).unwrap();
         store.advance_main(&fork("f"), p.id).unwrap();
         (cs, p.id)
     };

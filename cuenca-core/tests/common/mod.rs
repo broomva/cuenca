@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
-use cuenca_core::{ForkName, Holder, LocationName, NodeId, PrincipalName, Store, Writer};
+use cuenca_core::gates::{AuthorKind, LandingRequest};
+use cuenca_core::{
+    ChangesetId, ForkName, Holder, LocationName, NodeId, PrincipalName, Store, Writer,
+};
 use cuenca_tree::{Blob, Changeset, Entry, GitOid, Op, RepoPath, Tree};
 
 pub fn loc(s: &str) -> LocationName {
@@ -62,4 +65,16 @@ pub fn agent() -> Holder {
 /// [`agent`] under epoch 1, a new fork's.
 pub fn w1() -> Writer {
     Writer::new(agent(), 1)
+}
+
+/// Record an agent's landing intent with no declarations; the offset of its record.
+pub fn land(
+    store: &Store,
+    fork: &ForkName,
+    writer: &Writer,
+    id: ChangesetId,
+) -> cuenca_core::Result<u64> {
+    store
+        .record_landing_intent(fork, writer, id, &LandingRequest::new(AuthorKind::Agent))
+        .map(|l| l.offset)
 }
