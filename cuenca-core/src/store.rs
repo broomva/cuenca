@@ -417,6 +417,11 @@ impl Store {
         id: ChangesetId,
         request: &LandingRequest,
     ) -> Result<Landed> {
+        // The declarations are journaled as asked, so they are checked first.
+        request
+            .declarations
+            .check()
+            .map_err(CoreError::Declarations)?;
         self.record_landing_with(fork, writer, id, |store| {
             store.evaluate_at(fork, id, request, now_ms())
         })
@@ -498,8 +503,10 @@ impl Store {
 
     /// The gates' verdict on `writer` landing `id`, the head of `fork`, now: a dry run,
     /// "would this land?". The writer is checked as for a landing request; nothing is
-    /// recorded. Against the same log state it returns the verdict
-    /// [`Store::record_landing_intent`] would journal.
+    /// recorded. Against the same log state it answers exactly what
+    /// [`Store::record_landing_intent`] would: a fresh verdict, or, when `id` already
+    /// is the fork's latest intent, the journaled one (a landing request would be a
+    /// retry). One verdict per head: to be judged again, publish a new draft.
     pub fn evaluate_landing(
         &self,
         fork: &ForkName,
@@ -507,12 +514,19 @@ impl Store {
         id: ChangesetId,
         request: &LandingRequest,
     ) -> Result<Evaluation> {
+        request
+            .declarations
+            .check()
+            .map_err(CoreError::Declarations)?;
         let txn = self.db.begin_read()?;
         let view = ReadTables {
             forks: txn.open_table(FORKS)?,
             revoked: txn.open_table(REVOKED)?,
         };
-        check_landing(&view, fork, writer, id)?;
+        if let Some(offset) = check_landing(&view, fork, writer, id)? {
+            // A landing request now would be a retry and answer this.
+            return Ok(self.journaled_landing(offset)?.gates);
+        }
         drop((view, txn));
         self.evaluate_at(fork, id, request, now_ms())
     }
@@ -553,7 +567,7 @@ impl Store {
         let history = main_history(&log, &txn.open_table(CHANGESETS)?, &trees, &loc.name)?;
 
         let policy = self.base_file(&base, POLICY_PATH)?;
-        let checks = self.base_file(&base, CHECKS_PATH)?.unwrap_or(None);
+        let checks = self.base_file(&base, CHECKS_PATH)?;
         let engine = Engine::compile(policy.as_ref().map(|b| b.as_deref()).map_err(Clone::clone));
         let read = |oid: GitOid| self.read_blob(oid).map_err(|e| e.to_string());
         Ok(engine.evaluate(&Input {
@@ -561,7 +575,7 @@ impl Store {
             base_oid: loc.main,
             log_len,
             at_ms,
-            checks: checks.as_deref(),
+            checks: checks.as_ref().map(|b| b.as_deref()).map_err(Clone::clone),
             changeset: &changeset,
             changeset_base: &changeset_base,
             read: &read,
@@ -1664,7 +1678,7 @@ mod tests {
             store.ingest_blob(oid, c.len() as u64, c).unwrap();
             Entry::File(oid)
         };
-        let policy = b"auto_merge:\n  gates:\n    governance:\n      paths: [GOV]\n      l3_max_per_window: 1\n      l3_window_seconds: 60\ncuenca:\n  gates:\n    max_file_bytes: 8\n";
+        let policy = b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, GOV]\ncuenca:\n  gates:\n    max_file_bytes: 8\n";
         let main = Tree::from_entries([
             (RepoPath::new(".control/policy.yaml").unwrap(), put(policy)),
             (RepoPath::new("GOV").unwrap(), put(b"0")),
@@ -1706,12 +1720,12 @@ mod tests {
                 .collect()
         };
         assert_eq!(fails(moved_at), ["governance_rate"]);
-        assert_eq!(fails(moved_at + 60_000), ["governance_rate"]);
-        assert!(fails(moved_at + 60_001).is_empty());
+        assert_eq!(fails(moved_at + 86_400_000), ["governance_rate"]);
+        assert!(fails(moved_at + 86_400_001).is_empty());
     }
 
-    /// A base whose policy is a symlink is not read through the link: the evaluation
-    /// fails on `policy`, and records no policy hash.
+    /// A base whose policy or check manifest is a symlink is not read through the link:
+    /// the evaluation fails on `policy` and `checks`, and records neither hash.
     #[test]
     fn a_symlinked_base_policy_is_a_policy_failure() {
         use crate::gates::{AuthorKind, LandingRequest};
@@ -1731,6 +1745,10 @@ mod tests {
                 RepoPath::new("real.yaml").unwrap(),
                 Entry::File(ingest(b"cuenca: {}\n")),
             ),
+            (
+                RepoPath::new(".cuenca/checks.toml").unwrap(),
+                Entry::Symlink(ingest(b"../real.toml")),
+            ),
         ])
         .unwrap();
         let (l, f) = ids();
@@ -1749,12 +1767,13 @@ mod tests {
             .evaluate_at(&f, id, &LandingRequest::new(AuthorKind::Agent), 0)
             .unwrap();
         assert_eq!(eval.policy.sha256, None);
+        assert_eq!(eval.checks.sha256, None);
         let failed: Vec<_> = eval
             .results
             .iter()
             .filter(|r| !r.passed())
             .map(|r| r.gate.as_str())
             .collect();
-        assert_eq!(failed, ["policy"]);
+        assert_eq!(failed, ["policy", "checks"]);
     }
 }

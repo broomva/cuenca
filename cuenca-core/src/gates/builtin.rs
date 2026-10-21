@@ -6,7 +6,7 @@
 //! | `secret_content` | file | a put's new content matches a secret pattern |
 //! | `file_size` | file | a put's new content is over the size limit |
 //! | `protected_path` | file | an author other than a human touches (puts or deletes) a protected path |
-//! | `governance_rate` | changeset | a change to governance paths would exceed the policy's rate |
+//! | `governance_rate` | changeset | a governance path changes while another change to one landed within the window (p9's one per window) |
 //! | `deletion` | changeset | a delete is not declared |
 //! | `revert` | changeset | a put restores content main held at that path before, undeclared |
 //! | `fast_forward` | ref | the changeset does not start from main as it is now |
@@ -71,23 +71,16 @@ pub(super) fn gates(policy: &Policy) -> Gates {
         )),
     ];
     let mut changeset: Vec<Box<dyn ChangesetGate>> = Vec::new();
-    if let Some(max) = policy.governance_max {
+    if let Some(gov) = &policy.governance {
         changeset.push(Box::new(GovernanceRate {
-            paths: policy
-                .governance_paths
-                .iter()
-                .map(|g| (g.clone(), glob(g)))
-                .collect(),
-            max,
-            window_ms: policy.governance_window_ms,
+            paths: gov.paths.iter().map(|g| (g.clone(), glob(g))).collect(),
+            // p9's L3 budget: one governance change per window, never more.
+            max: 1,
+            window_ms: gov.window_ms,
         }));
     }
-    if policy.declare_deletions {
-        changeset.push(Box::new(Deletion));
-    }
-    if policy.declare_reverts {
-        changeset.push(Box::new(Revert));
-    }
+    changeset.push(Box::new(Deletion));
+    changeset.push(Box::new(Revert));
     let mut reference: Vec<Box<dyn RefGate>> = vec![Box::new(FastForward)];
     if !policy.landing_windows.is_empty() {
         reference.push(Box::new(LandingWindow(policy.landing_windows.clone())));
@@ -116,8 +109,9 @@ impl FileGate for SecretPath {
         }
         self.0
             .iter()
-            .filter(|re| re.is_match(file.path.as_str()))
-            .map(|re| format!("the path matches the secret-file pattern {:?}", re.as_str()))
+            .enumerate()
+            .filter(|(_, re)| re.is_match(file.path.as_str()))
+            .map(|(i, _)| format!("the path matches secret-file pattern {i} (0 is the built-in)"))
             .collect()
     }
 }
@@ -127,6 +121,9 @@ struct SecretContent(Vec<(String, BytesRegex)>);
 impl FileGate for SecretContent {
     fn name(&self) -> &'static str {
         "secret_content"
+    }
+    fn by_content(&self) -> bool {
+        true
     }
     fn check(&self, _: &Context<'_>, file: &FileChange<'_>) -> Vec<String> {
         let Some(content) = new_content(file) else {
@@ -145,6 +142,9 @@ struct FileSize(u64);
 impl FileGate for FileSize {
     fn name(&self) -> &'static str {
         "file_size"
+    }
+    fn by_content(&self) -> bool {
+        true
     }
     fn check(&self, _: &Context<'_>, file: &FileChange<'_>) -> Vec<String> {
         match new_content(file) {

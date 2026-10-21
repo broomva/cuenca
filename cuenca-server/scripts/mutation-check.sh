@@ -76,8 +76,11 @@ mutate src/http.rs 'Some(l) if caller.sees_location(&l) => Ok(l),' 'Some(l) => O
 mutate src/http.rs '        visible_location(a, &c, &location)?;
 ' '' --test api
 mutate src/http.rs 'if !snapshot.fork(&name)?.is_some_and(|f| c.sees_fork(&f)) {' 'if false {' --test api
-mutate src/http.rs '        writable_fork(a, &c, &name)?;
-        let writer' '        let writer' --test api
+mutate src/http.rs '        let state = writable_fork(a, &c, &name)?;
+        a.check_puts' '        let state = a.store.fork(&name)?.ok_or_else(ApiError::not_found)?;
+        a.check_puts' --test api
+mutate src/http.rs '    writable_fork(a, c, name)?;
+    let writer' '    let writer' --test api
 # A draft names only blobs the caller reads or has sent: no laundering, no oracle.
 mutate src/authority.rs 'if !known {' 'if false {' --test api
 mutate src/authority.rs 'let head = if caller.sees_fork(fork) {' 'let head = if true {' --test api
@@ -123,9 +126,9 @@ mutate src/http.rs 'let offset = a.guarded(&c.key.principal, || {
 mutate src/http.rs 'let p = a.guarded(&c.key.principal, || {
             a.store.publish_draft(&name, &writer, &req.changeset)
         })?;' 'let p = a.store.publish_draft(&name, &writer, &req.changeset)?;' --test api
-mutate src/http.rs 'let offset = a.guarded(&c.key.principal, || {
-            a.store.record_landing_intent(&name, &writer, id)
-        })?;' 'let offset = a.store.record_landing_intent(&name, &writer, id)?;' --test api
+mutate src/http.rs 'let landed = a.guarded(&c.key.principal, || {
+            a.store.record_landing_intent(&name, &writer, id, &request)
+        })?;' 'let landed = a.store.record_landing_intent(&name, &writer, id, &request)?;' --test api
 mutate src/http.rs 'let info = a.guarded(&c.key.principal, || {
             let info = a.store.ingest_blob(oid, size, content)?;' 'let info = a.guarded(&cuenca_core::PrincipalName::new("unrevoked").unwrap(), || {
             let info = a.store.ingest_blob(oid, size, content)?;' --test api
@@ -133,7 +136,7 @@ mutate src/http.rs 'let info = a.guarded(&c.key.principal, || {
 # Gate engine (BRO-3313): each built-in gate fails what it should, the base policy
 # (never the candidate's) is the one compiled, main's history is read from the log, and
 # the author the gates see is the key's kind.
-mutate ../cuenca-core/src/gates/builtin.rs '.filter(|re| re.is_match(file.path.as_str()))' '.filter(|_| false)' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs '.filter(|(_, re)| re.is_match(file.path.as_str()))' '.filter(|_| false)' --test gate_log
 mutate ../cuenca-core/src/gates/builtin.rs '.filter(|(_, re)| re.is_match(content))' '.filter(|_| false)' --test gate_log
 mutate ../cuenca-core/src/gates/builtin.rs 'Some(before) if before.oid() == entry.oid() => None,' 'Some(_) if false => None,' --test gate_log
 mutate ../cuenca-core/src/gates/builtin.rs 'Some(c) if c.len() as u64 > self.0 =>' 'Some(c) if false && c.is_empty() =>' --test gate_log
@@ -154,5 +157,8 @@ mutate ../cuenca-core/src/store.rs '                for (path, entry) in load_tr
                 }' '' --test gate_log
 mutate src/http.rs 'PrincipalKind::OwnerDevice => AuthorKind::Human,' 'PrincipalKind::OwnerDevice => AuthorKind::Agent,' --test gate_log
 mutate src/http.rs '        let gates = a.store.evaluate_landing(&name, &writer, id, &request)?;' '        let gates = a.store.evaluate_landing(&name, &writer, id, &LandingRequest::new(AuthorKind::Agent))?;' --test gate_log
+
+# P20 r1 (A): after an intent, the dry run answers the journaled verdict.
+mutate ../cuenca-core/src/store.rs '            return Ok(self.journaled_landing(offset)?.gates);' '            let _ = offset;' --test gate_log
 
 exit $survived

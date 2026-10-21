@@ -29,11 +29,16 @@
 //! | POST | `/v1/forks/{fork}/drafts` | `{epoch, changeset}`: publish a draft |
 //! | POST | `/v1/forks/{fork}/landing` | `{epoch, changeset, declarations?}` (an id): ask to land; answers the gates' verdict, journaled with the intent |
 //! | POST | `/v1/forks/{fork}/landing/dry-run` | the same body: the verdict a landing request would get now, recording nothing |
+//! | PUT | `/v1/blobs/{oid}` | upload a blob; `Content-Length` is its size |
 //!
 //! The gates are log-only (spec section 4, phase 2): a failing verdict is recorded and
 //! refuses nothing. The author the gates see is the key's kind: an agent key is an
 //! agent, an owner device a human.
-//! | PUT | `/v1/blobs/{oid}` | upload a blob; `Content-Length` is its size |
+//!
+//! **One verdict per head.** A landing request for the changeset that already is the
+//! fork's latest intent is a retry: it records nothing and answers the journaled
+//! verdict (`fresh: false`), whatever declarations it brings and however main moved
+//! since. A dry run always judges now. To be judged again, publish a new draft.
 
 use std::net::SocketAddr;
 use std::sync::Arc;
@@ -177,7 +182,8 @@ impl From<CoreError> for ApiError {
             | CoreError::Tree(_)
             | CoreError::Changeset(_)
             | CoreError::BadRemote(_)
-            | CoreError::WrongLocation { .. } => (S::BAD_REQUEST, "invalid"),
+            | CoreError::WrongLocation { .. }
+            | CoreError::Declarations(_) => (S::BAD_REQUEST, "invalid"),
             CoreError::ReservedName(_) => (S::BAD_REQUEST, "reserved_name"),
             CoreError::Hash(_) | CoreError::OidMismatch { .. } => {
                 (S::UNPROCESSABLE_ENTITY, "bad_blob")
@@ -457,6 +463,23 @@ struct Landing {
     declarations: Declarations,
 }
 
+/// The writer and the request a landing or dry run is made as, once the fork is one a
+/// write by the caller reaches (otherwise 404).
+fn landing_request(
+    a: &Authority,
+    c: &Caller,
+    name: &ForkName,
+    req: Landing,
+) -> ApiResult<(Writer, LandingRequest)> {
+    writable_fork(a, c, name)?;
+    let writer = Writer::new(c.holder.clone(), req.epoch);
+    let request = LandingRequest {
+        author: author(c),
+        declarations: req.declarations,
+    };
+    Ok((writer, request))
+}
+
 /// The author the gates see: what the key says the caller is, never what it claims.
 fn author(c: &Caller) -> AuthorKind {
     match c.key.kind {
@@ -475,12 +498,7 @@ async fn landing(
     let req: Landing = json_body(&body)?;
     let id = parse(&req.changeset, ChangesetId::from_hex)?;
     blocking(&a, move |a| {
-        writable_fork(a, &c, &name)?;
-        let writer = Writer::new(c.holder.clone(), req.epoch);
-        let request = LandingRequest {
-            author: author(&c),
-            declarations: req.declarations,
-        };
+        let (writer, request) = landing_request(a, &c, &name, req)?;
         let landed = a.guarded(&c.key.principal, || {
             a.store.record_landing_intent(&name, &writer, id, &request)
         })?;
@@ -504,12 +522,7 @@ async fn landing_dry_run(
     let req: Landing = json_body(&body)?;
     let id = parse(&req.changeset, ChangesetId::from_hex)?;
     blocking(&a, move |a| {
-        writable_fork(a, &c, &name)?;
-        let writer = Writer::new(c.holder.clone(), req.epoch);
-        let request = LandingRequest {
-            author: author(&c),
-            declarations: req.declarations,
-        };
+        let (writer, request) = landing_request(a, &c, &name, req)?;
         let gates = a.store.evaluate_landing(&name, &writer, id, &request)?;
         Ok(Json(json!({ "gates": gates })))
     })

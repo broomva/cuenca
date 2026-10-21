@@ -77,6 +77,8 @@ pub enum CoreError {
     },
     #[error("remote {0:?} is not a plausible git remote")]
     BadRemote(String),
+    #[error("landing request: {0}")]
+    Declarations(String),
     #[error("main kept moving while the gates evaluated the landing request; try again")]
     MainMoved,
     #[error("log record {offset} is unreadable: {reason}")]

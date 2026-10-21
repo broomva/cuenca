@@ -37,7 +37,7 @@ auto_merge:
       action: auto
   gates:
     governance:
-      paths: [CLAUDE.md, AGENTS.md, .control/policy.yaml]
+      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml]
       l3_max_per_window: 1
       l3_window_seconds: 86400
 cuenca:
@@ -374,7 +374,8 @@ fn a_dry_run_answers_what_the_landing_request_journals_20_cases() {
     let days = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
     let closed = format!(
         "cuenca:\n  gates:\n    landing_windows:\n      - {{ days: [{}], from: \"00:00\", to: \"24:00\" }}\n",
-        days[((today + 1) % 7) as usize]
+        // Three days on, so the window stays closed if the test crosses midnight.
+        days[((today + 3) % 7) as usize]
     );
     bed.location(
         "l4",
@@ -717,4 +718,65 @@ fn only_the_holder_gets_a_verdict() {
         json!({ "epoch": 1, "changeset": id.to_hex(), "bypass": true }),
     );
     assert_eq!(r.status(), 400);
+}
+
+/// Declarations are journaled as asked, so they are bounded: too many, or one longer
+/// than a path can be, is refused before anything is recorded, on both routes.
+#[test]
+fn declarations_are_bounded() {
+    let bed = Bed::new();
+    let fork = bed.fork(&bed.a1, "l1");
+    let id = bed.publish(
+        &bed.a1,
+        &fork,
+        &bed.main("l1"),
+        vec![bed.put(&bed.a1, "README", b"v9\n")],
+    );
+    let len = bed.s.authority.store().len().unwrap();
+    let many: Vec<String> = (0..=cuenca_core::gates::MAX_DECLARATIONS)
+        .map(|i| format!("p{i}"))
+        .collect();
+    let long = vec!["x".repeat(cuenca_tree::MAX_PATH_BYTES + 1)];
+    bed.who(&bed.a1);
+    for declarations in [json!({ "deletes": many }), json!({ "reverts": long })] {
+        for path in ["landing", "landing/dry-run"] {
+            let r = bed.s.post(
+                &bed.a1,
+                &format!("/v1/forks/{fork}/{path}"),
+                json!({ "epoch": 1, "changeset": id.to_hex(), "declarations": declarations }),
+            );
+            assert_eq!(r.status(), 400, "{path}");
+        }
+    }
+    assert_eq!(bed.s.authority.store().len().unwrap(), len);
+    // At the limit, it is accepted.
+    let at: Vec<String> = (0..cuenca_core::gates::MAX_DECLARATIONS)
+        .map(|i| format!("p{i}"))
+        .collect();
+    let v = bed.request(&bed.a1, &fork, id, &json!({ "deletes": at }), false);
+    assert_eq!(v["fresh"], true);
+}
+
+/// Once a head has an intent, a dry run answers what a landing request would: the
+/// journaled verdict, even after main moved and with other declarations.
+#[test]
+fn after_an_intent_the_dry_run_answers_the_journaled_verdict() {
+    let bed = Bed::new();
+    let a1 = bed.a1.clone();
+    let fork = bed.fork(&a1, "l1");
+    let id = bed.publish(
+        &a1,
+        &fork,
+        &bed.main("l1"),
+        vec![Op::delete(RepoPath::new("old.txt").unwrap())],
+    );
+    let landed = bed.request(&a1, &fork, id, &json!({}), false)["gates"].clone();
+    assert_eq!(failing(&landed), set(&["deletion"]));
+    bed.advance(&a1, "l1", vec![bed.put(&a1, "README", b"moved\n")]);
+    let decl = json!({ "deletes": ["old.txt"] });
+    let dry = bed.request(&a1, &fork, id, &decl, true)["gates"].clone();
+    let retry = bed.request(&a1, &fork, id, &decl, false);
+    assert_eq!(retry["fresh"], false);
+    assert_eq!(dry, landed);
+    assert_eq!(retry["gates"], landed);
 }

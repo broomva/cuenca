@@ -11,10 +11,23 @@
 //! records the SHA-256 of that policy file and of the base's check manifest
 //! ([`CHECKS_PATH`]) next to the results.
 //!
+//! The change judged is the fork's head changeset, which is exactly what landing moves
+//! main by: main moves only by a changeset that starts from main
+//! ([`crate::Store::advance_main`]). A head on top of earlier drafts does not start from
+//! main, fails `fast_forward`, and cannot land as it is; earlier drafts are judged when
+//! they are squashed into a head that can.
+//!
 //! An evaluation is a pure function of its [`Input`]: the store
 //! ([`crate::Store::evaluate_landing`]) assembles the input from one consistent
 //! snapshot, so a dry run and a landing request against the same log state return the
 //! same results.
+//!
+//! What an evaluation costs is bounded by what the caller already sent: one read of
+//! each distinct blob the changeset puts (whatever number of paths name it), at most
+//! [`policy::MAX_POLICY_PATTERNS`] patterns over each new blob and each path, the
+//! declarations ([`MAX_DECLARATIONS`]), and one scan of the log for main's history.
+//! Rate, concurrency and deadlines are the authority's availability layer, which
+//! this node does not defend (BRO-3312), as `cuenca-server`'s crate docs state.
 //!
 //! Findings never carry content: a secret finding names the path and the pattern, not
 //! the bytes it matched, because the evaluation is readable by everyone who reads the
@@ -23,12 +36,18 @@
 mod builtin;
 mod policy;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use cuenca_tree::{Changeset, ContentHash, Entry, GitOid, Op, RepoPath, Tree};
 use serde::{Deserialize, Serialize};
 
 pub use policy::{CHECKS_PATH, MAX_POLICY_BYTES, POLICY_PATH, Policy};
+
+/// A landing request may declare at most this many paths, deletes and reverts
+/// together; each declaration is at most [`cuenca_tree::MAX_PATH_BYTES`] long. They
+/// are journaled with the request, so they are bounded like everything else the log
+/// keeps.
+pub const MAX_DECLARATIONS: usize = 4096;
 
 /// At most this many findings are kept per gate; the rest are counted in
 /// [`GateResult::more`], so one changeset cannot grow the log without bound.
@@ -41,6 +60,8 @@ pub const MAX_FINDINGS_PER_GATE: usize = 50;
 pub enum AuthorKind {
     Agent,
     Human,
+    /// A service principal (Maestro). No key yields one yet: it arrives with the shared
+    /// identity crate (BRO-3317).
     Service,
 }
 
@@ -54,6 +75,31 @@ pub struct Declarations {
     pub deletes: Vec<String>,
     #[serde(default)]
     pub reverts: Vec<String>,
+}
+
+impl Declarations {
+    /// Refuse declarations the log should not keep: too many, or one too long.
+    pub fn check(&self) -> std::result::Result<(), String> {
+        let count = self.deletes.len() + self.reverts.len();
+        if count > MAX_DECLARATIONS {
+            return Err(format!(
+                "{count} declarations, over the limit of {MAX_DECLARATIONS}"
+            ));
+        }
+        match self
+            .deletes
+            .iter()
+            .chain(&self.reverts)
+            .find(|d| d.len() > cuenca_tree::MAX_PATH_BYTES)
+        {
+            Some(d) => Err(format!(
+                "a declaration of {} bytes, over the {}-byte path limit",
+                d.len(),
+                cuenca_tree::MAX_PATH_BYTES
+            )),
+            None => Ok(()),
+        }
+    }
 }
 
 /// What a landing request brings besides the changeset.
@@ -77,7 +123,8 @@ impl LandingRequest {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum GateKind {
-    /// The policy itself: a base policy that cannot be read or compiled.
+    /// The base's own files: a policy or check manifest that cannot be read or
+    /// compiled.
     Policy,
     File,
     Changeset,
@@ -176,8 +223,9 @@ pub struct Input<'a> {
     pub base_oid: GitOid,
     pub log_len: u64,
     pub at_ms: u64,
-    /// The base's check manifest bytes, `None` when absent.
-    pub checks: Option<&'a [u8]>,
+    /// The base's check manifest bytes: `Ok(None)` when absent, `Err` when something
+    /// is there that is not a readable regular file (a failing `checks` result).
+    pub checks: std::result::Result<Option<&'a [u8]>, String>,
     pub changeset: &'a Changeset,
     /// The tree the changeset starts from (its own base, which may not be main).
     pub changeset_base: &'a Tree,
@@ -218,6 +266,12 @@ pub struct RefMove<'a> {
 pub trait FileGate: Send + Sync {
     fn name(&self) -> &'static str;
     fn check(&self, cx: &Context<'_>, file: &FileChange<'_>) -> Vec<String>;
+    /// True when the result depends only on the content and on whether the put
+    /// changes it, not on the path: the engine then checks each blob once, however
+    /// many paths name it.
+    fn by_content(&self) -> bool {
+        false
+    }
 }
 
 /// A gate on a whole changeset.
@@ -287,40 +341,65 @@ impl Engine {
                 }],
             ));
         }
+        if let Err(error) = &input.checks {
+            results.push(collect(
+                "checks",
+                GateKind::Policy,
+                vec![Finding {
+                    path: Some(CHECKS_PATH.to_string()),
+                    reason: error.clone(),
+                }],
+            ));
+        }
+        // Puts are grouped by blob, so each blob is read once and the content gates
+        // scan it at most twice (as new content, and as unchanged content), however
+        // many paths name it. Deletes need no content.
         let mut file_findings: Vec<Vec<Finding>> = self.file.iter().map(|_| Vec::new()).collect();
         let mut unread = Vec::new();
+        let mut by_blob: BTreeMap<GitOid, Vec<(&RepoPath, &Entry)>> = BTreeMap::new();
         for op in &input.changeset.ops {
-            let path = op.path();
-            let before = input.changeset_base.get(path.as_str());
-            let content;
-            let after = match op {
-                Op::Put { entry, .. } => match (input.read)(entry.oid()) {
-                    Ok(bytes) => {
-                        content = bytes;
-                        Some((entry, content.as_slice()))
-                    }
-                    Err(e) => {
-                        unread.push(Finding {
-                            path: Some(path.to_string()),
-                            reason: format!("the content could not be read: {e}"),
-                        });
-                        continue;
-                    }
-                },
-                _ => None,
-            };
-            let change = FileChange {
-                path,
-                before,
-                after,
-            };
-            for (gate, findings) in self.file.iter().zip(&mut file_findings) {
-                findings.extend(gate.check(&cx, &change).into_iter().map(|reason| Finding {
-                    path: Some(path.to_string()),
-                    reason,
-                }));
+            match op {
+                Op::Put { path, entry } => {
+                    by_blob.entry(entry.oid()).or_default().push((path, entry))
+                }
+                _ => {
+                    let path = op.path();
+                    let change = FileChange {
+                        path,
+                        before: input.changeset_base.get(path.as_str()),
+                        after: None,
+                    };
+                    self.check_file(&cx, &change, &mut file_findings, &mut Default::default());
+                }
             }
         }
+        for (oid, puts) in by_blob {
+            let content = match (input.read)(oid) {
+                Ok(bytes) => bytes,
+                Err(e) => {
+                    unread.extend(puts.iter().map(|(path, _)| Finding {
+                        path: Some(path.to_string()),
+                        reason: format!("the content could not be read: {e}"),
+                    }));
+                    continue;
+                }
+            };
+            // One cache per gate, per "the put changes the content" or not.
+            let mut cache = Default::default();
+            for (path, entry) in puts {
+                let change = FileChange {
+                    path,
+                    before: input.changeset_base.get(path.as_str()),
+                    after: Some((entry, content.as_slice())),
+                };
+                self.check_file(&cx, &change, &mut file_findings, &mut cache);
+            }
+        }
+        // Back in path order, as the changeset lists them.
+        for findings in &mut file_findings {
+            findings.sort_by(|a, b| a.path.cmp(&b.path));
+        }
+        unread.sort_by(|a, b| a.path.cmp(&b.path));
         if !unread.is_empty() {
             results.push(collect("content", GateKind::File, unread));
         }
@@ -350,9 +429,41 @@ impl Engine {
             author: input.request.author,
             declarations: input.request.declarations.clone(),
             policy: self.policy.clone(),
-            checks: base_file(CHECKS_PATH, input.checks),
+            checks: base_file(CHECKS_PATH, input.checks.clone().unwrap_or(None)),
             results,
             passed,
+        }
+    }
+}
+
+impl Engine {
+    /// Run every file gate on one path. `cache[changed]` holds, per gate, the reasons
+    /// a content-only gate gave for this blob already.
+    fn check_file(
+        &self,
+        cx: &Context<'_>,
+        change: &FileChange<'_>,
+        findings: &mut [Vec<Finding>],
+        cache: &mut [Vec<Option<Vec<String>>>; 2],
+    ) {
+        let changed = match (change.before, change.after) {
+            (Some(before), Some((entry, _))) => usize::from(before.oid() != entry.oid()),
+            _ => 1,
+        };
+        let memo = &mut cache[changed];
+        memo.resize(self.file.len(), None);
+        for (i, gate) in self.file.iter().enumerate() {
+            let reasons = if gate.by_content() && change.after.is_some() {
+                memo[i]
+                    .get_or_insert_with(|| gate.check(cx, change))
+                    .clone()
+            } else {
+                gate.check(cx, change)
+            };
+            findings[i].extend(reasons.into_iter().map(|reason| Finding {
+                path: Some(change.path.to_string()),
+                reason,
+            }));
         }
     }
 }
@@ -405,6 +516,56 @@ mod tests {
         for whole in ["/", "", ".", "./", "//"] {
             assert!(!covered("a", &d(&[whole])), "{whole:?}");
         }
+    }
+
+    /// Each blob is read once, and a content gate's finding still lands on every path
+    /// that names it, in path order.
+    #[test]
+    fn a_blob_named_by_many_paths_is_read_once() {
+        let secret = concat!("AKIA", "IOSFODNN7EXAMPLE").as_bytes().to_vec();
+        let plain = b"plain".to_vec();
+        let ops: Vec<Op> = ["z", "a", "m"]
+            .iter()
+            .map(|p| Op::put(RepoPath::new(*p).unwrap(), Entry::file(&secret)))
+            .chain([Op::put(RepoPath::new("q").unwrap(), Entry::file(&plain))])
+            .collect();
+        let base = Tree::new();
+        let changeset = Changeset::new(&base, ops).unwrap();
+        let reads = std::cell::RefCell::new(Vec::new());
+        let read = |oid: GitOid| {
+            reads.borrow_mut().push(oid);
+            Ok(if oid == GitOid::for_blob(&secret) {
+                secret.clone()
+            } else {
+                plain.clone()
+            })
+        };
+        let history = History::default();
+        let request = LandingRequest::new(AuthorKind::Agent);
+        let eval = Engine::compile(Ok(None)).evaluate(&Input {
+            base: &base,
+            base_oid: base.git_tree_id(),
+            log_len: 0,
+            at_ms: 0,
+            checks: Ok(None),
+            changeset: &changeset,
+            changeset_base: &base,
+            read: &read,
+            history: &history,
+            request: &request,
+        });
+        assert_eq!(reads.borrow().len(), 2, "one read per distinct blob");
+        let content = eval
+            .results
+            .iter()
+            .find(|r| r.gate == "secret_content")
+            .unwrap();
+        let paths: Vec<_> = content
+            .findings
+            .iter()
+            .map(|f| f.path.clone().unwrap())
+            .collect();
+        assert_eq!(paths, ["a", "m", "z"]);
     }
 
     #[test]

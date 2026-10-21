@@ -85,13 +85,9 @@ mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(*id) 
                     fork: from.to_string(),' --test store
 mutate src/state.rs 'if changeset.base != loc.main {' 'if false {' --test store
 mutate src/state.rs 'state.landing_intent
-                && last == *id' 'state.landing_intent
-                && false' --test store
-mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(*id) {
-                return Err(CoreError::NotHead {
-                    fork: name.to_string(),' 'if false {
-                return Err(CoreError::NotHead {
-                    fork: name.to_string(),' --test store
+        && last == id' 'state.landing_intent
+        && false' --test store
+mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(id) {' 'if false {' --test store
 # One writer per fork: holders, fencing epochs, takeover, sibling forks, revocation.
 mutate src/state.rs 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {
     not_revoked(view, &writer.holder.principal)?;' 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {' --test forks
@@ -115,8 +111,8 @@ mutate src/state.rs 'check_writer(view, &state, writer)?;
             return draft(view, offset, state, id, changeset);' --test forks
 mutate src/state.rs 'check_writer(view, &state, writer)?;
             return draft(view, offset, state, id, changeset);' 'return draft(view, offset, state, id, changeset);' --test forks
-mutate src/state.rs 'let mut state = fork(view, name)?;
-            check_writer(view, &state, writer)?;' 'let mut state = fork(view, name)?;' --test forks
+mutate src/state.rs '    let state = fork(view, name)?;
+    check_writer(view, &state, writer)?;' '    let state = fork(view, name)?;' --test forks
 mutate src/state.rs 'Ok(()) => {
                     return Err(CoreError::Inconsistent(format!(
                         "draft {id} is fenced from {name:?}, but its writer holds it"
@@ -171,7 +167,7 @@ mutate src/store.rs 'let locations: BTreeMap<String, Location> = txn
                 let l: Location = from_json(v.value())?;
                 Ok((l.name.to_string(), l))' --lib
 mutate src/store.rs 'if index != replayed {' 'if false {' --lib
-mutate src/store.rs '.map_or(0, |last| last + 1)' '.map_or(0, |last| last + 2)' --test store
+mutate src/store.rs 'offset = last_offset(&log)?.map_or(0, |last| last + 1);' 'offset = last_offset(&log)?.map_or(0, |last| last + 2);' --test store
 # Trees are rebuilt and checked against their id.
 mutate src/store.rs 'if tree.git_tree_id() != root {' 'if false {' --lib
 # Names and remotes.
@@ -207,5 +203,21 @@ mutate src/gates/policy.rs '            Ok((Event::Alias(_), mark)) => {' '     
 mutate src/gates/policy.rs 'if bytes.len() > MAX_POLICY_BYTES {' 'if false {' --lib
 mutate src/gates/policy.rs '                    _ => return Err(format!("cuenca.gates: unknown key {key:?}")),' '                    _ => {}' --lib
 mutate src/store.rs '            Some(Entry::Symlink(_)) => return Ok(Err(format!("{path} is a symlink"))),' '' --lib
+
+# Gate engine floors (P20 r1, C): p9's governance tier and the size limit cannot be loosened; an unreadable check manifest fails.
+mutate src/gates/policy.rs '            if !missing.is_empty() {' '            if false {' --lib
+mutate src/gates/policy.rs ')? && max != 1' ')? && false' --lib
+mutate src/gates/policy.rs '    if !(lo..=hi).contains(&window) {' '    if false {' --lib
+mutate src/gates/policy.rs '        None => GOVERNANCE_PATHS.iter().map(|p| p.to_string()).collect(),' '        None => Vec::new(),' --lib
+mutate src/gates/policy.rs '    if gates.is_badvalue() {
+        return Ok(None);
+    }' '    if gates.as_hash().is_none() {
+        return Ok(None);
+    }' --lib
+mutate src/gates/policy.rs '            if max > DEFAULT_MAX_FILE_BYTES {' '            if false {' --lib
+mutate src/gates/mod.rs '        if let Err(error) = &input.checks {' '        if let Err(error) = &Ok::<(), String>(()) {' --lib
+
+# P20 r1 (A): the pattern count is capped.
+mutate src/gates/policy.rs '        if patterns > MAX_POLICY_PATTERNS {' '        if false {' --lib
 
 exit $survived

@@ -8,15 +8,27 @@
 //! | `gates.hard[id: G4].pattern` | `secret_path` (added to the built-in pattern) |
 //! | `auto_merge.rules[action: require_human].path_touched` | `protected_path` |
 //! | `auto_merge.gates.governance.{paths, l3_max_per_window, l3_window_seconds}` | `governance_rate` |
-//! | `cuenca.gates.max_file_bytes` | `file_size` |
+//! | `cuenca.gates.max_file_bytes` | `file_size` (may only lower the built-in limit) |
 //! | `cuenca.gates.secret_paths`, `cuenca.gates.secret_patterns` | `secret_path`, `secret_content` (added to the built-ins) |
-//! | `cuenca.gates.declare_deletions`, `cuenca.gates.declare_reverts` | `deletion`, `revert` (both on by default) |
 //! | `cuenca.gates.landing_windows` | `landing_window` |
 //!
+//! `deletion`, `revert` and `fast_forward` always run: the Deletion Gate has no off
+//! switch.
+//!
+//! **Floors, not defaults.** A base policy can tighten a gate but never loosen one past
+//! what the rest of the workspace enforces. The governance tier follows p9 exactly
+//! (`p9.py`, `GovernanceTier`): once a policy has `auto_merge.gates`, the tier applies,
+//! with p9's five L3 paths as a floor (a policy may add paths, never drop one; compared
+//! case-folded), `l3_max_per_window` exactly 1, and `l3_window_seconds` between one
+//! day and 30 days. A value p9 would refuse is a compile error here too, never a looser
+//! gate. A location whose policy has no `auto_merge.gates` (any directory tree, not a
+//! workspace) has no governance tier, as under p9.
+//!
 //! Every other key is ignored, so the rest of the policy can change freely. Under
-//! `cuenca.gates` an unknown key is an error, so a misspelt setting is not silently
-//! dropped. A policy that cannot be compiled is reported as a failing `policy` result
-//! and the built-in defaults run instead; it never makes the gates pass.
+//! `cuenca.gates` and `auto_merge.gates.governance` an unknown key is an error, so a
+//! misspelt setting is not silently dropped. A policy that cannot be compiled is
+//! reported as a failing `policy` result and the built-in defaults run instead; it
+//! never makes the gates pass.
 //!
 //! The file must be UTF-8, at most [`MAX_POLICY_BYTES`], and must not use YAML aliases:
 //! the loader copies an aliased node at every use, so a few lines of aliases could
@@ -40,6 +52,19 @@ pub const DEFAULT_MAX_FILE_BYTES: u64 = 10 << 20;
 /// The built-in secret-file pattern: the workspace's G4.
 pub const DEFAULT_SECRET_PATH: &str =
     r"\.(env|env\.local|credentials\.json|service-account\.json)$";
+/// p9's L3 governance paths: a policy may add to them, never drop one.
+pub const GOVERNANCE_PATHS: [&str; 5] = [
+    "CLAUDE.md",
+    "AGENTS.md",
+    "METALAYER.md",
+    ".control/policy.yaml",
+    ".control/rcs-parameters.toml",
+];
+/// p9's bounds on the governance window, in seconds: one day to 30 days.
+pub const GOVERNANCE_WINDOW_SECONDS: (u64, u64) = (86_400, 30 * 86_400);
+/// At most this many secret patterns (paths and content, built-ins included): each runs
+/// on every path or every new blob.
+pub const MAX_POLICY_PATTERNS: usize = 64;
 /// A compiled regex may take at most this much memory.
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
@@ -55,6 +80,13 @@ pub struct Window {
     pub utc_offset: i16,
 }
 
+/// p9's governance tier as the gates read it: one change to `paths` per window.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Governance {
+    pub paths: Vec<String>,
+    pub window_ms: u64,
+}
+
 /// The settings compiled from one policy file.
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -63,12 +95,9 @@ pub struct Policy {
     pub secret_patterns: Vec<(String, BytesRegex)>,
     pub max_file_bytes: u64,
     pub protected: Vec<String>,
-    pub governance_paths: Vec<String>,
-    /// At most this many changes to governance paths per window; `None`: no limit.
-    pub governance_max: Option<u64>,
-    pub governance_window_ms: u64,
-    pub declare_deletions: bool,
-    pub declare_reverts: bool,
+    /// The governance tier: at most one change to these paths per window. `None` when
+    /// the policy has no `auto_merge.gates`.
+    pub governance: Option<Governance>,
     /// Landing is allowed only inside one of these; empty: always.
     pub landing_windows: Vec<Window>,
 }
@@ -80,11 +109,7 @@ impl Default for Policy {
             secret_patterns: Vec::new(),
             max_file_bytes: DEFAULT_MAX_FILE_BYTES,
             protected: Vec::new(),
-            governance_paths: Vec::new(),
-            governance_max: None,
-            governance_window_ms: 86_400_000,
-            declare_deletions: true,
-            declare_reverts: true,
+            governance: None,
             landing_windows: Vec::new(),
         }
     }
@@ -125,7 +150,8 @@ impl Policy {
                     && let Some(pattern) = string(&gate["pattern"], "gates.hard[G4].pattern")?
                 {
                     policy.secret_paths.push(
-                        compile(&pattern).map_err(|e| format!("gates.hard[G4].pattern: {e}"))?,
+                        compile(&pattern)
+                            .map_err(|e| not_compiled("gates.hard[G4].pattern", &e))?,
                     );
                 }
             }
@@ -146,26 +172,7 @@ impl Policy {
             }
         }
 
-        // auto_merge.gates.governance
-        let gov = &root["auto_merge"]["gates"]["governance"];
-        if let Some(paths) = strings(&gov["paths"], "auto_merge.gates.governance.paths")? {
-            policy.governance_paths = paths;
-        }
-        if let Some(max) = int(
-            &gov["l3_max_per_window"],
-            "auto_merge.gates.governance.l3_max_per_window",
-        )? {
-            policy.governance_max = Some(max);
-        }
-        if let Some(window) = int(
-            &gov["l3_window_seconds"],
-            "auto_merge.gates.governance.l3_window_seconds",
-        )? {
-            if window == 0 {
-                return Err("auto_merge.gates.governance.l3_window_seconds is 0".into());
-            }
-            policy.governance_window_ms = window.saturating_mul(1000);
-        }
+        policy.governance = governance(&root["auto_merge"]["gates"])?;
 
         // cuenca.gates
         let section = &root["cuenca"]["gates"];
@@ -175,8 +182,6 @@ impl Policy {
                     "max_file_bytes",
                     "secret_paths",
                     "secret_patterns",
-                    "declare_deletions",
-                    "declare_reverts",
                     "landing_windows",
                 ];
                 match key.as_str() {
@@ -188,34 +193,31 @@ impl Policy {
             return Err("cuenca.gates is not a mapping".into());
         }
         if let Some(max) = int(&section["max_file_bytes"], "cuenca.gates.max_file_bytes")? {
+            if max > DEFAULT_MAX_FILE_BYTES {
+                return Err(format!(
+                    "cuenca.gates.max_file_bytes is {max}: a policy may lower the \
+                     {DEFAULT_MAX_FILE_BYTES}-byte limit, not raise it"
+                ));
+            }
             policy.max_file_bytes = max;
         }
         if let Some(paths) = strings(&section["secret_paths"], "cuenca.gates.secret_paths")? {
             for p in paths {
-                policy
-                    .secret_paths
-                    .push(compile(&p).map_err(|e| format!("cuenca.gates.secret_paths: {e}"))?);
+                policy.secret_paths.push(
+                    compile(&p).map_err(|e| not_compiled("cuenca.gates.secret_paths[]", &e))?,
+                );
             }
         }
         if let Some(patterns) =
             strings(&section["secret_patterns"], "cuenca.gates.secret_patterns")?
         {
             for (i, p) in patterns.into_iter().enumerate() {
-                let re =
-                    compile_bytes(&p).map_err(|e| format!("cuenca.gates.secret_patterns: {e}"))?;
+                let re = compile_bytes(&p)
+                    .map_err(|e| not_compiled("cuenca.gates.secret_patterns[]", &e))?;
                 policy
                     .secret_patterns
                     .push((format!("policy pattern {}", i + 1), re));
             }
-        }
-        if let Some(on) = boolean(
-            &section["declare_deletions"],
-            "cuenca.gates.declare_deletions",
-        )? {
-            policy.declare_deletions = on;
-        }
-        if let Some(on) = boolean(&section["declare_reverts"], "cuenca.gates.declare_reverts")? {
-            policy.declare_reverts = on;
         }
         if let Some(windows) = list(&section["landing_windows"], "cuenca.gates.landing_windows")? {
             if windows.is_empty() {
@@ -227,8 +229,82 @@ impl Policy {
                 policy.landing_windows.push(window(w)?);
             }
         }
+        let patterns = policy.secret_paths.len() + policy.secret_patterns.len();
+        if patterns > MAX_POLICY_PATTERNS {
+            return Err(format!(
+                "{patterns} secret patterns, over the limit of {MAX_POLICY_PATTERNS}"
+            ));
+        }
         Ok(policy)
     }
+}
+
+/// The governance tier from `auto_merge.gates`, with p9's defaults and floors.
+fn governance(gates: &Yaml) -> Res<Option<Governance>> {
+    const KEY: &str = "auto_merge.gates.governance";
+    if gates.is_badvalue() {
+        return Ok(None);
+    }
+    if !gates.is_null() && gates.as_hash().is_none() {
+        return Err("auto_merge.gates is not a mapping".into());
+    }
+    let gov = &gates["governance"];
+    if let Some(map) = gov.as_hash() {
+        for key in map.keys() {
+            let known = [
+                "paths",
+                "required_strata",
+                "required_checks",
+                "l3_max_per_window",
+                "l3_window_seconds",
+            ];
+            match key.as_str() {
+                Some(k) if known.contains(&k) => {}
+                _ => return Err(format!("{KEY}: unknown key {key:?}")),
+            }
+        }
+    } else if !absent(gov) {
+        return Err(format!("{KEY} is not a mapping"));
+    }
+    let paths = match strings(&gov["paths"], &format!("{KEY}.paths"))? {
+        None => GOVERNANCE_PATHS.iter().map(|p| p.to_string()).collect(),
+        Some(paths) => {
+            let have: Vec<String> = paths.iter().map(|p| p.to_lowercase()).collect();
+            let missing: Vec<&str> = GOVERNANCE_PATHS
+                .iter()
+                .copied()
+                .filter(|p| !have.contains(&p.to_lowercase()))
+                .collect();
+            if !missing.is_empty() {
+                return Err(format!(
+                    "{KEY}.paths may add paths but not drop the L3 set; missing {missing:?}"
+                ));
+            }
+            paths
+        }
+    };
+    if let Some(max) = int(
+        &gov["l3_max_per_window"],
+        &format!("{KEY}.l3_max_per_window"),
+    )? && max != 1
+    {
+        return Err(format!("{KEY}.l3_max_per_window is {max}; it must be 1"));
+    }
+    let (lo, hi) = GOVERNANCE_WINDOW_SECONDS;
+    let window = int(
+        &gov["l3_window_seconds"],
+        &format!("{KEY}.l3_window_seconds"),
+    )?
+    .unwrap_or(lo);
+    if !(lo..=hi).contains(&window) {
+        return Err(format!(
+            "{KEY}.l3_window_seconds is {window}; it must be between {lo} and {hi}"
+        ));
+    }
+    Ok(Some(Governance {
+        paths,
+        window_ms: window * 1000,
+    }))
 }
 
 fn refuse_aliases(text: &str) -> Res<()> {
@@ -245,6 +321,17 @@ fn refuse_aliases(text: &str) -> Res<()> {
             Ok(_) => {}
             Err(e) => return Err(format!("{POLICY_PATH} is not valid YAML: {e}")),
         }
+    }
+}
+
+/// A pattern that does not compile, named by its key and never quoted: a pattern can
+/// be a secret's own prefix, and errors are journaled where fork readers see them.
+fn not_compiled(key: &str, e: &regex::Error) -> String {
+    match e {
+        regex::Error::CompiledTooBig(limit) => {
+            format!("{key}: a pattern compiles over the {limit}-byte limit")
+        }
+        _ => format!("{key}: a pattern is not a valid regular expression"),
     }
 }
 
@@ -305,15 +392,6 @@ fn int(y: &Yaml, key: &str) -> Res<Option<u64>> {
         Some(n) if n >= 0 => Ok(Some(n as u64)),
         _ => Err(format!("{key} is not a non-negative integer")),
     }
-}
-
-fn boolean(y: &Yaml, key: &str) -> Res<Option<bool>> {
-    if absent(y) {
-        return Ok(None);
-    }
-    y.as_bool()
-        .map(Some)
-        .ok_or_else(|| format!("{key} is not true or false"))
 }
 
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
@@ -396,7 +474,7 @@ mod tests {
     fn an_absent_or_empty_policy_is_the_defaults() {
         let p = Policy::parse(b"").unwrap();
         assert_eq!(p.secret_paths.len(), 1);
-        assert!(p.protected.is_empty() && p.declare_deletions && p.declare_reverts);
+        assert!(p.protected.is_empty() && p.governance.is_none());
         assert_eq!(p.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
     }
 
@@ -418,13 +496,12 @@ auto_merge:
       action: auto
   gates:
     governance:
-      paths: [CLAUDE.md, AGENTS.md]
+      paths: [claude.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, docs/ADR*]
       l3_max_per_window: 1
-      l3_window_seconds: 3600
+      l3_window_seconds: 172800
 cuenca:
   gates:
     max_file_bytes: 100
-    declare_reverts: false
     landing_windows:
       - { days: [mon, fri], from: "09:00", to: "17:30", utc_offset: "-05:00" }
 "#,
@@ -434,11 +511,10 @@ cuenca:
         assert_eq!(p.secret_paths.len(), 2);
         assert!(p.secret_paths[1].is_match("key.pem"));
         assert_eq!(p.protected, [".control/policy.yaml"]);
-        assert_eq!(p.governance_paths, ["CLAUDE.md", "AGENTS.md"]);
-        assert_eq!(p.governance_max, Some(1));
-        assert_eq!(p.governance_window_ms, 3_600_000);
+        let gov = p.governance.unwrap();
+        assert_eq!(gov.paths.len(), 6);
+        assert_eq!(gov.window_ms, 172_800_000);
         assert_eq!(p.max_file_bytes, 100);
-        assert!(p.declare_deletions && !p.declare_reverts);
         assert_eq!(
             p.landing_windows,
             [Window {
@@ -464,10 +540,73 @@ cuenca:
             b"auto_merge:\n  rules:\n    - path_touched: ''\n      action: require_human\n",
             b"\xff\xfe",
             b"a: 1\n---\nb: 2\n",
+            // p9's floors: no looser governance tier, no larger file limit, no
+            // switching the Deletion Gate off.
+            b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md]\n",
+            b"auto_merge:\n  gates:\n    governance:\n      l3_max_per_window: 2\n",
+            b"auto_merge:\n  gates:\n    governance:\n      l3_max_per_window: 0\n",
+            b"auto_merge:\n  gates:\n    governance:\n      l3_window_seconds: 86399\n",
+            b"auto_merge:\n  gates:\n    governance:\n      l3_window_seconds: 2592001\n",
+            b"auto_merge:\n  gates:\n    governance:\n      l3_max: 1\n",
+            b"auto_merge:\n  gates: [1]\n",
+            b"cuenca:\n  gates:\n    max_file_bytes: 10485761\n",
+            b"cuenca:\n  gates:\n    declare_deletions: false\n",
         ] {
             assert!(Policy::parse(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
         }
         assert!(Policy::parse(&vec![b' '; MAX_POLICY_BYTES + 1]).is_err());
+    }
+
+    /// Once a policy has `auto_merge.gates`, the governance tier applies with p9's
+    /// defaults; without it, there is none. The limits at p9's edges compile.
+    #[test]
+    fn the_governance_tier_has_p9s_defaults_and_edges() {
+        for text in [
+            &b"auto_merge:\n  gates: {}\n"[..],
+            b"auto_merge:\n  gates:\n    governance:\n",
+        ] {
+            let gov = Policy::parse(text).unwrap().governance.unwrap();
+            assert_eq!(gov.paths, GOVERNANCE_PATHS);
+            assert_eq!(gov.window_ms, 86_400_000);
+        }
+        assert!(
+            Policy::parse(b"auto_merge:\n  rules: []\n")
+                .unwrap()
+                .governance
+                .is_none()
+        );
+        let max = Policy::parse(b"auto_merge:\n  gates:\n    governance:\n      l3_window_seconds: 2592000\n      l3_max_per_window: 1\n")
+            .unwrap();
+        assert_eq!(max.governance.unwrap().window_ms, 2_592_000_000);
+        let at = Policy::parse(b"cuenca:\n  gates:\n    max_file_bytes: 10485760\n").unwrap();
+        assert_eq!(at.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
+    }
+
+    /// A pattern is never quoted back, and the number of patterns is capped.
+    #[test]
+    fn patterns_are_capped_and_never_quoted() {
+        let secretish = "PRODUCTION_SECRET_VALUE(";
+        for key in ["secret_paths", "secret_patterns"] {
+            let text = format!("cuenca:\n  gates:\n    {key}: [\"{secretish}\"]\n");
+            let e = Policy::parse(text.as_bytes()).unwrap_err();
+            assert!(!e.contains("PRODUCTION"), "{e}");
+        }
+        let g4 = format!("gates:\n  hard:\n    - id: G4\n      pattern: \"{secretish}\"\n");
+        assert!(
+            !Policy::parse(g4.as_bytes())
+                .unwrap_err()
+                .contains("PRODUCTION")
+        );
+        let many = |n: usize| {
+            let list: Vec<String> = (0..n).map(|i| format!("\"p{i}\"")).collect();
+            format!(
+                "cuenca:\n  gates:\n    secret_patterns: [{}]\n",
+                list.join(", ")
+            )
+        };
+        // The built-in path pattern counts: 63 more fit, 64 do not.
+        assert!(Policy::parse(many(MAX_POLICY_PATTERNS - 1).as_bytes()).is_ok());
+        assert!(Policy::parse(many(MAX_POLICY_PATTERNS).as_bytes()).is_err());
     }
 
     #[test]
