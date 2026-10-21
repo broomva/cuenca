@@ -1,0 +1,37 @@
+# Cuenca, the agent-native change plane. Moved out of broomva/life (crates/cuenca) on 2026-10-21
+# by owner decision (BRO-3333); `git log --follow` keeps each crate's history.
+[workspace]
+resolver = "3"
+members = ["cuenca-*"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.93"
+license = "MIT"
+authors = ["Carlos Escobar (BroomVA)"]
+repository = "https://github.com/broomva/cuenca"
+keywords = ["agents", "git", "fork", "vcs", "mcp"]
+categories = ["development-tools", "command-line-utilities"]
+
+# Versions as they were in broomva/life's workspace when the crates moved, so the lockfile carries over.
+[workspace.dependencies]
+anyhow = "1"
+axum = { version = "0.8", features = ["macros"] }
+clap = { version = "4", features = ["derive", "env"] }
+futures-util = "0.3"
+hex = "0.4"
+rand = "0.8"
+redb = "2"
+reqwest = { version = "0.12", features = ["json", "stream", "blocking"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha2 = "0.10"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal", "sync", "time", "fs"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+
+[profile.dev]
+split-debuginfo = "unpacked"

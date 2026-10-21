@@ -641,7 +641,9 @@ fn a_partial_clone_is_not_fetched_from_or_written_into() {
 }
 
 /// The repository this crate is checked out in: its HEAD tree, read through the bridge,
-/// must hash to the id git holds. It has executables and symlinks across many levels.
+/// must hash to the id git holds. It spans several levels and holds executables (the
+/// mutation scripts). Symlinks are covered by the round-trip matrix, not here: since the
+/// move to broomva/cuenca (BRO-3333) this repository holds none.
 #[test]
 fn this_repository_head_round_trips() {
     let here = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -650,10 +652,19 @@ fn this_repository_head_round_trips() {
     let expected = repo.resolve_tree("HEAD").unwrap();
     let tree = repo.read_tree("HEAD").unwrap();
     assert_eq!(tree.git_tree_id(), expected);
+    // A real checkout, not an empty or truncated read: this crate's own files are in it,
+    // the mutation script with its executable mode.
     assert!(
-        tree.len() > 100,
-        "expected a real tree, got {} entries",
+        matches!(tree.get("cuenca-tree/src/tree.rs"), Some(Entry::File(_))),
+        "expected this crate's sources in HEAD, got {} entries",
         tree.len()
+    );
+    assert!(
+        matches!(
+            tree.get("cuenca-tree/scripts/mutation-check.sh"),
+            Some(Entry::Executable(_))
+        ),
+        "expected the mutation script as an executable"
     );
 }
 

@@ -1,0 +1,4 @@
+# Same pin as broomva/life when the crates moved (BRO-2814 there): a toolchain bump is a reviewed edit, not drift.
+[toolchain]
+channel = "1.99.0"
+components = ["rustfmt", "clippy"]
