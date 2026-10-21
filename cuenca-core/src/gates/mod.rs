@@ -24,7 +24,8 @@
 //!
 //! What an evaluation costs is bounded by what the caller already sent: one read of
 //! each distinct blob the changeset puts (whatever number of paths name it), at most
-//! [`policy::MAX_POLICY_PATTERNS`] patterns over each new blob and each path, the
+//! [`policy::MAX_POLICY_PATTERNS`] patterns over each new blob and each path and
+//! [`policy::MAX_POLICY_RULES`] protected and governance rules over each path, the
 //! declarations ([`MAX_DECLARATIONS`]), and one scan of the log for main's history.
 //! Rate, concurrency and deadlines are the authority's availability layer, which
 //! this node does not defend (BRO-3312), as `cuenca-server`'s crate docs state.
@@ -240,8 +241,6 @@ pub struct Input<'a> {
     /// is there that is not a readable regular file (a failing `checks` result).
     pub checks: std::result::Result<Option<&'a [u8]>, String>,
     pub changeset: &'a Changeset,
-    /// The tree the changeset starts from (its own base, which may not be main).
-    pub changeset_base: &'a Tree,
     /// Reads a blob a put names. Called once per put, so a large changeset is never
     /// held in memory whole.
     pub read: &'a dyn Fn(GitOid) -> std::result::Result<Vec<u8>, String>,
@@ -590,7 +589,6 @@ mod tests {
             at_ms: 0,
             checks: Ok(None),
             changeset: &changeset,
-            changeset_base: &base,
             read: &read,
             history: &history,
             request: &request,
@@ -607,6 +605,45 @@ mod tests {
             .map(|f| f.path.clone().unwrap())
             .collect();
         assert_eq!(paths, ["a", "m", "z"]);
+    }
+
+    /// One blob, named at a path main already holds it (a mode-only change) and at a
+    /// new path: only the new path brings new content, and it is still scanned.
+    #[test]
+    fn a_held_blob_put_at_a_new_path_is_still_new_content() {
+        let secret = concat!("AKIA", "IOSFODNN7EXAMPLE").as_bytes().to_vec();
+        let base =
+            Tree::from_entries([(RepoPath::new("a").unwrap(), Entry::file(&secret))]).unwrap();
+        let ops = vec![
+            Op::put(RepoPath::new("a").unwrap(), Entry::executable(&secret)),
+            Op::put(RepoPath::new("b").unwrap(), Entry::file(&secret)),
+        ];
+        let changeset = Changeset::new(&base, ops).unwrap();
+        let read = |_| Ok(secret.clone());
+        let history = History::default();
+        let request = LandingRequest::new(AuthorKind::Agent);
+        let eval = Engine::compile(Ok(None)).evaluate(&Input {
+            base: &base,
+            base_oid: base.git_tree_id(),
+            log_len: 0,
+            at_ms: 0,
+            checks: Ok(None),
+            changeset: &changeset,
+            read: &read,
+            history: &history,
+            request: &request,
+        });
+        let content = eval
+            .results
+            .iter()
+            .find(|r| r.gate == "secret_content")
+            .unwrap();
+        let paths: Vec<_> = content
+            .findings
+            .iter()
+            .map(|f| f.path.clone().unwrap())
+            .collect();
+        assert_eq!(paths, ["b"]);
     }
 
     #[test]

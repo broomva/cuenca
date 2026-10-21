@@ -38,7 +38,7 @@
 //! **One verdict per head.** A landing request for the changeset that already is the
 //! fork's latest intent is a retry: it records nothing and answers the journaled
 //! verdict (`fresh: false`), whatever declarations it brings and however main moved
-//! since. A dry run always judges now. To be judged again, publish a new draft.
+//! since, and a dry run answers the same. Judging a head again is BRO-3348.
 
 use std::net::SocketAddr;
 use std::sync::Arc;

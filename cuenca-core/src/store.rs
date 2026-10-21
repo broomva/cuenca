@@ -506,7 +506,7 @@ impl Store {
     /// recorded. Against the same log state it answers exactly what
     /// [`Store::record_landing_intent`] would: a fresh verdict, or, when `id` already
     /// is the fork's latest intent, the journaled one (a landing request would be a
-    /// retry). One verdict per head: to be judged again, publish a new draft.
+    /// retry). One verdict per head; judging a head again is BRO-3348.
     pub fn evaluate_landing(
         &self,
         fork: &ForkName,
@@ -562,7 +562,6 @@ impl Store {
         let changeset = indexed_changeset(&txn.open_table(CHANGESETS)?, &log, id)?
             .ok_or_else(|| CoreError::UnknownChangeset(id.to_hex()))?;
         let base = load_tree(&trees, loc.main)?;
-        let changeset_base = load_tree(&trees, changeset.base)?;
         let log_len = last_offset(&log)?.map_or(0, |last| last + 1);
         let history = main_history(&log, &txn.open_table(CHANGESETS)?, &trees, &loc.name)?;
 
@@ -577,7 +576,6 @@ impl Store {
             at_ms,
             checks: checks.as_ref().map(|b| b.as_deref()).map_err(Clone::clone),
             changeset: &changeset,
-            changeset_base: &changeset_base,
             read: &read,
             history: &history,
             request,

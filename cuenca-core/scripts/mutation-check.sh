@@ -225,4 +225,8 @@ mutate src/gates/builtin.rs '*at >= since && self.touches(paths.iter().map(|p| p
 mutate src/gates/mod.rs '.any(|(i, _)| self.dirs.contains(&path[..=i]))' '.any(|_| false)' --lib
 mutate src/gates/policy.rs 'r"(?i)\.(env' 'r"\.(env' --lib
 
+# P20 r2 (C): the per-blob cache is keyed by whether the put changes main's content; rules are capped.
+mutate src/gates/mod.rs '(Some(before), Some((entry, _))) => usize::from(before.oid() != entry.oid()),' '(Some(_), Some(_)) => 1,' --lib
+mutate src/gates/policy.rs '        if rules > MAX_POLICY_RULES {' '        if false {' --lib
+
 exit $survived

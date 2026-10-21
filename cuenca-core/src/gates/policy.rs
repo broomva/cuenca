@@ -20,8 +20,9 @@
 //! (`p9.py`, `GovernanceTier`): once a policy has `auto_merge.gates`, the tier applies,
 //! with p9's five L3 paths as a floor (a policy may add paths, never drop one; compared
 //! case-folded), `l3_max_per_window` exactly 1, and `l3_window_seconds` between one
-//! day and 30 days. A value p9 would refuse is a compile error here too, never a looser
-//! gate. A location whose policy has no `auto_merge.gates` (any directory tree, not a
+//! day and 30 days. A value of these keys that p9 would refuse is a compile error here
+//! too, never a looser gate. p9's other keys (`required_strata`, `required_checks`,
+//! `p20`, `review_bots`) feed no gate here; they are p9's to validate. A location whose policy has no `auto_merge.gates` (any directory tree, not a
 //! workspace) has no governance tier, as under p9.
 //!
 //! Every other key is ignored, so the rest of the policy can change freely. Under
@@ -66,6 +67,9 @@ pub const GOVERNANCE_WINDOW_SECONDS: (u64, u64) = (86_400, 30 * 86_400);
 /// At most this many secret patterns (paths and content, built-ins included): each runs
 /// on every path or every new blob.
 pub const MAX_POLICY_PATTERNS: usize = 64;
+/// At most this many protected rules and governance paths together: each is matched
+/// against every path a changeset touches. The workspace's policy has 38.
+pub const MAX_POLICY_RULES: usize = 256;
 /// A compiled regex may take at most this much memory.
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
@@ -234,6 +238,13 @@ impl Policy {
         if patterns > MAX_POLICY_PATTERNS {
             return Err(format!(
                 "{patterns} secret patterns, over the limit of {MAX_POLICY_PATTERNS}"
+            ));
+        }
+        let rules =
+            policy.protected.len() + policy.governance.as_ref().map_or(0, |g| g.paths.len());
+        if rules > MAX_POLICY_RULES {
+            return Err(format!(
+                "{rules} protected and governance paths, over the limit of {MAX_POLICY_RULES}"
             ));
         }
         Ok(policy)
@@ -606,6 +617,15 @@ cuenca:
                 list.join(", ")
             )
         };
+        let rules = |n: usize| {
+            let list: Vec<String> = (0..n).map(|i| format!("\"r{i}\"")).collect();
+            format!(
+                "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, {}]\n",
+                list.join(", ")
+            )
+        };
+        assert!(Policy::parse(rules(MAX_POLICY_RULES - 5).as_bytes()).is_ok());
+        assert!(Policy::parse(rules(MAX_POLICY_RULES - 4).as_bytes()).is_err());
         // The built-in path pattern counts: 63 more fit, 64 do not.
         assert!(Policy::parse(many(MAX_POLICY_PATTERNS - 1).as_bytes()).is_ok());
         assert!(Policy::parse(many(MAX_POLICY_PATTERNS).as_bytes()).is_err());
