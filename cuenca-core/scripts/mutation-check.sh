@@ -202,7 +202,7 @@ mutate src/gates/mod.rs 'findings.truncate(MAX_FINDINGS_PER_GATE);' '' --lib
 mutate src/gates/policy.rs '            Ok((Event::Alias(_), mark)) => {' '            Ok((Event::Alias(_), mark)) if false => {' --lib
 mutate src/gates/policy.rs 'if bytes.len() > MAX_POLICY_BYTES {' 'if false {' --lib
 mutate src/gates/policy.rs '                    _ => return Err(format!("cuenca.gates: unknown key {key:?}")),' '                    _ => {}' --lib
-mutate src/store.rs '            Some(Entry::Symlink(_)) => return Ok(Err(format!("{path} is a symlink"))),' '' --lib
+mutate src/store.rs '        let bytes = if matches!(entry, Entry::Symlink(_)) {' '        let bytes = if false {' --lib
 
 # Gate engine floors (P20 r1, C): p9's governance tier and the size limit cannot be loosened; an unreadable check manifest fails.
 mutate src/gates/policy.rs '            if !missing.is_empty() {' '            if false {' --lib
@@ -215,7 +215,7 @@ mutate src/gates/policy.rs '    if gates.is_badvalue() {
         return Ok(None);
     }' --lib
 mutate src/gates/policy.rs '            if max > DEFAULT_MAX_FILE_BYTES {' '            if false {' --lib
-mutate src/gates/mod.rs '        if let Err(error) = &input.checks {' '        if let Err(error) = &Ok::<(), String>(()) {' --lib
+mutate src/gates/mod.rs '        if let Err(error) = &input.checks.bytes {' '        if let Err(error) = &Ok::<(), String>(()) {' --lib
 
 # P20 r1 (A): the pattern count is capped.
 mutate src/gates/policy.rs '        if patterns > MAX_POLICY_PATTERNS {' '        if false {' --lib
@@ -228,5 +228,11 @@ mutate src/gates/policy.rs 'r"(?i)\.(env' 'r"\.(env' --lib
 # P20 r2 (C): the per-blob cache is keyed by whether the put changes main's content; rules are capped.
 mutate src/gates/mod.rs '(Some(before), Some((entry, _))) => usize::from(before.oid() != entry.oid()),' '(Some(_), Some(_)) => 1,' --lib
 mutate src/gates/policy.rs '        if rules > MAX_POLICY_RULES {' '        if false {' --lib
+
+# P20 r2 (A, B): YAML depth is capped before the loader; an unusable base file keeps its hash; declarations are paths, matched by directory.
+mutate src/gates/policy.rs '                if depth > MAX_POLICY_DEPTH {' '                if false {' --lib
+mutate src/store.rs '        (Some(info.sha256), bytes)' '        (None, bytes)' --lib
+mutate src/gates/mod.rs '            if RepoPath::new(key.trim_end_matches('"'"'/'"'"')).is_err() {' '            if false {' --lib
+mutate src/gates/mod.rs '        let dirs = path.match_indices('"'"'/'"'"').map(|(i, _)| &path[..=i]);' '        let dirs = std::iter::empty::<&str>();' --lib
 
 exit $survived

@@ -16,7 +16,8 @@ use crate::blobs::BlobFiles;
 use crate::error::{CoreError, Result};
 use crate::event::{ChangesetId, Event, Record};
 use crate::gates::{
-    CHECKS_PATH, Engine, Evaluation, History, Input, LandingRequest, MAX_POLICY_BYTES, POLICY_PATH,
+    BaseRead, CHECKS_PATH, Engine, Evaluation, History, Input, LandingRequest, MAX_POLICY_BYTES,
+    POLICY_PATH,
 };
 use crate::names::{ForkName, LocationName, PrincipalName};
 use crate::owner::{Holder, Writer};
@@ -565,16 +566,16 @@ impl Store {
         let log_len = last_offset(&log)?.map_or(0, |last| last + 1);
         let history = main_history(&log, &txn.open_table(CHANGESETS)?, &trees, &loc.name)?;
 
-        let policy = self.base_file(&base, POLICY_PATH)?;
-        let checks = self.base_file(&base, CHECKS_PATH)?;
-        let engine = Engine::compile(policy.as_ref().map(|b| b.as_deref()).map_err(Clone::clone));
+        let policy = self.base_file(&base, POLICY_PATH);
+        let checks = self.base_file(&base, CHECKS_PATH);
+        let engine = Engine::compile(&base_read(&policy));
         let read = |oid: GitOid| self.read_blob(oid).map_err(|e| e.to_string());
         Ok(engine.evaluate(&Input {
             base: &base,
             base_oid: loc.main,
             log_len,
             at_ms,
-            checks: checks.as_ref().map(|b| b.as_deref()).map_err(Clone::clone),
+            checks: base_read(&checks),
             changeset: &changeset,
             read: &read,
             history: &history,
@@ -585,25 +586,29 @@ impl Store {
     /// A file of the base the gates read: `Ok(None)` when absent, an inner `Err` when
     /// something is there that is not a readable regular file of at most
     /// [`MAX_POLICY_BYTES`].
-    fn base_file(
-        &self,
-        base: &Tree,
-        path: &str,
-    ) -> Result<std::result::Result<Option<Vec<u8>>, String>> {
-        let entry = match base.get(path) {
-            None => return Ok(Ok(None)),
-            Some(Entry::Symlink(_)) => return Ok(Err(format!("{path} is a symlink"))),
-            Some(entry) => entry,
+    fn base_file(&self, base: &Tree, path: &str) -> FoundFile {
+        let Some(entry) = base.get(path) else {
+            return (None, Ok(None));
         };
         let oid = entry.oid();
-        let info = self.blob_info(oid)?.ok_or(CoreError::MissingBlob(oid))?;
-        if info.size > MAX_POLICY_BYTES as u64 {
-            return Ok(Err(format!(
+        let info = match self.blob_info(oid) {
+            Ok(Some(info)) => info,
+            Ok(None) => return (None, Err(format!("{path}: its blob is not in the store"))),
+            Err(e) => return (None, Err(format!("{path}: {e}"))),
+        };
+        let bytes = if matches!(entry, Entry::Symlink(_)) {
+            Err(format!("{path} is a symlink"))
+        } else if info.size > MAX_POLICY_BYTES as u64 {
+            Err(format!(
                 "{path} is {} bytes, over the {MAX_POLICY_BYTES}-byte limit",
                 info.size
-            )));
-        }
-        Ok(Ok(Some(self.read_blob(oid)?)))
+            ))
+        } else {
+            self.read_blob(oid)
+                .map(Some)
+                .map_err(|e| format!("{path}: {e}"))
+        };
+        (Some(info.sha256), bytes)
     }
 
     /// Move the main of `fork`'s location by `id`, the fork's head, as a
@@ -1058,6 +1063,19 @@ fn store_tree(trees: &mut redb::Table<Bytes, Bytes>, tree: &Tree) -> Result<()> 
         )?;
     }
     Ok(())
+}
+
+/// A base file as [`Store::base_file`] found it, as the gates read it.
+type FoundFile = (
+    Option<ContentHash>,
+    std::result::Result<Option<Vec<u8>>, String>,
+);
+
+fn base_read(found: &FoundFile) -> BaseRead<'_> {
+    BaseRead {
+        sha256: found.0,
+        bytes: found.1.as_ref().map(|b| b.as_deref()).map_err(Clone::clone),
+    }
 }
 
 /// The serialized tags of the records [`main_history`] reads.
@@ -1793,7 +1811,8 @@ mod tests {
     }
 
     /// A base whose policy or check manifest is a symlink is not read through the link:
-    /// the evaluation fails on `policy` and `checks`, and records neither hash.
+    /// the evaluation fails on `policy` and `checks`, and records the hash of each
+    /// link's blob.
     #[test]
     fn a_symlinked_base_policy_is_a_policy_failure() {
         use crate::gates::{AuthorKind, LandingRequest};
@@ -1834,8 +1853,10 @@ mod tests {
         let eval = store
             .evaluate_at(&f, id, &LandingRequest::new(AuthorKind::Agent), 0)
             .unwrap();
-        assert_eq!(eval.policy.sha256, None);
-        assert_eq!(eval.checks.sha256, None);
+        // The hashes are of the blobs the base holds there (the links' targets as
+        // bytes), so the journal still says which snapshot was judged.
+        assert_eq!(eval.policy.sha256, Some(ContentHash::of(b"real.yaml")));
+        assert_eq!(eval.checks.sha256, Some(ContentHash::of(b"../real.toml")));
         let failed: Vec<_> = eval
             .results
             .iter()
@@ -1861,5 +1882,45 @@ mod tests {
             );
             assert_eq!(history_tags().is_match(&bytes), wanted, "{record:?}");
         }
+    }
+
+    /// An oversized regular policy is not parsed, fails `policy`, and keeps its hash.
+    #[test]
+    fn an_oversized_base_policy_keeps_its_hash() {
+        use crate::gates::{AuthorKind, LandingRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let big = vec![b'#'; MAX_POLICY_BYTES + 1];
+        let oid = GitOid::for_blob(&big);
+        store
+            .ingest_blob(oid, big.len() as u64, big.as_slice())
+            .unwrap();
+        let x = GitOid::for_blob(b"x");
+        store.ingest_blob(x, 1, &b"x"[..]).unwrap();
+        let main = Tree::from_entries([(
+            RepoPath::new(".control/policy.yaml").unwrap(),
+            Entry::File(oid),
+        )])
+        .unwrap();
+        let (l, f) = ids();
+        store.add_location(&l, None, &main).unwrap();
+        store.create_fork(&f, &l, &agent()).unwrap();
+        let cs = Changeset::new(
+            &main,
+            vec![Op::put(RepoPath::new("x").unwrap(), Entry::File(x))],
+        )
+        .unwrap();
+        let id = store.publish_draft(&f, &w1(), &cs).unwrap().id;
+        let eval = store
+            .evaluate_at(&f, id, &LandingRequest::new(AuthorKind::Agent), 0)
+            .unwrap();
+        assert_eq!(eval.policy.sha256, Some(ContentHash::of(&big)));
+        let failed: Vec<_> = eval
+            .results
+            .iter()
+            .filter(|r| !r.passed())
+            .map(|r| r.gate.as_str())
+            .collect();
+        assert_eq!(failed, ["policy"]);
     }
 }

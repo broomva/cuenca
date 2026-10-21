@@ -17,10 +17,17 @@
 //! main, fails `fast_forward`, and cannot land as it is; earlier drafts are judged when
 //! they are squashed into a head that can.
 //!
-//! An evaluation is a pure function of its [`Input`]: the store
-//! ([`crate::Store::evaluate_landing`]) assembles the input from one consistent
-//! snapshot, so a dry run and a landing request against the same log state return the
-//! same results.
+//! An evaluation is a pure function of its [`Input`]: the log state, read from one
+//! consistent snapshot ([`crate::Store::evaluate_landing`]), and the request's clock.
+//! A dry run and a landing request against the same log state and clock return the
+//! same results. The clock is an input on purpose: a landing window and the governance
+//! window are defined over the moment a change asks to land, so a dry run is a
+//! prediction for its own moment and may differ from a request made after a window
+//! edge. Once a head has an intent, both answer the journaled verdict.
+//!
+//! Main's history starts when the location was added: content main held before it
+//! was registered is not known to the `revert` gate (a git location's earlier history
+//! is GitHub's Deletion Gate's, which still runs on the PR landing opens).
 //!
 //! What an evaluation costs is bounded by what the caller already sent: one read of
 //! each distinct blob the changeset puts (whatever number of paths name it), at most
@@ -100,20 +107,76 @@ impl Declarations {
                 "{bytes} bytes of declarations, over the limit of {MAX_DECLARATION_BYTES}"
             ));
         }
-        match self
+        if let Some(d) = self
             .deletes
             .iter()
             .chain(&self.reverts)
             .find(|d| d.len() > cuenca_tree::MAX_PATH_BYTES)
         {
-            Some(d) => Err(format!(
+            return Err(format!(
                 "a declaration of {} bytes, over the {}-byte path limit",
                 d.len(),
                 cuenca_tree::MAX_PATH_BYTES
-            )),
-            None => Ok(()),
+            ));
+        }
+        // Each one names a path or a directory of the tree. The entry is not quoted
+        // back: a declaration is the caller's free text until it is checked.
+        for (i, d) in self.deletes.iter().chain(&self.reverts).enumerate() {
+            let key = declaration_key(d);
+            if RepoPath::new(key.trim_end_matches('/')).is_err() {
+                return Err(format!(
+                    "declaration {i} is not a path or directory of the tree"
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// The declarations that cover something in `changeset`: deletes that cover a
+    /// delete, reverts that cover a put. Only these are journaled, so a declaration
+    /// adds nothing to the log that the changeset does not already name.
+    pub fn used(&self, changeset: &Changeset) -> Self {
+        let deletes = changeset
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Delete { .. }));
+        let puts = changeset
+            .ops
+            .iter()
+            .filter(|op| matches!(op, Op::Put { .. }));
+        Self {
+            deletes: keep(&self.deletes, deletes.map(|op| op.path().as_str())),
+            reverts: keep(&self.reverts, puts.map(|op| op.path().as_str())),
         }
     }
+}
+
+/// A declaration as it is matched: without a leading `./` or `/`.
+fn declaration_key(d: &str) -> &str {
+    d.strip_prefix("./").unwrap_or(d).trim_start_matches('/')
+}
+
+/// The entries of `declared` that cover at least one of `paths`, in declared order,
+/// each once. Cost: the paths' total depth, not paths × declarations.
+fn keep<'p>(declared: &[String], paths: impl Iterator<Item = &'p str>) -> Vec<String> {
+    let mut by_key: BTreeMap<&str, Vec<usize>> = BTreeMap::new();
+    for (i, d) in declared.iter().enumerate() {
+        by_key.entry(declaration_key(d)).or_default().push(i);
+    }
+    let mut hit = BTreeSet::new();
+    for path in paths {
+        let dirs = path.match_indices('/').map(|(i, _)| &path[..=i]);
+        for key in std::iter::once(path).chain(dirs) {
+            if let Some(at) = by_key.get(key) {
+                hit.extend(at.iter().copied());
+            }
+        }
+    }
+    let mut seen = BTreeSet::new();
+    hit.into_iter()
+        .map(|i| declared[i].clone())
+        .filter(|d| seen.insert(d.clone()))
+        .collect()
 }
 
 /// What a landing request brings besides the changeset.
@@ -170,8 +233,10 @@ impl GateResult {
     }
 }
 
-/// A file the evaluation read from the base: its path, and the SHA-256 of its bytes
-/// (`None` when the base has no regular file there).
+/// A file the evaluation read from the base: its path, and the SHA-256 of the blob the
+/// base holds there (`None` only when the base holds nothing at that path). A file
+/// that is there but unusable (a symlink, too large, unreadable) keeps its hash and
+/// fails its own result (`policy` or `checks`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BaseFile {
     pub path: String,
@@ -183,6 +248,23 @@ pub struct BaseFile {
 #[serde(rename_all = "snake_case")]
 pub enum GateMode {
     LogOnly,
+}
+
+/// A file of the base as the store found it.
+#[derive(Debug, Clone)]
+pub struct BaseRead<'a> {
+    /// The SHA-256 the store derived from the blob at ingest; `None` when absent.
+    pub sha256: Option<ContentHash>,
+    /// Its bytes: `Ok(None)` when absent, `Err` when present but unusable.
+    pub bytes: std::result::Result<Option<&'a [u8]>, String>,
+}
+
+impl BaseRead<'_> {
+    /// Nothing at the path.
+    pub const ABSENT: BaseRead<'static> = BaseRead {
+        sha256: None,
+        bytes: Ok(None),
+    };
 }
 
 /// The gates' verdict on one landing request, journaled with it.
@@ -208,8 +290,8 @@ pub struct Evaluation {
 }
 
 impl Evaluation {
-    /// The same verdict, regardless of when it was computed: what a dry run and a
-    /// landing request against the same log state must agree on.
+    /// The verdict without its timestamp: what a dry run and a landing request against
+    /// the same log state and clock must agree on.
     pub fn verdict(&self) -> (GitOid, &BaseFile, &BaseFile, &[GateResult], bool) {
         (
             self.base,
@@ -239,7 +321,7 @@ pub struct Input<'a> {
     pub at_ms: u64,
     /// The base's check manifest bytes: `Ok(None)` when absent, `Err` when something
     /// is there that is not a readable regular file (a failing `checks` result).
-    pub checks: std::result::Result<Option<&'a [u8]>, String>,
+    pub checks: BaseRead<'a>,
     pub changeset: &'a Changeset,
     /// Reads a blob a put names. Called once per put, so a large changeset is never
     /// held in memory whole.
@@ -315,10 +397,14 @@ impl Engine {
     /// Compile the gates from the base's policy file: `Ok(None)` when the base has
     /// none (the built-in defaults apply), `Err` when it has one that cannot be read as
     /// a file (the defaults apply, and every evaluation fails on `policy`).
-    pub fn compile(policy_bytes: std::result::Result<Option<&[u8]>, String>) -> Self {
-        let (policy_file, parsed) = match policy_bytes {
-            Ok(bytes) => (base_file(POLICY_PATH, bytes), bytes.map(Policy::parse)),
-            Err(e) => (base_file(POLICY_PATH, None), Some(Err(e))),
+    pub fn compile(policy: &BaseRead<'_>) -> Self {
+        let policy_file = BaseFile {
+            path: POLICY_PATH.to_string(),
+            sha256: policy.sha256,
+        };
+        let parsed = match &policy.bytes {
+            Ok(bytes) => bytes.map(Policy::parse),
+            Err(e) => Some(Err(e.clone())),
         };
         let (policy, policy_error) = match parsed {
             None => (Policy::default(), None),
@@ -355,7 +441,7 @@ impl Engine {
                 }],
             ));
         }
-        if let Err(error) = &input.checks {
+        if let Err(error) = &input.checks.bytes {
             results.push(collect(
                 "checks",
                 GateKind::Policy,
@@ -441,9 +527,12 @@ impl Engine {
             log_len: input.log_len,
             at_ms: input.at_ms,
             author: input.request.author,
-            declarations: input.request.declarations.clone(),
+            declarations: input.request.declarations.used(input.changeset),
             policy: self.policy.clone(),
-            checks: base_file(CHECKS_PATH, input.checks.clone().unwrap_or(None)),
+            checks: BaseFile {
+                path: CHECKS_PATH.to_string(),
+                sha256: input.checks.sha256,
+            },
             results,
             passed,
         }
@@ -493,13 +582,6 @@ fn collect(gate: &str, kind: GateKind, mut findings: Vec<Finding>) -> GateResult
     }
 }
 
-fn base_file(path: &str, bytes: Option<&[u8]>) -> BaseFile {
-    BaseFile {
-        path: path.to_string(),
-        sha256: bytes.map(ContentHash::of),
-    }
-}
-
 /// Whether `path` is covered by `declared` ([`Declarations`]): an entry ending in `/`
 /// covers the paths under it, any other entry exactly itself. A leading `./` or `/` is
 /// ignored. No entry covers the whole tree: `/`, `./` and the empty entry strip to
@@ -522,7 +604,7 @@ impl<'a> Coverage<'a> {
             std::collections::HashSet::new(),
         );
         for d in declared {
-            let d = d.strip_prefix("./").unwrap_or(d).trim_start_matches('/');
+            let d = declaration_key(d);
             if d.ends_with('/') {
                 dirs.insert(d);
             } else {
@@ -582,12 +664,12 @@ mod tests {
         };
         let history = History::default();
         let request = LandingRequest::new(AuthorKind::Agent);
-        let eval = Engine::compile(Ok(None)).evaluate(&Input {
+        let eval = Engine::compile(&BaseRead::ABSENT).evaluate(&Input {
             base: &base,
             base_oid: base.git_tree_id(),
             log_len: 0,
             at_ms: 0,
-            checks: Ok(None),
+            checks: BaseRead::ABSENT,
             changeset: &changeset,
             read: &read,
             history: &history,
@@ -622,12 +704,12 @@ mod tests {
         let read = |_| Ok(secret.clone());
         let history = History::default();
         let request = LandingRequest::new(AuthorKind::Agent);
-        let eval = Engine::compile(Ok(None)).evaluate(&Input {
+        let eval = Engine::compile(&BaseRead::ABSENT).evaluate(&Input {
             base: &base,
             base_oid: base.git_tree_id(),
             log_len: 0,
             at_ms: 0,
-            checks: Ok(None),
+            checks: BaseRead::ABSENT,
             changeset: &changeset,
             read: &read,
             history: &history,
@@ -644,6 +726,40 @@ mod tests {
             .map(|f| f.path.clone().unwrap())
             .collect();
         assert_eq!(paths, ["b"]);
+    }
+
+    /// Only declarations that cover something are kept, in declared order, once.
+    #[test]
+    fn only_used_declarations_are_kept() {
+        let base = Tree::from_entries([
+            (RepoPath::new("a/x").unwrap(), Entry::file(b"1")),
+            (RepoPath::new("b").unwrap(), Entry::file(b"2")),
+        ])
+        .unwrap();
+        let changeset = Changeset::new(
+            &base,
+            vec![
+                Op::delete(RepoPath::new("a/x").unwrap()),
+                Op::put(RepoPath::new("b").unwrap(), Entry::file(b"3")),
+            ],
+        )
+        .unwrap();
+        let d = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        let declared = Declarations {
+            deletes: d(&["zzz", "./a/", "a/x", "b", "a/x"]),
+            reverts: d(&["a/x", "/b", "q/"]),
+        };
+        assert!(declared.check().is_ok());
+        let used = declared.used(&changeset);
+        assert_eq!(used.deletes, ["./a/", "a/x"]);
+        assert_eq!(used.reverts, ["/b"]);
+        for bad in ["/", ".", "", "a/../b", "./"] {
+            let declared = Declarations {
+                deletes: d(&[bad]),
+                reverts: vec![],
+            };
+            assert!(declared.check().is_err(), "{bad:?}");
+        }
     }
 
     #[test]

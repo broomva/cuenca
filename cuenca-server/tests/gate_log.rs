@@ -776,7 +776,30 @@ fn declarations_are_bounded() {
             assert_eq!(r.status(), 400, "{path}");
         }
     }
+    // A declaration that names no path of a tree (the whole tree) is refused.
+    for whole in ["/", ".", "./", ""] {
+        let r = bed.s.post(
+            &bed.a1,
+            &format!("/v1/forks/{fork}/landing/dry-run"),
+            json!({ "epoch": 1, "changeset": id.to_hex(), "declarations": { "deletes": [whole] } }),
+        );
+        assert_eq!(r.status(), 400, "{whole:?}");
+    }
     assert_eq!(bed.s.authority.store().len().unwrap(), len);
+    // A declaration that covers nothing in the changeset is neither answered nor
+    // journaled (request() asserts no secret appears in the response).
+    let stray = secrets()[0].trim().to_string();
+    let v = bed.request(
+        &bed.a1,
+        &fork,
+        id,
+        &json!({ "deletes": [stray], "reverts": [stray] }),
+        true,
+    );
+    assert_eq!(
+        v["gates"]["declarations"],
+        json!({ "deletes": [], "reverts": [] })
+    );
     // At the limit, it is accepted.
     let at: Vec<String> = (0..cuenca_core::gates::MAX_DECLARATIONS)
         .map(|i| format!("p{i}"))
@@ -807,4 +830,34 @@ fn after_an_intent_the_dry_run_answers_the_journaled_verdict() {
     assert_eq!(retry["fresh"], false);
     assert_eq!(dry, landed);
     assert_eq!(retry["gates"], landed);
+}
+
+/// An intent for a draft that a later draft superseded is not a retry: both routes
+/// answer `not_head`, and nothing is recorded.
+#[test]
+fn a_superseded_head_gets_no_verdict() {
+    let bed = Bed::new();
+    let a1 = bed.a1.clone();
+    let fork = bed.fork(&a1, "l1");
+    let a = bed.publish(
+        &a1,
+        &fork,
+        &bed.main("l1"),
+        vec![bed.put(&a1, "README", b"a\n")],
+    );
+    bed.request(&a1, &fork, a, &json!({}), false);
+    let head = bed.s.fork_head(&a1, &fork);
+    bed.publish(&a1, &fork, &head, vec![bed.put(&a1, "README", b"b\n")]);
+    let len = bed.s.authority.store().len().unwrap();
+    bed.who(&a1);
+    for path in ["landing", "landing/dry-run"] {
+        let r = bed.s.post(
+            &a1,
+            &format!("/v1/forks/{fork}/{path}"),
+            json!({ "epoch": 1, "changeset": a.to_hex() }),
+        );
+        assert_eq!(r.status(), 409, "{path}");
+        assert_eq!(r.json::<Value>().unwrap()["error"], "not_head", "{path}");
+    }
+    assert_eq!(bed.s.authority.store().len().unwrap(), len);
 }

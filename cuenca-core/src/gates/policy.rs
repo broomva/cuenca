@@ -31,9 +31,10 @@
 //! reported as a failing `policy` result and the built-in defaults run instead; it
 //! never makes the gates pass.
 //!
-//! The file must be UTF-8, at most [`MAX_POLICY_BYTES`], and must not use YAML aliases:
-//! the loader copies an aliased node at every use, so a few lines of aliases could
-//! expand without bound.
+//! The file must be UTF-8, at most [`MAX_POLICY_BYTES`], nest at most
+//! [`MAX_POLICY_DEPTH`] levels, and must not use YAML aliases: the loader copies an
+//! aliased node at every use, so a few lines of aliases could expand without bound, and
+//! it recurses per level, so a deep document could overflow the stack.
 
 use regex::Regex;
 use regex::bytes::Regex as BytesRegex;
@@ -64,12 +65,15 @@ pub const GOVERNANCE_PATHS: [&str; 5] = [
 ];
 /// p9's bounds on the governance window, in seconds: one day to 30 days.
 pub const GOVERNANCE_WINDOW_SECONDS: (u64, u64) = (86_400, 30 * 86_400);
-/// At most this many secret patterns (paths and content, built-ins included): each runs
-/// on every path or every new blob.
+/// At most this many secret patterns, paths and content together, the built-ins (one
+/// path pattern, ten content patterns) included: each runs on every path or every new
+/// blob.
 pub const MAX_POLICY_PATTERNS: usize = 64;
 /// At most this many protected rules and governance paths together: each is matched
 /// against every path a changeset touches. The workspace's policy has 38.
 pub const MAX_POLICY_RULES: usize = 256;
+/// A policy may nest at most this deep; the workspace's nests 5 levels.
+pub const MAX_POLICY_DEPTH: usize = 32;
 /// A compiled regex may take at most this much memory.
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
 
@@ -132,7 +136,7 @@ impl Policy {
             ));
         }
         let text = std::str::from_utf8(bytes).map_err(|_| format!("{POLICY_PATH} is not UTF-8"))?;
-        refuse_aliases(text)?;
+        prescan(text)?;
         let docs = yaml_rust2::YamlLoader::load_from_str(text)
             .map_err(|e| format!("{POLICY_PATH} is not valid YAML: {e}"))?;
         let mut policy = Self::default();
@@ -234,7 +238,9 @@ impl Policy {
                 policy.landing_windows.push(window(w)?);
             }
         }
-        let patterns = policy.secret_paths.len() + policy.secret_patterns.len();
+        let patterns = policy.secret_paths.len()
+            + policy.secret_patterns.len()
+            + super::builtin::SECRET_PATTERNS.len();
         if patterns > MAX_POLICY_PATTERNS {
             return Err(format!(
                 "{patterns} secret patterns, over the limit of {MAX_POLICY_PATTERNS}"
@@ -319,11 +325,26 @@ fn governance(gates: &Yaml) -> Res<Option<Governance>> {
     }))
 }
 
-fn refuse_aliases(text: &str) -> Res<()> {
+/// Read the policy's event stream once, iteratively, before the loader builds it:
+/// refuse aliases (the loader copies an aliased node at every use) and nesting deeper
+/// than [`MAX_POLICY_DEPTH`] (the loader and its values recurse per level, and a
+/// deep enough document overflows the evaluating thread's stack).
+fn prescan(text: &str) -> Res<()> {
     let mut parser = Parser::new_from_str(text);
+    let mut depth = 0usize;
     loop {
         match parser.next_token() {
             Ok((Event::StreamEnd, _)) => return Ok(()),
+            Ok((Event::SequenceStart(..) | Event::MappingStart(..), mark)) => {
+                depth += 1;
+                if depth > MAX_POLICY_DEPTH {
+                    return Err(format!(
+                        "{POLICY_PATH} nests deeper than {MAX_POLICY_DEPTH} levels (line {})",
+                        mark.line()
+                    ));
+                }
+            }
+            Ok((Event::SequenceEnd | Event::MappingEnd, _)) => depth = depth.saturating_sub(1),
             Ok((Event::Alias(_), mark)) => {
                 return Err(format!(
                     "{POLICY_PATH} uses a YAML alias (line {}), which the gate engine refuses",
@@ -626,9 +647,27 @@ cuenca:
         };
         assert!(Policy::parse(rules(MAX_POLICY_RULES - 5).as_bytes()).is_ok());
         assert!(Policy::parse(rules(MAX_POLICY_RULES - 4).as_bytes()).is_err());
-        // The built-in path pattern counts: 63 more fit, 64 do not.
-        assert!(Policy::parse(many(MAX_POLICY_PATTERNS - 1).as_bytes()).is_ok());
-        assert!(Policy::parse(many(MAX_POLICY_PATTERNS).as_bytes()).is_err());
+        // The eleven built-ins count: 53 more fit, 54 do not.
+        let room = MAX_POLICY_PATTERNS - 1 - super::super::builtin::SECRET_PATTERNS.len();
+        assert_eq!(room, 53);
+        assert!(Policy::parse(many(room).as_bytes()).is_ok());
+        assert!(Policy::parse(many(room + 1).as_bytes()).is_err());
+    }
+
+    /// Deep nesting is refused by the parser's own recursion limit, quickly and without
+    /// exhausting the stack (an evaluation thread must never abort on a base policy).
+    #[test]
+    fn deep_nesting_is_refused_not_a_crash() {
+        let depth = 400_000;
+        let text = format!("x: {}1{}\n", "[".repeat(depth), "]".repeat(depth));
+        assert!(text.len() < MAX_POLICY_BYTES);
+        let started = std::time::Instant::now();
+        assert!(Policy::parse(text.as_bytes()).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
+        let block: String = (0..1200)
+            .map(|i| format!("{}k{i}:\n", " ".repeat(i)))
+            .collect();
+        let _ = Policy::parse(block.as_bytes());
     }
 
     #[test]

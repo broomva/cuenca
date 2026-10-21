@@ -144,13 +144,13 @@ mutate ../cuenca-core/src/gates/builtin.rs 'if cx.author == AuthorKind::Human {'
 mutate ../cuenca-core/src/gates/builtin.rs '.filter(|rule| path.contains(rule.as_str()))' '.filter(|_| false)' --test gate_log
 mutate ../cuenca-core/src/gates/builtin.rs 'let path = format!("/{}", file.path.as_str().to_lowercase());' 'let path = file.path.as_str().to_lowercase();' --test gate_log
 mutate ../cuenca-core/src/gates/builtin.rs 'if recent < self.max {' 'if true {' --test gate_log
-mutate ../cuenca-core/src/gates/builtin.rs 'Op::Delete { path } if !declared.covers(path.as_str()) => {' 'Op::Delete { path } if false && path.as_str().is_empty() => {' --test gate_log
+mutate ../cuenca-core/src/gates/builtin.rs 'Op::Delete { path } if !declared.covers(path.as_str()) => Some(Finding {' 'Op::Delete { path } if false && path.as_str().is_empty() => Some(Finding {' --test gate_log
 mutate ../cuenca-core/src/gates/builtin.rs 'let held = cx.history.held.contains(&(path.clone(), oid));' 'let held = false;' --test gate_log
 mutate ../cuenca-core/src/gates/builtin.rs 'let unchanged = cx.base.get(path.as_str()).is_some_and(|e| e.oid() == oid);' 'let unchanged = false;' --test gate_log
 mutate ../cuenca-core/src/gates/builtin.rs 'if change.from == change.main {' 'if true {' --test gate_log
 mutate ../cuenca-core/src/gates/builtin.rs 'if self.0.iter().any(|w| inside(w, cx.at_ms)) {' 'if true {' --test gate_log
 mutate ../cuenca-core/src/gates/mod.rs 'if let Some(error) = &self.policy_error {' 'if let Some(error) = None::<&String> {' --test gate_log
-mutate ../cuenca-core/src/store.rs 'let policy = self.base_file(&base, POLICY_PATH)?;' 'let policy = self.base_file(&self.tree(changeset.target)?, POLICY_PATH)?;' --test gate_log
+mutate ../cuenca-core/src/store.rs 'let policy = self.base_file(&base, POLICY_PATH);' 'let policy = self.base_file(&self.tree(changeset.target)?, POLICY_PATH);' --test gate_log
 mutate ../cuenca-core/src/store.rs '                for (path, entry) in load_tree(trees, main)?.entries() {
                     history.held.insert((path.clone(), entry.oid()));
                 }' '' --test gate_log
@@ -161,11 +161,22 @@ mutate src/http.rs '        let gates = a.store.evaluate_landing(&name, &writer,
 mutate ../cuenca-core/src/store.rs '            return Ok(self.journaled_landing(offset)?.gates);' '            let _ = offset;' --test gate_log
 
 # P20 r1 (B): the check manifest is the base's; main's history includes landed content; the history search skips nothing it needs; declarations are bounded in bytes.
-mutate ../cuenca-core/src/store.rs 'let checks = self.base_file(&base, CHECKS_PATH)?;' 'let checks = self.base_file(&self.tree(changeset.target)?, CHECKS_PATH)?;' --test gate_log
+mutate ../cuenca-core/src/store.rs 'let checks = self.base_file(&base, CHECKS_PATH);' 'let checks = self.base_file(&self.tree(changeset.target)?, CHECKS_PATH);' --test gate_log
 mutate ../cuenca-core/src/store.rs '            if let Op::Put { path, entry } = op {
                 history.held.insert((path.clone(), entry.oid()));
             }' '' --test gate_log
 mutate ../cuenca-core/src/store.rs 'if !history_tags().is_match(v.value()) {' 'if true {' --test gate_log
 mutate ../cuenca-core/src/gates/mod.rs 'if bytes > MAX_DECLARATION_BYTES {' 'if false {' --test gate_log
+
+# P20 r2 (A, B): an intent for a superseded head is not a retry; only used declarations are journaled.
+mutate ../cuenca-core/src/state.rs '    check_writer(view, &state, writer)?;
+    // The head first:' '    check_writer(view, &state, writer)?;
+    if let Some((last, at)) = state.landing_intent
+        && last == id
+    {
+        return Ok(Some(at));
+    }
+    // The head first:' --test gate_log
+mutate ../cuenca-core/src/gates/mod.rs '            declarations: input.request.declarations.used(input.changeset),' '            declarations: input.request.declarations.clone(),' --test gate_log
 
 exit $survived

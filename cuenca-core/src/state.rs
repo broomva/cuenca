@@ -156,16 +156,18 @@ pub(crate) fn check_landing(
 ) -> Result<Option<u64>> {
     let state = fork(view, name)?;
     check_writer(view, &state, writer)?;
-    if let Some((last, at)) = state.landing_intent
-        && last == id
-    {
-        return Ok(Some(at));
-    }
+    // The head first: an intent for a draft that a later draft superseded is not a
+    // retry, it is a request for something that can no longer land.
     if state.head_changeset.map(|(head, _)| head) != Some(id) {
         return Err(CoreError::NotHead {
             fork: name.to_string(),
             changeset: id.to_hex(),
         });
+    }
+    if let Some((last, at)) = state.landing_intent
+        && last == id
+    {
+        return Ok(Some(at));
     }
     Ok(None)
 }
