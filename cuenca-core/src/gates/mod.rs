@@ -48,6 +48,8 @@ pub use policy::{CHECKS_PATH, MAX_POLICY_BYTES, POLICY_PATH, Policy};
 /// are journaled with the request, so they are bounded like everything else the log
 /// keeps.
 pub const MAX_DECLARATIONS: usize = 4096;
+/// And at most this many bytes together.
+pub const MAX_DECLARATION_BYTES: usize = 256 << 10;
 
 /// At most this many findings are kept per gate; the rest are counted in
 /// [`GateResult::more`], so one changeset cannot grow the log without bound.
@@ -84,6 +86,17 @@ impl Declarations {
         if count > MAX_DECLARATIONS {
             return Err(format!(
                 "{count} declarations, over the limit of {MAX_DECLARATIONS}"
+            ));
+        }
+        let bytes: usize = self
+            .deletes
+            .iter()
+            .chain(&self.reverts)
+            .map(String::len)
+            .sum();
+        if bytes > MAX_DECLARATION_BYTES {
+            return Err(format!(
+                "{bytes} bytes of declarations, over the limit of {MAX_DECLARATION_BYTES}"
             ));
         }
         match self
@@ -239,6 +252,8 @@ pub struct Input<'a> {
 /// One path a changeset touches. `after` is `None` for a delete.
 pub struct FileChange<'a> {
     pub path: &'a RepoPath,
+    /// What main holds at the path now: content is new when main does not hold it
+    /// here, whatever the candidate's own base held.
     pub before: Option<&'a Entry>,
     pub after: Option<(&'a Entry, &'a [u8])>,
 }
@@ -366,7 +381,7 @@ impl Engine {
                     let path = op.path();
                     let change = FileChange {
                         path,
-                        before: input.changeset_base.get(path.as_str()),
+                        before: input.base.get(path.as_str()),
                         after: None,
                     };
                     self.check_file(&cx, &change, &mut file_findings, &mut Default::default());
@@ -389,7 +404,7 @@ impl Engine {
             for (path, entry) in puts {
                 let change = FileChange {
                     path,
-                    before: input.changeset_base.get(path.as_str()),
+                    before: input.base.get(path.as_str()),
                     after: Some((entry, content.as_slice())),
                 };
                 self.check_file(&cx, &change, &mut file_findings, &mut cache);
@@ -491,13 +506,39 @@ fn base_file(path: &str, bytes: Option<&[u8]>) -> BaseFile {
 /// ignored. No entry covers the whole tree: `/`, `./` and the empty entry strip to
 /// the empty string, which no path equals, and `.` is not a path.
 pub fn covered(path: &str, declared: &[String]) -> bool {
-    declared.iter().any(|d| {
-        let d = d.strip_prefix("./").unwrap_or(d).trim_start_matches('/');
-        match d.strip_suffix('/') {
-            Some(_) => path.starts_with(d),
-            None => path == d,
+    Coverage::new(declared).covers(path)
+}
+
+/// Declarations made ready to match: exact paths and directory prefixes in sets, so a
+/// path is matched in time proportional to its depth, not to the number declared.
+pub struct Coverage<'a> {
+    exact: std::collections::HashSet<&'a str>,
+    dirs: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> Coverage<'a> {
+    pub fn new(declared: &'a [String]) -> Self {
+        let (mut exact, mut dirs) = (
+            std::collections::HashSet::new(),
+            std::collections::HashSet::new(),
+        );
+        for d in declared {
+            let d = d.strip_prefix("./").unwrap_or(d).trim_start_matches('/');
+            if d.ends_with('/') {
+                dirs.insert(d);
+            } else {
+                exact.insert(d);
+            }
         }
-    })
+        Self { exact, dirs }
+    }
+
+    pub fn covers(&self, path: &str) -> bool {
+        self.exact.contains(path)
+            || path
+                .match_indices('/')
+                .any(|(i, _)| self.dirs.contains(&path[..=i]))
+    }
 }
 
 #[cfg(test)]

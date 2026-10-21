@@ -45,6 +45,9 @@ cuenca:
     max_file_bytes: 4096
 "#;
 
+/// The base's check manifest.
+const CHECKS: &str = "[checks.test]\nargv = [\"make\", \"test\"]\n";
+
 /// Secrets the candidates add, one per built-in pattern family. Written here in pieces
 /// so this file does not itself trip a scanner.
 fn secrets() -> Vec<String> {
@@ -102,10 +105,7 @@ impl Bed {
             "l1",
             &[
                 (".control/policy.yaml", POLICY.as_bytes()),
-                (
-                    ".cuenca/checks.toml",
-                    b"[checks.test]\nargv = [\"make\", \"test\"]\n",
-                ),
+                (".cuenca/checks.toml", CHECKS.as_bytes()),
                 ("README", b"v0\n"),
                 ("AGENTS.md", b"agents\n"),
                 ("old.txt", b"old\n"),
@@ -300,7 +300,13 @@ fn a_change_that_weakens_a_gate_and_adds_a_secret_is_judged_by_the_base_policy_1
         } else {
             "src/settings.py"
         };
-        let ops = vec![policy_op, bed.put(&bed.a1, secret_path, secret.as_bytes())];
+        // The candidate rewrites the check manifest too: its hash must stay the base's.
+        let checks = format!("[checks.weak{i}]\nargv = [\"true\"]\n");
+        let ops = vec![
+            policy_op,
+            bed.put(&bed.a1, secret_path, secret.as_bytes()),
+            bed.put(&bed.a1, ".cuenca/checks.toml", checks.as_bytes()),
+        ];
         let id = bed.publish(&bed.a1, &fork, &base, ops);
         let v = bed.request(&bed.a1, &fork, id, &json!({}), false);
         let gates = &v["gates"];
@@ -315,6 +321,11 @@ fn a_change_that_weakens_a_gate_and_adds_a_secret_is_judged_by_the_base_policy_1
             assert_ne!(sha(text.as_bytes()), sha(POLICY.as_bytes()));
         }
         assert_eq!(gates["base"], base.git_tree_id().to_hex());
+        assert_eq!(
+            gates["checks"]["sha256"],
+            sha(CHECKS.as_bytes()),
+            "variant {i}: the check manifest's hash is not the base's"
+        );
         let fails = failing(gates);
         assert!(fails.contains("protected_path"), "variant {i}: {fails:?}");
         assert!(fails.contains("secret_content"), "variant {i}: {fails:?}");
@@ -341,7 +352,7 @@ fn a_change_that_weakens_a_gate_and_adds_a_secret_is_judged_by_the_base_policy_1
 }
 
 /// Ticket acceptance: the dry run returns the same results as publish, on a 20-case
-/// suite covering every gate, passing and failing. Each case also has its expected
+/// suite (21 cases here) covering every gate, passing and failing. Each case also has its expected
 /// failing gates, so the suite pins what the gates decide, not only that two paths
 /// agree.
 #[test]
@@ -354,6 +365,9 @@ fn a_dry_run_answers_what_the_landing_request_journals_20_cases() {
     // Main moves twice: README v0 → v1, then a governance change by the owner's device.
     bed.advance(&a1, "l1", vec![bed.put(&a1, "README", b"v1\n")]);
     bed.advance(&d1, "l1", vec![bed.put(&d1, "AGENTS.md", b"agents v2\n")]);
+    // Content that arrived through a landing and was replaced by another.
+    bed.advance(&a1, "l1", vec![bed.put(&a1, "notes.txt", b"n1\n")]);
+    bed.advance(&a1, "l1", vec![bed.put(&a1, "notes.txt", b"n2\n")]);
 
     bed.location("l2", &[("README", b"no policy\n")]);
     bed.location(
@@ -527,6 +541,14 @@ fn a_dry_run_answers_what_the_landing_request_journals_20_cases() {
         &["revert"],
     );
     case(
+        "undeclared revert of landed content",
+        &a1,
+        "l1",
+        vec![bed.put(&a1, "notes.txt", b"n1\n")],
+        json!({}),
+        &["revert"],
+    );
+    case(
         "declared revert",
         &a1,
         "l1",
@@ -608,7 +630,7 @@ fn a_dry_run_answers_what_the_landing_request_journals_20_cases() {
         );
         checked += 1;
     }
-    assert_eq!(checked, 20);
+    assert_eq!(checked, 21);
 }
 
 /// One case of the suite: name, author's token, location, base, ops, declarations and
@@ -737,8 +759,14 @@ fn declarations_are_bounded() {
         .map(|i| format!("p{i}"))
         .collect();
     let long = vec!["x".repeat(cuenca_tree::MAX_PATH_BYTES + 1)];
+    // Each within the path limit and few enough, but too many bytes together.
+    let heavy: Vec<String> = (0..300).map(|i| format!("{i:0>1000}")).collect();
     bed.who(&bed.a1);
-    for declarations in [json!({ "deletes": many }), json!({ "reverts": long })] {
+    for declarations in [
+        json!({ "deletes": many }),
+        json!({ "reverts": long }),
+        json!({ "deletes": heavy }),
+    ] {
         for path in ["landing", "landing/dry-run"] {
             let r = bed.s.post(
                 &bed.a1,

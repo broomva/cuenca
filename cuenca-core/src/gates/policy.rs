@@ -49,9 +49,10 @@ pub const MAX_POLICY_BYTES: usize = 1 << 20;
 /// Files larger than this fail `file_size` unless the policy says otherwise. GitHub
 /// warns at 50 MiB; a source tree rarely needs more than this.
 pub const DEFAULT_MAX_FILE_BYTES: u64 = 10 << 20;
-/// The built-in secret-file pattern: the workspace's G4.
+/// The built-in secret-file pattern: the workspace's G4, case-folded (on the Mac's
+/// disk `.ENV` and `.env` name one file).
 pub const DEFAULT_SECRET_PATH: &str =
-    r"\.(env|env\.local|credentials\.json|service-account\.json)$";
+    r"(?i)\.(env|env\.local|credentials\.json|service-account\.json)$";
 /// p9's L3 governance paths: a policy may add to them, never drop one.
 pub const GOVERNANCE_PATHS: [&str; 5] = [
     "CLAUDE.md",
@@ -474,6 +475,7 @@ mod tests {
     fn an_absent_or_empty_policy_is_the_defaults() {
         let p = Policy::parse(b"").unwrap();
         assert_eq!(p.secret_paths.len(), 1);
+        assert!(p.secret_paths[0].is_match("app/.ENV"));
         assert!(p.protected.is_empty() && p.governance.is_none());
         assert_eq!(p.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
     }

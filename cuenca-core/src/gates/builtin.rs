@@ -17,7 +17,7 @@ use regex::bytes::Regex as BytesRegex;
 
 use super::policy::{Policy, Window, compile_bytes};
 use super::{
-    AuthorKind, ChangesetGate, Context, FileChange, FileGate, Finding, RefGate, RefMove, covered,
+    AuthorKind, ChangesetGate, Context, Coverage, FileChange, FileGate, Finding, RefGate, RefMove,
 };
 use cuenca_tree::{Changeset, Op};
 
@@ -227,16 +227,15 @@ impl ChangesetGate for Deletion {
         "deletion"
     }
     fn check(&self, cx: &Context<'_>, changeset: &Changeset) -> Vec<Finding> {
+        let declared = Coverage::new(&cx.declarations.deletes);
         changeset
             .ops
             .iter()
             .filter_map(|op| match op {
-                Op::Delete { path } if !covered(path.as_str(), &cx.declarations.deletes) => {
-                    Some(Finding {
-                        path: Some(path.to_string()),
-                        reason: "deleted without a `deletes` declaration".into(),
-                    })
-                }
+                Op::Delete { path } if !declared.covers(path.as_str()) => Some(Finding {
+                    path: Some(path.to_string()),
+                    reason: "deleted without a `deletes` declaration".into(),
+                }),
                 _ => None,
             })
             .collect()
@@ -250,6 +249,7 @@ impl ChangesetGate for Revert {
         "revert"
     }
     fn check(&self, cx: &Context<'_>, changeset: &Changeset) -> Vec<Finding> {
+        let declared = Coverage::new(&cx.declarations.reverts);
         changeset
             .ops
             .iter()
@@ -260,12 +260,12 @@ impl ChangesetGate for Revert {
                 let oid = entry.oid();
                 let unchanged = cx.base.get(path.as_str()).is_some_and(|e| e.oid() == oid);
                 let held = cx.history.held.contains(&(path.clone(), oid));
-                (held && !unchanged && !covered(path.as_str(), &cx.declarations.reverts)).then(
-                    || Finding {
-                        path: Some(path.to_string()),
-                        reason: "puts back content main held here before, without a `reverts` declaration".into(),
-                    },
-                )
+                (held && !unchanged && !declared.covers(path.as_str())).then(|| Finding {
+                    path: Some(path.to_string()),
+                    reason:
+                        "puts back content main held here before, without a `reverts` declaration"
+                            .into(),
+                })
             })
             .collect()
     }

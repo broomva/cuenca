@@ -220,4 +220,9 @@ mutate src/gates/mod.rs '        if let Err(error) = &input.checks {' '        i
 # P20 r1 (A): the pattern count is capped.
 mutate src/gates/policy.rs '        if patterns > MAX_POLICY_PATTERNS {' '        if false {' --lib
 
+# P20 r1 (B): only governance moves count; directory declarations; the built-in G4 is case-folded.
+mutate src/gates/builtin.rs '*at >= since && self.touches(paths.iter().map(|p| p.as_str()))' '*at >= since' --lib
+mutate src/gates/mod.rs '.any(|(i, _)| self.dirs.contains(&path[..=i]))' '.any(|_| false)' --lib
+mutate src/gates/policy.rs 'r"(?i)\.(env' 'r"\.(env' --lib
+
 exit $survived

@@ -1062,6 +1062,14 @@ fn store_tree(trees: &mut redb::Table<Bytes, Bytes>, tree: &Tree) -> Result<()> 
     Ok(())
 }
 
+/// The serialized tags of the records [`main_history`] reads.
+fn history_tags() -> &'static regex::bytes::Regex {
+    static TAGS: std::sync::OnceLock<regex::bytes::Regex> = std::sync::OnceLock::new();
+    TAGS.get_or_init(|| {
+        regex::bytes::Regex::new(r#""event":"(?:location_added|main_advanced)""#).expect("literal")
+    })
+}
+
 /// Main's history for `location`: every `(path, blob)` its main has held, and each
 /// move with its time and the paths it touched.
 fn main_history(
@@ -1074,6 +1082,13 @@ fn main_history(
     let mut moved: Vec<(u64, ChangesetId)> = Vec::new();
     for item in log.iter()? {
         let (k, v) = item?;
+        // Only two kinds of record matter; the rest (drafts and intents, the bulk of
+        // the log) are skipped on a byte search instead of being decoded. A false
+        // match is decoded and ignored below, and every record of the two kinds
+        // carries its tag (`history_tags_match_the_records_they_select`).
+        if !history_tags().is_match(v.value()) {
+            continue;
+        }
         let record = decode_record(k.value(), v.value())?;
         match record.event {
             Event::LocationAdded {
@@ -1686,6 +1701,29 @@ mod tests {
         .unwrap();
         let (l, f) = ids();
         store.add_location(&l, None, &main).unwrap();
+        let request = LandingRequest::new(AuthorKind::Agent);
+        // A move that touches no governance path does not count against the tier.
+        let o = ForkName::new("o").unwrap();
+        store.create_fork(&o, &l, &agent()).unwrap();
+        let other = Changeset::new(
+            &main,
+            vec![Op::put(RepoPath::new("other").unwrap(), put(b"x"))],
+        )
+        .unwrap();
+        let other_id = store.publish_draft(&o, &w1(), &other).unwrap().id;
+        store.advance_main(&o, other_id).unwrap();
+        let main = store.main_tree(&l).unwrap();
+        let h = ForkName::new("h").unwrap();
+        store.create_fork(&h, &l, &agent()).unwrap();
+        let gov = Changeset::new(
+            &main,
+            vec![Op::put(RepoPath::new("GOV").unwrap(), put(b"h"))],
+        )
+        .unwrap();
+        let gov_id = store.publish_draft(&h, &w1(), &gov).unwrap().id;
+        let early = store.evaluate_at(&h, gov_id, &request, now_ms()).unwrap();
+        assert!(early.passed, "{:?}", early.results);
+
         store.create_fork(&f, &l, &agent()).unwrap();
         let first = Changeset::new(
             &main,
@@ -1708,7 +1746,6 @@ mod tests {
         )
         .unwrap();
         let id = store.publish_draft(&g, &w1(), &next).unwrap().id;
-        let request = LandingRequest::new(AuthorKind::Agent);
         let fails = |at: u64| -> Vec<String> {
             store
                 .evaluate_at(&g, id, &request, at)
@@ -1775,5 +1812,23 @@ mod tests {
             .map(|r| r.gate.as_str())
             .collect();
         assert_eq!(failed, ["policy", "checks"]);
+    }
+
+    /// The byte search [`main_history`] skips records with matches every record of
+    /// the two kinds it reads, and no other kind.
+    #[test]
+    fn history_tags_match_the_records_they_select() {
+        let (_dir, store, cs) = setup();
+        let (_, f) = ids();
+        store.advance_main(&f, ChangesetId::of(&cs)).unwrap();
+        let records = store.records(0, 100).unwrap();
+        for record in records {
+            let bytes = to_json(&record);
+            let wanted = matches!(
+                record.event,
+                Event::LocationAdded { .. } | Event::MainAdvanced { .. }
+            );
+            assert_eq!(history_tags().is_match(&bytes), wanted, "{record:?}");
+        }
     }
 }
