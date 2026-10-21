@@ -33,7 +33,9 @@ pub enum FsError {
     Tree(#[from] TreeError),
     #[error(".forkignore: {0}")]
     Ignore(String),
-    #[error("{path}: a checkout needs a missing or empty directory of its own: {why}")]
+    #[error(
+        "{path}: a checkout needs an empty directory of its own, or a missing one whose parent exists: {why}"
+    )]
     Destination { path: PathBuf, why: &'static str },
     #[error("no source has blob {0}")]
     MissingBlob(GitOid),

@@ -206,8 +206,8 @@ pub struct Checkout {
     pub copied: usize,
 }
 
-/// Materialise `tree` into `dest`: a missing directory, which is created, or an empty
-/// one. `dest` is the caller's path and is resolved as given (on macOS `/tmp` is itself a
+/// Materialise `tree` into `dest`: an empty directory, or a missing one whose parent
+/// exists, which is created (a missing parent is an error, never created). `dest` is the caller's path and is resolved as given (on macOS `/tmp` is itself a
 /// link); everything under it is reached without following a link.
 ///
 /// **Precondition: `dest` is the caller's alone until this returns.** A checkout writes
@@ -356,8 +356,10 @@ fn prepare(dest: &Path) -> Result<OwnedFd> {
             return Err(refuse("it is not a directory"));
         }
         Ok(_) => {}
+        // Only `dest` itself is created. A missing parent is an error, never created:
+        // the checkout makes nothing outside `dest`.
         Err(e) if e.kind() == io::ErrorKind::NotFound => fs::DirBuilder::new()
-            .recursive(true)
+            .recursive(false)
             .mode(0o755)
             .create(dest)
             .map_err(FsError::io(dest))?,
@@ -406,6 +408,12 @@ fn write_file(
     let (cloned, written) = match source.fetch(oid).map_err(FsError::io(&abs))? {
         None => return Err(FsError::MissingBlob(oid)),
         Some(fetched @ (Fetched::File(_) | Fetched::Vouched(_))) => {
+            let size = match &fetched {
+                Fetched::File(file) => file.metadata().map_err(FsError::io(&abs))?.len(),
+                Fetched::Vouched(v) => v.stamp.size(),
+                Fetched::Bytes(_) => unreachable!("matched above"),
+            };
+            too_large(&abs, size)?;
             let (file, stamp) = match fetched {
                 Fetched::Vouched(v) if v.oid == oid => (v.file, v.stamp),
                 Fetched::Vouched(v) => {
@@ -432,6 +440,7 @@ fn write_file(
             (cloned, written)
         }
         Some(Fetched::Bytes(bytes)) => {
+            too_large(&abs, bytes.len() as u64)?;
             verify(oid, &bytes)?;
             check_content(path, entry.mode(), &bytes)?;
             let mut file = create(root, &name).map_err(FsError::io(&abs))?;
@@ -453,6 +462,18 @@ fn write_file(
             .map_err(FsError::io(&abs))?;
     }
     Ok(cloned)
+}
+
+/// A checkout never writes a file a snapshot would refuse as too large.
+fn too_large(abs: &Path, size: u64) -> Result<()> {
+    if size > MAX_FILE_BYTES {
+        return Err(FsError::TooLarge {
+            path: abs.into(),
+            size,
+            limit: MAX_FILE_BYTES,
+        });
+    }
+    Ok(())
 }
 
 /// A file a clone just created by `name` (macOS gives back no descriptor), opened again
@@ -568,6 +589,11 @@ fn clone_or_copy(src: &File, root: &OwnedFd, name: &CString) -> io::Result<(bool
     // target, which can lie outside `dest`. With it an existing name fails `EEXIST`,
     // as `create` does on Linux.
     const CLONE_NOFOLLOW: u32 = 0x0001;
+    // A clone carries the source's BSD flags (`uchg`, Finder's "Locked"), which would leave
+    // a file the fork cannot edit and a checkout nobody can remove. Such a file is copied.
+    if std::os::macos::fs::MetadataExt::st_flags(&src.metadata()?) != 0 {
+        return copy(src, root, name);
+    }
     // SAFETY: both descriptors are open for the duration of the call and `name` is a
     // NUL-terminated string that outlives it; `fclonefileat` reads only these.
     let rc = unsafe {

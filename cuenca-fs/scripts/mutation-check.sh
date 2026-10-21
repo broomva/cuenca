@@ -118,6 +118,13 @@ mutate src/scan.rs '|| (ignored_dirs.contains(*path) && ignore.is_ignored(path, 
 # The macOS clone must not follow a link planted at the name (Linux creates with O_EXCL).
 if [ "$(uname)" = Darwin ]; then
   mutate src/checkout.rs '            CLONE_NOFOLLOW,' '            0,' --test fs planted_at_a_file_name
+  # A clone would carry the source's flags (uchg): such a file is copied.
+  mutate src/checkout.rs 'st_flags(&src.metadata()?) != 0 {' 'st_flags(&src.metadata()?) == u32::MAX {' --test fs locked_source
 fi
+
+# A checkout creates dest, never its parent, and never writes what a snapshot refuses.
+mutate src/checkout.rs '.recursive(false)' '.recursive(true)' --test fs parent_of_dest
+mutate src/checkout.rs '            too_large(&abs, size)?;' '' --test fs larger_than_a_snapshot
+mutate src/checkout.rs '            too_large(&abs, bytes.len() as u64)?;' '' --test fs larger_than_a_snapshot
 
 exit $survived

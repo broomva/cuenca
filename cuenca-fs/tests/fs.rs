@@ -848,6 +848,99 @@ fn a_link_planted_at_a_file_name_is_never_followed() {
     assert!(!outside.join("planted").exists());
 }
 
+#[test]
+fn a_checkout_never_creates_the_parent_of_dest() {
+    let dir = tempfile::tempdir().unwrap();
+    let missing = dir.path().join("missing");
+    assert!(matches!(
+        checkout(
+            &Tree::new(),
+            &missing.join("dest"),
+            &ObjectDir::new(dir.path())
+        ),
+        Err(FsError::Io { .. })
+    ));
+    assert!(!missing.exists());
+}
+
+/// A source that answers every request with one file, or with bytes, whatever is asked.
+enum Answer {
+    File(std::path::PathBuf),
+    Bytes(Vec<u8>),
+}
+
+impl BlobSource for Answer {
+    fn fetch(&self, _: GitOid) -> io::Result<Option<Fetched>> {
+        Ok(Some(match self {
+            Answer::File(path) => Fetched::File(fs::File::open(path)?),
+            Answer::Bytes(bytes) => Fetched::Bytes(bytes.clone()),
+        }))
+    }
+}
+
+#[test]
+fn a_checkout_never_writes_a_file_larger_than_a_snapshot_accepts() {
+    let dir = tempfile::tempdir().unwrap();
+    let big = dir.path().join("big");
+    File::create(&big)
+        .unwrap()
+        .set_len(cuenca_fs::MAX_FILE_BYTES + 1)
+        .unwrap();
+    let tree = Tree::from_entries([(
+        cuenca_tree::RepoPath::new("big").unwrap(),
+        Entry::file(b"any oid: the size is checked first"),
+    )])
+    .unwrap();
+    for (source, dest) in [
+        (Answer::File(big.clone()), "from-file"),
+        (
+            Answer::Bytes(vec![0; cuenca_fs::MAX_FILE_BYTES as usize + 1]),
+            "from-bytes",
+        ),
+    ] {
+        let dest = dir.path().join(dest);
+        assert!(
+            matches!(
+                checkout(&tree, &dest, &source),
+                Err(FsError::TooLarge { .. })
+            ),
+            "{}",
+            dest.display()
+        );
+        assert!(!dest.join("big").exists());
+    }
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn a_locked_source_file_checks_out_editable() {
+    let dir = tempfile::tempdir().unwrap();
+    let blob = dir.path().join("blob");
+    fs::write(&blob, b"locked content\n").unwrap();
+    let chflags = |flag: &str| {
+        assert!(
+            Command::new("chflags")
+                .arg(flag)
+                .arg(&blob)
+                .status()
+                .unwrap()
+                .success()
+        );
+    };
+    chflags("uchg");
+    let tree = Tree::from_entries([(
+        cuenca_tree::RepoPath::new("notes.md").unwrap(),
+        Entry::file(b"locked content\n"),
+    )])
+    .unwrap();
+    let dest = dir.path().join("dest");
+    let result = checkout(&tree, &dest, &Answer::File(blob.clone()));
+    chflags("nouchg");
+    result.unwrap();
+    fs::write(dest.join("notes.md"), b"edited\n").unwrap();
+    fs::remove_dir_all(&dest).unwrap();
+}
+
 /// A source that answers every request with what another source gives for one blob.
 struct Relay(CheckoutSource, GitOid);
 
