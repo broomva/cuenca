@@ -241,17 +241,21 @@ mutate src/gates/policy.rs "        let text = text.strip_prefix('\\u{feff}').un
 mutate src/gates/policy.rs '                if !RULE_ACTIONS.contains(&action) {' '                if false {' --lib
 mutate src/gates/policy.rs '                        return Err(format!("{key} sets both branch_pattern and path_touched"));' '                        return Ok(policy);' --lib
 mutate src/gates/policy.rs '                    (None, None) => {' '                    (None, None) if false => {' --lib
-mutate src/gates/policy.rs '                    .ok_or_else(|| format!("{key}.pattern is missing"))?;' '                    .unwrap_or_default();' --lib
 
 # P20 r5, r6 and A10: every mapping, the top level included, is read through one schema
 # (`Section`), which refuses an unknown key and a missing required key; an id that looks
 # like G4 is an error. One mechanism, so one mutant each; the walk test covers every
 # mapping in SCHEMA.
 mutate src/gates/policy.rs '                if field(y, key).is_none() {' '                if false {' --lib
-mutate src/gates/policy.rs '                    if id.trim().eq_ignore_ascii_case("G4") {' '                    if false {' --lib
-mutate src/gates/policy.rs '            "catalog",
-            "cuenca",' '            "catalog",
-            "cuenca",
-            "auto_marge",' --lib
+mutate src/gates/policy.rs '                    if folded == "g4" {' '                    if false {' --lib
+
+# P20 r7 (A, B, C): open mappings refuse near misses; tags are refused before loading;
+# a governance glob must compile.
+mutate src/gates/policy.rs '    row[b.len()] <= 2' '    false' --lib
+mutate src/gates/policy.rs '    if a.starts_with(&b) {' '    if false {' --lib
+mutate src/gates/policy.rs '                Event::Scalar(_, _, _, Some(_))
+                | Event::SequenceStart(_, Some(_))' '                Event::SequenceStart(_, Some(_))' --lib
+mutate src/gates/policy.rs '                | Event::MappingStart(_, Some(_)),' '                | Event::MappingStart(usize::MAX, Some(_)),' --lib
+mutate src/gates/policy.rs '.any(|p| p.is_empty() || super::builtin::try_glob(p).is_err())' '.any(|p| p.is_empty())' --lib
 
 exit $survived

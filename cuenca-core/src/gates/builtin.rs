@@ -322,6 +322,12 @@ pub(super) fn inside(w: &Window, at_ms: u64) -> bool {
 /// case-folded: `*` is any run of characters, `/` included; `?` one character;
 /// `[...]` a class, `[!...]` its complement; anything else literal.
 pub(super) fn glob(pattern: &str) -> Regex {
+    try_glob(pattern).unwrap_or_else(|_| Regex::new("$^").expect("never matches"))
+}
+
+/// [`glob`], or the error of a class the regex engine refuses (`[z-ab]`, which
+/// `fnmatch` reads differently); a compiled policy has none ([`super::policy`]).
+pub(super) fn try_glob(pattern: &str) -> Result<Regex, regex::Error> {
     let mut re = String::from("(?is)^");
     let chars: Vec<char> = pattern.chars().collect();
     let mut i = 0;
@@ -369,7 +375,7 @@ pub(super) fn glob(pattern: &str) -> Regex {
         i += 1;
     }
     re.push('$');
-    Regex::new(&re).unwrap_or_else(|_| Regex::new("$^").expect("never matches"))
+    Regex::new(&re)
 }
 
 #[cfg(test)]

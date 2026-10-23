@@ -30,10 +30,16 @@
 //! [`Section`]): a key the schema does not list is an error, a key it requires must be
 //! there, and the engine can only read a key the schema declares. A misspelt setting,
 //! or a misspelt section holding settings, is therefore an error at any depth, never a
-//! dropped gate. The top level lists the control metalayer's keys as well as
-//! `gates`, `auto_merge` and `cuenca`; a new top-level key in the workspace's policy is
-//! an error here until it is added. A `gates.hard` entry whose id looks like `G4`
-//! without being it (`g4`, `G4 `) is an error too. A key the engine reads must hold its
+//! dropped gate. Two mappings are open, because the rest of them belongs to the
+//! workspace and differs between policies (`write_gate`, `permissions`, `governed`,
+//! ...): the top level, where the engine reads `gates`, `auto_merge` and `cuenca`, and
+//! `gates`, where it reads `hard`. There another key is allowed unless it is a near miss
+//! of one the engine reads (`auto_marge`, `Auto-Merge`, `cuenca_gates`), which is an
+//! error. YAML tags are refused before loading (yaml-rust2 drops a key whose tag does
+//! not convert and shifts its mapping). A `gates.hard` entry whose id looks like `G4`
+//! without being it (`g4`, `G4 `, `G4` with an invisible character) is an error; a `G4`
+//! without a `pattern` adds none (the built-in one always runs). A governance glob that
+//! is empty or does not compile is an error. A key the engine reads must hold its
 //! type when it is present: only a missing key is absent. `key:` with no value is an
 //! error, except `auto_merge.gates` and its `governance`, which p9 reads as its
 //! defaults. So `auto_merge: ~` is an error here, where p9 reads it as auto-merge
@@ -97,38 +103,35 @@ pub(crate) struct Schema {
     pub(crate) path: &'static str,
     pub(crate) known: &'static [&'static str],
     pub(crate) required: &'static [&'static str],
+    /// Other keys are allowed, except one that is a near miss of a known key
+    /// ([`near_miss`]): the top level, whose other keys belong to the rest of the
+    /// workspace and change without the engine.
+    pub(crate) open: bool,
 }
 
 /// Every mapping the engine reads, and nothing else is read ([`Section`]).
 pub(crate) const SCHEMA: &[Schema] = &[
     Schema {
-        // The control metalayer's top-level keys, and the engine's own `cuenca`.
+        // The rest of the top level is the workspace's (`write_gate`, `permissions`,
+        // `project`, ... differ between policies), so only near misses are refused.
         path: "",
-        known: &[
-            "version",
-            "profile",
-            "workspace",
-            "setpoints",
-            "gates",
-            "profiles",
-            "plants",
-            "ci_watch",
-            "ci_heal",
-            "auto_merge",
-            "catalog",
-            "cuenca",
-        ],
+        known: &["gates", "auto_merge", "cuenca"],
         required: &[],
+        open: true,
     },
     Schema {
+        // The workspace's own gate lists (`governed`, `G1_merge`, ...) vary between
+        // policies; the engine reads only `hard`.
         path: "gates",
-        known: &["hard", "soft"],
+        known: &["hard"],
         required: &[],
+        open: true,
     },
     Schema {
         path: "gates.hard[]",
         known: &["id", "measurement", "pattern", "rule"],
         required: &["id"],
+        open: false,
     },
     Schema {
         // p9's keys (`_parse_auto_merge`).
@@ -144,18 +147,21 @@ pub(crate) const SCHEMA: &[Schema] = &[
             "gates",
         ],
         required: &[],
+        open: false,
     },
     Schema {
         // Exactly one of the two targets is checked where the rule is read.
         path: "auto_merge.rules[]",
         known: &["action", "branch_pattern", "path_touched"],
         required: &[],
+        open: false,
     },
     Schema {
         // p9's keys (`_parse_gates`).
         path: "auto_merge.gates",
         known: &["review_bots", "aggregate_checks", "p20", "governance"],
         required: &[],
+        open: false,
     },
     Schema {
         path: "auto_merge.gates.governance",
@@ -167,11 +173,13 @@ pub(crate) const SCHEMA: &[Schema] = &[
             "l3_window_seconds",
         ],
         required: &[],
+        open: false,
     },
     Schema {
         path: "cuenca",
         known: &["gates"],
         required: &[],
+        open: false,
     },
     Schema {
         path: "cuenca.gates",
@@ -182,11 +190,13 @@ pub(crate) const SCHEMA: &[Schema] = &[
             "landing_windows",
         ],
         required: &[],
+        open: false,
     },
     Schema {
         path: "cuenca.gates.landing_windows[]",
         known: &["days", "from", "to", "utc_offset"],
         required: &["days", "from", "to"],
+        open: false,
     },
 ];
 
@@ -279,18 +289,29 @@ impl Policy {
             for (i, gate) in hard.iter().enumerate() {
                 let key = format!("gates.hard[{i}]");
                 let gate = Section::read(Some(gate), "gates.hard[]", &key)?;
-                let id = string(gate.get("id"), &format!("{key}.id"))?.unwrap_or_default();
+                let id = string(gate.get("id"), &format!("{key}.id"))?
+                    .expect("SCHEMA requires gates.hard[].id");
                 if id != "G4" {
-                    // An id that only looks like the engine's gate would drop it.
-                    if id.trim().eq_ignore_ascii_case("G4") {
+                    // An id that only looks like the engine's gate would drop it: `g4`,
+                    // `G4 `, or `G4` with an invisible character (r7, A).
+                    let folded: String = id
+                        .chars()
+                        .filter(|c| c.is_alphanumeric())
+                        .flat_map(char::to_lowercase)
+                        .collect();
+                    if folded == "g4" {
                         return Err(format!(
                             "{key}.id is {id:?}; the secret-path gate is \"G4\""
                         ));
                     }
                     continue;
                 }
-                let pattern = string(gate.get("pattern"), &format!("{key}.pattern"))?
-                    .ok_or_else(|| format!("{key}.pattern is missing"))?;
+                // A G4 without a pattern names another rule (the control kernel's
+                // template uses G4 for its own); the built-in pattern runs regardless,
+                // and a misspelt `pattern` is an unknown key.
+                let Some(pattern) = string(gate.get("pattern"), &format!("{key}.pattern"))? else {
+                    continue;
+                };
                 one_more_pattern(&policy)?;
                 policy.secret_paths.push(
                     compile(&pattern).map_err(|e| not_compiled("gates.hard[G4].pattern", &e))?,
@@ -426,6 +447,16 @@ fn governance(gates: Option<&Yaml>) -> Res<Option<Governance>> {
                     "{KEY}.paths may add paths but not drop the L3 set; missing {missing:?}"
                 ));
             }
+            // A glob that does not compile would match nothing and drop its path
+            // from the tier (r7, A).
+            if paths
+                .iter()
+                .any(|p| p.is_empty() || super::builtin::try_glob(p).is_err())
+            {
+                return Err(format!(
+                    "{KEY}.paths holds an empty glob or one that does not compile"
+                ));
+            }
             paths
         }
     };
@@ -463,6 +494,21 @@ fn prescan(text: &str) -> Res<()> {
     loop {
         match parser.next_token() {
             Ok((Event::StreamEnd, _)) => return Ok(()),
+            // yaml-rust2 turns a key whose tag does not convert (`!!null x:`) into its
+            // own "no key yet" marker, and the mapping shifts by one pair and drops its
+            // last key before any schema sees it (r7, B and C). p9's loader reads the
+            // file differently. So no tag is read at all.
+            Ok((
+                Event::Scalar(_, _, _, Some(_))
+                | Event::SequenceStart(_, Some(_))
+                | Event::MappingStart(_, Some(_)),
+                mark,
+            )) => {
+                return Err(format!(
+                    "{POLICY_PATH} uses a YAML tag (line {}), which the gate engine refuses",
+                    mark.line()
+                ));
+            }
             Ok((Event::SequenceStart(..) | Event::MappingStart(..), mark)) => {
                 depth += 1;
                 if depth > MAX_POLICY_DEPTH {
@@ -543,6 +589,11 @@ impl<'y> Section<'y> {
         for key in y.as_hash().into_iter().flat_map(|m| m.keys()) {
             match key.as_str() {
                 Some(k) if schema.known.contains(&k) => {}
+                Some(k) if schema.open => {
+                    if let Some(known) = schema.known.iter().find(|known| near_miss(k, known)) {
+                        return Err(format!("{at}: unknown key {k:?}, too close to {known:?}"));
+                    }
+                }
                 _ => return Err(format!("{at}: unknown key {key:?}")),
             }
         }
@@ -565,6 +616,34 @@ impl<'y> Section<'y> {
         );
         field(self.y, key)
     }
+}
+
+/// Whether `key` reads as a misspelling of `known`: once case and everything but
+/// letters and digits are dropped, it starts with `known` or is at most two edits from
+/// it (`Auto-Merge`, `auto_marge`, `gate`, `cuenca_gates`).
+fn near_miss(key: &str, known: &str) -> bool {
+    let fold = |s: &str| -> Vec<char> {
+        s.chars()
+            .filter(|c| c.is_alphanumeric())
+            .flat_map(char::to_lowercase)
+            .collect()
+    };
+    let (a, b) = (fold(key), fold(known));
+    if a.starts_with(&b) {
+        return true;
+    }
+    // Levenshtein distance, one row at a time.
+    let mut row: Vec<usize> = (0..=b.len()).collect();
+    for (i, ca) in a.iter().enumerate() {
+        let mut prev = row[0];
+        row[0] = i + 1;
+        for (j, cb) in b.iter().enumerate() {
+            let cur = row[j + 1];
+            row[j + 1] = (prev + usize::from(ca != cb)).min(row[j] + 1).min(cur + 1);
+            prev = cur;
+        }
+    }
+    row[b.len()] <= 2
 }
 
 /// Refuses a pattern before it is compiled once the cap (built-ins included) is
@@ -825,10 +904,21 @@ cuenca:
             b"auto_merge:\n  rules:\n    - {action: require_human}\n",
             b"auto_merge:\n  rules:\n    - {path_touched: CLAUDE.md, branch_pattern: x, action: notify}\n",
             b"gates:\n  hard:\n    - id: G4\n      patern: '\\.pem$'\n",
-            b"gates:\n  hard:\n    - {id: G4, rule: r}\n",
             // ... and at the top level (A10): `auto_marge` would drop every rule.
             b"auto_marge:\n  rules:\n    - {path_touched: CLAUDE.md, action: require_human}\n",
             b"cuenca_gates: {max_file_bytes: 1}\n",
+            b"Auto-Merge: {}\n",
+            b"gate: {hard: []}\n",
+            // A tag is refused (r7, B and C): yaml-rust2 drops a key whose tag does not
+            // convert and shifts the mapping, losing its last key.
+            b"!!null x: version\nauto_merge:\n  rules:\n    - {path_touched: CLAUDE.md, action: require_human}\n  gates: {}\n",
+            b"auto_merge:\n  !!bool yes: 1\n  rules:\n    - {path_touched: CLAUDE.md, action: require_human}\n",
+            b"cuenca: !!map {gates: {}}\n",
+            // A governance glob is refused if empty or if it does not compile, rather
+            // than matching nothing (r7, A).
+            b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '[z-ab]']\n",
+            b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '']\n",
+            "gates:\n  hard:\n    - {id: \"G4\u{200b}\", pattern: x}\n".as_bytes(),
         ] {
             assert!(Policy::parse(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
         }
@@ -927,7 +1017,13 @@ cuenca:
             let Yaml::Hash(map) = at(&mut doc, schema.path) else {
                 panic!("{label} is not a mapping in FULL")
             };
-            map.insert(Yaml::String("zz_unknown".into()), Yaml::Integer(1));
+            // An open mapping takes any key that is not a near miss of its own.
+            let unknown = if schema.open {
+                format!("{}x", schema.known[0])
+            } else {
+                "zz_unknown".to_string()
+            };
+            map.insert(Yaml::String(unknown), Yaml::Integer(1));
             edits.push((format!("{label}: unknown key"), doc));
 
             let mut present = Vec::new();
@@ -942,7 +1038,12 @@ cuenca:
                     .all(|r| present.iter().any(|p| p == r)),
                 "FULL lacks a required key of {label}"
             );
-            for key in &present {
+            // A misspelt key the schema does not declare (the top level's `version`)
+            // is the workspace's own, not the engine's.
+            let declared = present
+                .iter()
+                .filter(|k| schema.known.contains(&k.as_str()));
+            for key in declared {
                 let mut doc = full.clone();
                 let Yaml::Hash(map) = at(&mut doc, schema.path) else {
                     unreachable!()
@@ -974,6 +1075,34 @@ cuenca:
             assert!(err.contains("gates.hard[0].id"), "{err}");
         }
         assert!(Policy::parse(b"gates:\n  hard:\n    - {id: G4b, pattern: x}\n").is_ok());
+    }
+
+    /// The rest of the top level is the workspace's: keys the engine does not read,
+    /// whichever policy they come from, compile (r7, B: `write_gate`, `permissions`,
+    /// `project`, `trust_tiers` refused four of the workspace's five p9-valid policies).
+    #[test]
+    fn other_top_level_keys_are_the_workspaces() {
+        let p = Policy::parse(
+            b"version: 1\nwrite_gate: {x: 1}\npermissions: []\nproject: p\ntrust_tiers: {}\nrcs: 1\nauto_merge:\n  rules:\n    - {path_touched: CLAUDE.md, action: require_human}\n",
+        )
+        .unwrap();
+        assert_eq!(p.protected, ["CLAUDE.md"]);
+        for (key, known) in [
+            ("auto_marge", "auto_merge"),
+            ("AutoMerge", "auto_merge"),
+            ("gate", "gates"),
+            ("cuenka", "cuenca"),
+        ] {
+            assert!(near_miss(key, known), "{key}");
+        }
+        for (key, known) in [
+            ("write_gate", "gates"),
+            ("plants", "gates"),
+            ("catalog", "cuenca"),
+            ("ci_heal", "cuenca"),
+        ] {
+            assert!(!near_miss(key, known), "{key}");
+        }
     }
 
     /// A byte-order mark is skipped, as p9's loader skips it, and never turns the first
