@@ -500,6 +500,82 @@ fn a_hung_call_is_killed_and_retried() {
     assert_eq!(up.creates().len(), 1);
 }
 
+/// A fork with several drafts lands its head onto main: the export carries every
+/// draft's files, not only the last one's.
+#[test]
+fn a_fork_with_several_drafts_lands_its_head() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (a1, first) = requested(&s, &up, Some(&up.url));
+    let _ = first;
+    // Two more drafts on top of the first, then verify and ask for the head.
+    let mut id = first;
+    for n in 0..2 {
+        let head = s.fork_head(&a1, "f1");
+        let cs = s.write(
+            &a1,
+            &head,
+            &[(&format!("more/{n}.txt"), format!("{n}\n").as_bytes())],
+        );
+        let r: Value = s.publish(&a1, "f1", 1, &cs).json().unwrap();
+        id = ChangesetId::from_hex(r["id"].as_str().unwrap()).unwrap();
+    }
+    verify_and_ask(&s, &a1, "f1", id);
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
+    let step = wait_for(s.authority.store(), &f1(), |st| {
+        in_review(st) || matches!(st, LandingStep::Failed { .. })
+    });
+    assert!(in_review(&step), "{step:?}");
+    let branch = format!("cp/{id}");
+    let head = s.authority.store().fork(&f1()).unwrap().unwrap().head;
+    assert_eq!(
+        up.git(&["rev-parse", &format!("{branch}^{{tree}}")]),
+        head.to_hex()
+    );
+    assert_eq!(
+        up.git(&["rev-parse", &format!("{branch}^")]),
+        up.git(&["rev-parse", "main"])
+    );
+    // The first draft's file is there, from the authority's blobs.
+    assert_eq!(up.git(&["show", &format!("{branch}:new/file.txt")]), "new");
+    assert_eq!(up.git(&["show", &format!("{branch}:more/1.txt")]), "1");
+}
+
+/// A pull request from the export's branch at another commit is not this landing's.
+#[test]
+fn a_pull_request_from_the_branch_at_another_commit_fails_the_landing() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (_a1, id) = requested(&s, &up, Some(&up.url));
+    let key = format!("cp_{id}");
+    std::fs::create_dir_all(tmp.path().join("prs")).unwrap();
+    std::fs::write(tmp.path().join("prs").join(&key), "7\n").unwrap();
+    std::fs::write(
+        tmp.path().join("prs").join(format!("{key}.oid")),
+        "1111111111111111111111111111111111111111\n",
+    )
+    .unwrap();
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
+    let step = wait_for(s.authority.store(), &f1(), |st| {
+        matches!(st, LandingStep::Failed { .. })
+    });
+    let LandingStep::Failed { reason } = step else {
+        unreachable!()
+    };
+    assert!(reason.contains("pull request 7"), "{reason}");
+    assert!(up.creates().is_empty());
+}
+
 // ---- kill the authority at each landing step -----------------------------------------
 
 const DIR_ENV: &str = "CUENCA_LAND_CRASH_DIR";

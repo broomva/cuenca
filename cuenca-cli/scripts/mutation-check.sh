@@ -140,6 +140,6 @@ mutate src/run.rs '            Some(0) => ended(CheckStatus::Passed, Some(0), ou
 
 # Landing: the request reports who it waits for and what the lander reached.
 mutate src/verbs.rs '"requested" if state["remote"] != true => Some("owner"),' '"requested" if false => Some("owner"),' --test cli every_agent_verb
-mutate src/verbs.rs '        exit: if status == "failed" { 1 } else { 0 },' '        exit: 0,' --test cli land_reports_a_failed
+mutate src/verbs.rs '        exit: if matches!(status.as_str(), "failed" | "dropped") {' '        exit: if false {' --test cli land_reports_a_failed
 
 exit $survived

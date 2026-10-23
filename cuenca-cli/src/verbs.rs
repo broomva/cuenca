@@ -1015,7 +1015,12 @@ pub fn land(client: &Client, dir: &Path, wait: std::time::Duration) -> anyhow::R
     };
     let landing = &state["landing"];
     let step = &landing["step"];
-    let status = step["step"].as_str().unwrap_or("unknown").to_string();
+    // A takeover (or the holder's newer request) dropped this one while it waited.
+    let status = if landing["changeset"] != json!(id) {
+        "dropped".to_string()
+    } else {
+        step["step"].as_str().unwrap_or("unknown").to_string()
+    };
     let waiting_for = match status.as_str() {
         "requested" if state["remote"] != true => Some("owner"),
         "requested" | "exporting" | "exported" | "reviewing" => Some("authority"),
@@ -1033,7 +1038,11 @@ pub fn land(client: &Client, dir: &Path, wait: std::time::Duration) -> anyhow::R
         text.push_str(&format!("the authority is retrying after: {e}\n"));
     }
     Ok(Report {
-        exit: if status == "failed" { 1 } else { 0 },
+        exit: if matches!(status.as_str(), "failed" | "dropped") {
+            1
+        } else {
+            0
+        },
         json: json!({
             "fork": f.name,
             "changeset": id,

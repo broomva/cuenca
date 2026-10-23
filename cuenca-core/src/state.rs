@@ -92,6 +92,9 @@ pub struct Landing {
     pub changeset: ChangesetId,
     /// The offset of the request's record.
     pub offset: u64,
+    /// The location's main the request's verify was judged against: what the head is
+    /// landed onto.
+    pub main: GitOid,
     /// The offset of the record that moved it to `step`.
     pub moved: u64,
     pub step: LandingStep,
@@ -227,8 +230,6 @@ pub(crate) trait View {
     /// The offset of the record that revoked `principal`, if one did.
     fn revoked(&self, principal: &PrincipalName) -> Result<Option<u64>>;
     fn put_revoked(&mut self, principal: &PrincipalName, offset: u64) -> Result<()>;
-    /// A changeset some draft recorded.
-    fn changeset(&self, id: ChangesetId) -> Result<Option<Changeset>>;
     fn put_location(&mut self, location: &Location) -> Result<()>;
     fn put_fork(&mut self, fork: &Fork) -> Result<()>;
     /// Index a draft's changeset under its id, unless an earlier draft already did.
@@ -437,17 +438,20 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             if let Some(holder) = state.holder() {
                 not_revoked(view, &holder.principal)?;
             }
-            let changeset = view
-                .changeset(*id)?
-                .ok_or_else(|| CoreError::UnknownChangeset(id.to_hex()))?;
-            if changeset.base != loc.main {
+            // Drafts chain, so the head is the fork's whole work since its base. It lands
+            // only onto a main that is still that base, or that this fork moved last (to
+            // an earlier draft of the same chain): anything else would drop what landed
+            // in between.
+            let ours =
+                loc.main == state.base || loc.main_moved.as_ref().is_some_and(|m| m.fork == *from);
+            if !ours {
                 return Err(CoreError::NotAtBase {
                     what: format!("main of {at:?}"),
                     head: loc.main,
-                    base: changeset.base,
+                    base: state.base,
                 });
             }
-            loc.main = changeset.target;
+            loc.main = state.head;
             loc.main_moved = Some(MainMove {
                 changeset: *id,
                 fork: from.clone(),
@@ -490,6 +494,7 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             state.landing = Some(Landing {
                 changeset: *id,
                 offset,
+                main: loc.main,
                 moved: offset,
                 step: LandingStep::Requested,
             });
@@ -864,10 +869,6 @@ impl View for Memory {
     fn put_revoked(&mut self, principal: &PrincipalName, offset: u64) -> Result<()> {
         self.revoked.insert(principal.clone(), offset);
         Ok(())
-    }
-
-    fn changeset(&self, id: ChangesetId) -> Result<Option<Changeset>> {
-        Ok(self.changesets.get(&id).map(|(_, c)| c.clone()))
     }
 
     fn put_location(&mut self, location: &Location) -> Result<()> {

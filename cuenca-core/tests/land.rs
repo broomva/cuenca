@@ -337,3 +337,60 @@ fn a_pull_request_needs_a_number_and_a_url() {
         .record_in_review(&f(), id, 1, "https://github.com/x/y/pull/1")
         .unwrap();
 }
+
+/// Drafts chain: a fork with several drafts lands its head, all of them, onto the main
+/// it started from, and onto nothing else.
+#[test]
+fn a_fork_with_several_drafts_lands_its_head_onto_its_own_base_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let main = tree(&store, &[("a", b"1")]);
+    store.add_location(&loc("l"), None, &main).unwrap();
+    for name in ["f", "g"] {
+        store.create_fork(&fork(name), &loc("l"), &agent()).unwrap();
+    }
+    let mut head = main.clone();
+    let mut id = None;
+    for n in 0..3u8 {
+        let cs = write(&store, &head, &[(&format!("f{n}"), &[n][..])]);
+        id = Some(store.publish_draft(&f(), &w1(), &cs).unwrap().id);
+        head = store.fork_head(&f()).unwrap();
+    }
+    let id = id.unwrap();
+    verify(&store, &f(), &w1(), id);
+    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    assert_eq!(
+        store.fork(&f()).unwrap().unwrap().landing.unwrap().main,
+        main.git_tree_id()
+    );
+    // g lands first: f's head no longer starts from main, and would drop g's change.
+    let g1 = write(&store, &main, &[("g", b"g")]);
+    let pg = store.publish_draft(&fork("g"), &w1(), &g1).unwrap();
+    land(&store, &fork("g"), &w1(), pg.id);
+    assert!(matches!(
+        store.advance_main(&f(), id),
+        Err(CoreError::NotAtBase { .. })
+    ));
+
+    // On a fresh location the same chain lands whole.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let main = tree(&store, &[("a", b"1")]);
+    store.add_location(&loc("l"), None, &main).unwrap();
+    store.create_fork(&f(), &loc("l"), &agent()).unwrap();
+    let mut head = main.clone();
+    let mut last = None;
+    for n in 0..3u8 {
+        let cs = write(&store, &head, &[(&format!("f{n}"), &[n][..])]);
+        last = Some(store.publish_draft(&f(), &w1(), &cs).unwrap().id);
+        head = store.fork_head(&f()).unwrap();
+    }
+    land(&store, &f(), &w1(), last.unwrap());
+    assert_eq!(store.main_tree(&loc("l")).unwrap(), head);
+    // And the fork goes on from there: its next draft lands onto the main it moved.
+    let cs = write(&store, &head, &[("more", b"m")]);
+    let next = store.publish_draft(&f(), &w1(), &cs).unwrap().id;
+    land(&store, &f(), &w1(), next);
+    assert_eq!(store.main_tree(&loc("l")).unwrap().git_tree_id(), cs.target);
+    store.replay_check().unwrap();
+}

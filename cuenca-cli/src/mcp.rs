@@ -551,7 +551,7 @@ pub fn tools() -> Vec<Tool> {
              with a git remote the authority opens a pull request, which GitHub's required \
              checks gate; this waits up to a minute for it. On one without, the request \
              waits for the owner. `status`: requested, exporting, exported, reviewing, \
-             in_review, landed or failed.",
+             in_review, landed, failed, or dropped (a takeover or a newer request replaced it).",
             input(
                 json!({ "dir": dir("a directory inside the checkout") }),
                 &["dir"],

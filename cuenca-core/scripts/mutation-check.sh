@@ -107,7 +107,11 @@ mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(*id) 
                     fork: from.to_string(),' 'if false {
                 return Err(CoreError::NotHead {
                     fork: from.to_string(),' --test land
-mutate src/state.rs 'if changeset.base != loc.main {' 'if false {' --test store
+mutate src/state.rs '            let ours =
+                loc.main == state.base || loc.main_moved.as_ref().is_some_and(|m| m.fork == *from);' '            let ours = true;' --test land
+mutate src/state.rs '            let ours =
+                loc.main == state.base || loc.main_moved.as_ref().is_some_and(|m| m.fork == *from);' '            let ours = loc.main == state.base;' --test land
+mutate src/state.rs '            loc.main = state.head;' '            loc.main = state.base;' --test land
 mutate src/state.rs 'if let Some(l) = &state.landing
                 && l.changeset == *id' 'if let Some(l) = &state.landing
                 && false' --test store

@@ -278,7 +278,6 @@ impl Store {
                 forks: txn.open_table(FORKS)?,
                 changesets: txn.open_table(CHANGESETS)?,
                 revoked: txn.open_table(REVOKED)?,
-                log: &log,
             };
             let event = build(&view)?;
             if let Applied::Repeat(at) = apply(&mut view, offset, &event)? {
@@ -852,7 +851,6 @@ struct Tables<'t> {
     forks: redb::Table<'t, &'static str, Bytes>,
     changesets: redb::Table<'t, Bytes, u64>,
     revoked: redb::Table<'t, &'static str, u64>,
-    log: &'t redb::Table<'t, u64, Bytes>,
 }
 
 impl View for Tables<'_> {
@@ -871,10 +869,6 @@ impl View for Tables<'_> {
     fn put_revoked(&mut self, principal: &PrincipalName, offset: u64) -> Result<()> {
         self.revoked.insert(principal.as_str(), offset)?;
         Ok(())
-    }
-
-    fn changeset(&self, id: ChangesetId) -> Result<Option<Changeset>> {
-        indexed_changeset(&self.changesets, self.log, id)
     }
 
     fn put_location(&mut self, location: &Location) -> Result<()> {

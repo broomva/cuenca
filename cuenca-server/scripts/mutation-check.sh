@@ -180,4 +180,8 @@ mutate src/land.rs '                    let export = match git.remote_branch(&re
                     };' '                    let export = self.build(&git, &remote, &fork, &landing, None)?;' --test land a_changeset_landed_again
 mutate src/land.rs '            Ok(None) if std::time::Instant::now() >= deadline => {' '            Ok(None) if false => {' --test land a_hung_call
 
+mutate src/land.rs '            if !on_main.contains(&oid)' '            if false' --test land a_fork_with_several
+mutate src/land.rs '        let main = landing.main;' '        let main = changeset.base;' --test land a_fork_with_several
+mutate src/land.rs '            Some(p) if p.head_ref_oid == export.commit.to_hex() => Ok(Some((p.number, p.url))),' '            Some(p) => Ok(Some((p.number, p.url))),' --test land a_pull_request_from
+
 exit $survived

@@ -129,7 +129,8 @@ pub enum Event {
         fork: ForkName,
         changeset: ChangesetId,
     },
-    /// A pull request from the export's branch is open: opened now, or found open.
+    /// A pull request from the export's branch at its commit: opened now, or found (in
+    /// any state, so a retry never opens a second one).
     InReview {
         fork: ForkName,
         changeset: ChangesetId,

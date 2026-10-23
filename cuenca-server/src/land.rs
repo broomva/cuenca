@@ -45,8 +45,8 @@ use cuenca_core::{
     ChangesetId, CoreError, Event, Export, Fork, ForkName, Landing, LandingStep, Location, Store,
     export_branch,
 };
+use cuenca_tree::GitOid;
 use cuenca_tree::git::{Blobs, REDIRECTING_ENV, Repo};
-use cuenca_tree::{GitOid, Op};
 
 use crate::authority::Authority;
 
@@ -244,7 +244,7 @@ impl Worker {
                     // or from another fork with the same edit) may have exported it
                     // already: that export is this one's.
                     let export = match git.remote_branch(&remote, &export_branch(id))? {
-                        Some(at) => git.adopt(&remote, &self.a.store, id, at)?,
+                        Some(at) => git.adopt(&remote, &self.a.store, id, landing.main, at)?,
                         None => self.build(&git, &remote, &fork, &landing, None)?,
                     };
                     self.a.store.record_export_intent(name, id, &export)?;
@@ -301,6 +301,10 @@ impl Worker {
         let changeset = store
             .changeset(landing.changeset)?
             .ok_or_else(|| LandError::Fail(format!("no changeset {}", landing.changeset)))?;
+        // The main the verify judged the head against: the export is the head's tree onto
+        // the remote's commit of that main. (Drafts chain, so the head changeset's own
+        // base is the previous draft's tree, which the remote has never seen.)
+        let main = landing.main;
         let (parent, base_ref) = match intent {
             Some(e) => {
                 git.fetch(remote, &e.parent.to_hex())?;
@@ -309,24 +313,27 @@ impl Worker {
             None => {
                 let base_ref = git.default_branch(remote)?;
                 git.fetch(remote, &format!("refs/heads/{base_ref}"))?;
-                let parent = git.commit_with_tree(changeset.base)?.ok_or_else(|| {
+                let parent = git.commit_with_tree(main)?.ok_or_else(|| {
                     LandError::Fail(format!(
-                        "no commit in the last {PARENT_SEARCH} of {remote}'s {base_ref} has tree {}, \
-                         the fork's base: the location's main is not on the remote",
-                        changeset.base
+                        "no commit in the last {PARENT_SEARCH} of {remote}'s {base_ref} has tree {main}: \
+                         the location's main is not on the remote"
                     ))
                 })?;
                 (parent, base_ref)
             }
         };
         let tree = store.tree(changeset.target)?;
+        // Every blob of the head that main does not have: the parent's commit brings
+        // main's, and the fork's drafts may have added any of the rest.
+        let on_main: std::collections::HashSet<GitOid> =
+            store.tree(main)?.entries().map(|(_, e)| e.oid()).collect();
         let mut blobs = Blobs::new();
-        for op in &changeset.ops {
-            if let Op::Put { entry, .. } = op {
-                let oid = entry.oid();
-                if let std::collections::hash_map::Entry::Vacant(slot) = blobs.entry(oid) {
-                    slot.insert(store.read_blob(oid)?);
-                }
+        for (_, entry) in tree.entries() {
+            let oid = entry.oid();
+            if !on_main.contains(&oid)
+                && let std::collections::hash_map::Entry::Vacant(slot) = blobs.entry(oid)
+            {
+                slot.insert(store.read_blob(oid)?);
             }
         }
         let written = git
@@ -578,8 +585,16 @@ impl<'c> Git<'c> {
 
     /// Take the export already at `at` on the remote's branch for `id` as this
     /// landing's: one commit whose tree is the changeset's target, onto one parent whose
-    /// tree is its base. Anything else at that branch is someone else's.
-    fn adopt(&self, remote: &str, store: &Store, id: ChangesetId, at: GitOid) -> Step<Export> {
+    /// tree is `main`, the main its verify judged. Anything else at that branch is
+    /// someone else's.
+    fn adopt(
+        &self,
+        remote: &str,
+        store: &Store,
+        id: ChangesetId,
+        main: GitOid,
+        at: GitOid,
+    ) -> Step<Export> {
         let changeset = store
             .changeset(id)?
             .ok_or_else(|| LandError::Fail(format!("no changeset {id}")))?;
@@ -594,7 +609,7 @@ impl<'c> Git<'c> {
         let ours = ids.len() == 2
             && ids[0] == at.to_hex()
             && tree_of(ids[0])? == changeset.target.to_hex()
-            && tree_of(ids[1])? == changeset.base.to_hex();
+            && tree_of(ids[1])? == main.to_hex();
         if !ours {
             return Err(LandError::Fail(format!(
                 "{branch} on the remote is at {at}, which is not an export of {id}: someone else's branch"
