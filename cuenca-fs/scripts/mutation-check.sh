@@ -84,9 +84,7 @@ mutate src/cache.rs 'ctime: (meta.ctime(), meta.ctime_nsec()),' 'ctime: (0, 0),'
 mutate src/cache.rs 'ctime: (st.st_ctime as i64, st.st_ctime_nsec as i64),' 'ctime: (0, 0),' --test fs stat_cache
 mutate src/cache.rs 'let at = at.saturating_sub(RACY_MARGIN);' '' --test fs just_now
 # checkout
-mutate src/checkout.rs '    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let fd = match openat(CWD, dest, flags' '    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
-    let fd = match openat(CWD, dest, flags' --test fs link_or_a_file
+mutate src/checkout.rs '        dir_flags | OFlags::NOFOLLOW,' '        dir_flags,' --test fs link_or_a_file
 mutate src/checkout.rs '    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
     let mut at' '    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
     let mut at' --lib inside_the_destination
@@ -101,7 +99,7 @@ mutate src/checkout.rs 'if Blob::of(&content).map(|b| b.oid()) == Some(oid) {' '
 mutate src/checkout.rs '.permissions() != mode {' '.permissions() == u32::MAX {' --test fs every_source
 
 mutate src/scan.rs 'if !dropped.is_empty() && !drop_ignored {' 'if false {' --test fs refused_unless
-mutate src/checkout.rs 'Fetched::Vouched(v) if v.oid == oid => (v.file, v.stamp),' 'Fetched::Vouched(v) if true => (v.file, v.stamp),' --test fs its_own_blob
+mutate src/checkout.rs 'Fetched::Vouched(v) if v.oid == oid => {' 'Fetched::Vouched(v) if true => {' --test fs its_own_blob
 mutate src/checkout.rs 'if has_content_rule(path, entry.mode()) {' 'if false {' --test fs refused_at_checkout
 mutate src/checkout.rs 'check_content(path, entry.mode(), &bytes)?;' '' --test fs refused_at_checkout
 

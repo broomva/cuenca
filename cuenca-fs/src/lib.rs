@@ -56,8 +56,8 @@
 //! builds one. Content a source hands over is checked before it is written: bytes in
 //! memory and files ([`ObjectDir`], any other source) are hashed, and only a file this
 //! crate's [`CheckoutSource`] vouches for by its stat cache is cloned unhashed, while its
-//! stat is that stamp, checked again after cloning. A clone also carries its source's
-//! extended attributes and, on APFS, its ACL, which no tree records.
+//! stat is that stamp, checked again after cloning. A clone may also carry its source's
+//! extended attributes, which no tree records.
 
 mod cache;
 mod checkout;
