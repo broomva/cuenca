@@ -25,21 +25,22 @@
 //! `p20`, `review_bots`) feed no gate here; they are p9's to validate. A location whose policy has no `auto_merge.gates` (any directory tree, not a
 //! workspace) has no governance tier, as under p9.
 //!
-//! Top-level keys other than `gates`, `auto_merge` and `cuenca` are ignored, so the
-//! rest of the policy can change freely. Under `auto_merge` and `auto_merge.gates` an
-//! unknown key is an error, as under p9, and so it is under `cuenca`, `cuenca.gates` and
-//! `auto_merge.gates.governance`, so a misspelt setting, or a misspelt section holding
-//! settings, is not silently dropped. A key the engine reads must hold its type
-//! when it is present: only a missing key is absent. `key:` with no value is an error,
-//! except `auto_merge.gates` and its `governance`, which p9 reads as its defaults. So
-//! `auto_merge: ~` is an error here, where p9 reads it as auto-merge switched off:
-//! here it would switch the gates off. Every `auto_merge.rules` item is checked as p9
-//! checks it (an action p9 knows, and exactly one of `branch_pattern` and
-//! `path_touched`), and its keys are pinned to those three, which p9 does not do: a
-//! misspelt `action` would read as `notify`, which protects nothing here. So a
-//! misspelt rule is an error rather than a rule that protects nothing. A policy that cannot be compiled is
-//! reported as a failing `policy` result and the built-in defaults run instead; it
-//! never makes the gates pass.
+//! **No key is read as absent because it is misspelt.** Every mapping the engine reads,
+//! the top level included, is read through one declared schema ([`SCHEMA`], read by
+//! [`Section`]): a key the schema does not list is an error, a key it requires must be
+//! there, and the engine can only read a key the schema declares. A misspelt setting,
+//! or a misspelt section holding settings, is therefore an error at any depth, never a
+//! dropped gate. The top level lists the control metalayer's keys as well as
+//! `gates`, `auto_merge` and `cuenca`; a new top-level key in the workspace's policy is
+//! an error here until it is added. A `gates.hard` entry whose id looks like `G4`
+//! without being it (`g4`, `G4 `) is an error too. A key the engine reads must hold its
+//! type when it is present: only a missing key is absent. `key:` with no value is an
+//! error, except `auto_merge.gates` and its `governance`, which p9 reads as its
+//! defaults. So `auto_merge: ~` is an error here, where p9 reads it as auto-merge
+//! switched off: here it would switch the gates off. Every `auto_merge.rules` item is
+//! checked as p9 checks it (an action p9 knows, and exactly one of `branch_pattern` and
+//! `path_touched`). A policy that cannot be compiled is reported as a failing `policy`
+//! result and the built-in defaults run instead; it never makes the gates pass.
 //!
 //! The file must be UTF-8, at most [`MAX_POLICY_BYTES`], nest at most
 //! [`MAX_POLICY_DEPTH`] levels, and must not use YAML aliases: the loader copies an
@@ -88,6 +89,106 @@ pub const MAX_POLICY_DEPTH: usize = 32;
 const RULE_ACTIONS: [&str; 3] = ["auto", "require_human", "notify"];
 /// A compiled regex may take at most this much memory.
 const REGEX_SIZE_LIMIT: usize = 1 << 20;
+
+/// One mapping of the policy the engine reads: where it is, the keys it may have and
+/// the keys it must have. `[]` is an item of a list.
+#[derive(Debug)]
+pub(crate) struct Schema {
+    pub(crate) path: &'static str,
+    pub(crate) known: &'static [&'static str],
+    pub(crate) required: &'static [&'static str],
+}
+
+/// Every mapping the engine reads, and nothing else is read ([`Section`]).
+pub(crate) const SCHEMA: &[Schema] = &[
+    Schema {
+        // The control metalayer's top-level keys, and the engine's own `cuenca`.
+        path: "",
+        known: &[
+            "version",
+            "profile",
+            "workspace",
+            "setpoints",
+            "gates",
+            "profiles",
+            "plants",
+            "ci_watch",
+            "ci_heal",
+            "auto_merge",
+            "catalog",
+            "cuenca",
+        ],
+        required: &[],
+    },
+    Schema {
+        path: "gates",
+        known: &["hard", "soft"],
+        required: &[],
+    },
+    Schema {
+        path: "gates.hard[]",
+        known: &["id", "measurement", "pattern", "rule"],
+        required: &["id"],
+    },
+    Schema {
+        // p9's keys (`_parse_auto_merge`).
+        path: "auto_merge",
+        known: &[
+            "enabled",
+            "require_no_requested_changes",
+            "require_branch_up_to_date",
+            "merge_method",
+            "delete_branch",
+            "rules",
+            "default_action",
+            "gates",
+        ],
+        required: &[],
+    },
+    Schema {
+        // Exactly one of the two targets is checked where the rule is read.
+        path: "auto_merge.rules[]",
+        known: &["action", "branch_pattern", "path_touched"],
+        required: &[],
+    },
+    Schema {
+        // p9's keys (`_parse_gates`).
+        path: "auto_merge.gates",
+        known: &["review_bots", "aggregate_checks", "p20", "governance"],
+        required: &[],
+    },
+    Schema {
+        path: "auto_merge.gates.governance",
+        known: &[
+            "paths",
+            "required_strata",
+            "required_checks",
+            "l3_max_per_window",
+            "l3_window_seconds",
+        ],
+        required: &[],
+    },
+    Schema {
+        path: "cuenca",
+        known: &["gates"],
+        required: &[],
+    },
+    Schema {
+        path: "cuenca.gates",
+        known: &[
+            "max_file_bytes",
+            "secret_paths",
+            "secret_patterns",
+            "landing_windows",
+        ],
+        required: &[],
+    },
+    Schema {
+        path: "cuenca.gates.landing_windows[]",
+        known: &["days", "from", "to", "utc_offset"],
+        required: &["days", "from", "to"],
+    },
+];
 
 /// One window in which landing is allowed.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -168,64 +269,51 @@ impl Policy {
             return Err(format!("{POLICY_PATH} is not a mapping"));
         }
 
-        let gates = mapping(field(root, "gates"), "gates")?;
-        let auto_merge = mapping(field(root, "auto_merge"), "auto_merge")?;
-        let cuenca = mapping(field(root, "cuenca"), "cuenca")?;
-        // A misspelt key one level up from the settings would drop them all as absent
-        // (r5, A, B and C): `auto_merge` has p9's keys (`_parse_auto_merge`), and
-        // `cuenca` is the engine's own.
-        only_keys(
-            auto_merge,
-            &[
-                "enabled",
-                "require_no_requested_changes",
-                "require_branch_up_to_date",
-                "merge_method",
-                "delete_branch",
-                "rules",
-                "default_action",
-                "gates",
-            ],
-            "auto_merge",
-        )?;
-        only_keys(cuenca, &["gates"], "cuenca")?;
+        let root = Section::read(Some(root), "", POLICY_PATH)?;
+        let gates = Section::read(root.get("gates"), "gates", "gates")?;
+        let auto_merge = Section::read(root.get("auto_merge"), "auto_merge", "auto_merge")?;
+        let cuenca = Section::read(root.get("cuenca"), "cuenca", "cuenca")?;
 
         // gates.hard[id: G4].pattern
-        if let Some(hard) = list(field(gates, "hard"), "gates.hard")? {
-            for gate in hard {
-                let gate = mapping(Some(gate), "gates.hard[]")?;
-                if field(gate, "id").and_then(Yaml::as_str) == Some("G4") {
-                    let pattern = string(field(gate, "pattern"), "gates.hard[G4].pattern")?
-                        .ok_or("gates.hard[G4].pattern is missing")?;
-                    one_more_pattern(&policy)?;
-                    policy.secret_paths.push(
-                        compile(&pattern)
-                            .map_err(|e| not_compiled("gates.hard[G4].pattern", &e))?,
-                    );
+        if let Some(hard) = list(gates.get("hard"), "gates.hard")? {
+            for (i, gate) in hard.iter().enumerate() {
+                let key = format!("gates.hard[{i}]");
+                let gate = Section::read(Some(gate), "gates.hard[]", &key)?;
+                let id = string(gate.get("id"), &format!("{key}.id"))?.unwrap_or_default();
+                if id != "G4" {
+                    // An id that only looks like the engine's gate would drop it.
+                    if id.trim().eq_ignore_ascii_case("G4") {
+                        return Err(format!(
+                            "{key}.id is {id:?}; the secret-path gate is \"G4\""
+                        ));
+                    }
+                    continue;
                 }
+                let pattern = string(gate.get("pattern"), &format!("{key}.pattern"))?
+                    .ok_or_else(|| format!("{key}.pattern is missing"))?;
+                one_more_pattern(&policy)?;
+                policy.secret_paths.push(
+                    compile(&pattern).map_err(|e| not_compiled("gates.hard[G4].pattern", &e))?,
+                );
             }
         }
 
         // auto_merge.rules[action: require_human].path_touched. Every rule is checked
         // as p9 checks it, so a misspelt action or target is an error, never a rule
         // that protects nothing (r4, C).
-        if let Some(rules) = list(field(auto_merge, "rules"), "auto_merge.rules")? {
+        if let Some(rules) = list(auto_merge.get("rules"), "auto_merge.rules")? {
             for (i, rule) in rules.iter().enumerate() {
                 let key = format!("auto_merge.rules[{i}]");
-                let rule = mapping(Some(rule), &key)?;
                 // A misspelt `action` would read as `notify` and protect nothing (r6, A
                 // and B), so a rule's keys are pinned too.
-                only_keys(rule, &["action", "branch_pattern", "path_touched"], &key)?;
-                let action = string(field(rule, "action"), &format!("{key}.action"))?;
+                let rule = Section::read(Some(rule), "auto_merge.rules[]", &key)?;
+                let action = string(rule.get("action"), &format!("{key}.action"))?;
                 let action = action.as_deref().unwrap_or("notify");
                 if !RULE_ACTIONS.contains(&action) {
                     return Err(format!("{key}.action is not one of {RULE_ACTIONS:?}"));
                 }
-                let branch = string(
-                    field(rule, "branch_pattern"),
-                    &format!("{key}.branch_pattern"),
-                )?;
-                let path = string(field(rule, "path_touched"), &format!("{key}.path_touched"))?;
+                let branch = string(rule.get("branch_pattern"), &format!("{key}.branch_pattern"))?;
+                let path = string(rule.get("path_touched"), &format!("{key}.path_touched"))?;
                 let path = match (
                     branch.filter(|b| !b.is_empty()),
                     path.filter(|p| !p.is_empty()),
@@ -248,24 +336,11 @@ impl Policy {
             }
         }
 
-        policy.governance = governance(field(auto_merge, "gates"))?;
+        policy.governance = governance(auto_merge.get("gates"))?;
 
         // cuenca.gates
-        let section = mapping(field(cuenca, "gates"), "cuenca.gates")?;
-        only_keys(
-            section,
-            &[
-                "max_file_bytes",
-                "secret_paths",
-                "secret_patterns",
-                "landing_windows",
-            ],
-            "cuenca.gates",
-        )?;
-        if let Some(max) = int(
-            field(section, "max_file_bytes"),
-            "cuenca.gates.max_file_bytes",
-        )? {
+        let section = Section::read(cuenca.get("gates"), "cuenca.gates", "cuenca.gates")?;
+        if let Some(max) = int(section.get("max_file_bytes"), "cuenca.gates.max_file_bytes")? {
             if max > DEFAULT_MAX_FILE_BYTES {
                 return Err(format!(
                     "cuenca.gates.max_file_bytes is {max}: a policy may lower the \
@@ -274,7 +349,7 @@ impl Policy {
             }
             policy.max_file_bytes = max;
         }
-        if let Some(paths) = strings(field(section, "secret_paths"), "cuenca.gates.secret_paths")? {
+        if let Some(paths) = strings(section.get("secret_paths"), "cuenca.gates.secret_paths")? {
             for p in paths {
                 one_more_pattern(&policy)?;
                 policy.secret_paths.push(
@@ -283,7 +358,7 @@ impl Policy {
             }
         }
         if let Some(patterns) = strings(
-            field(section, "secret_patterns"),
+            section.get("secret_patterns"),
             "cuenca.gates.secret_patterns",
         )? {
             for (i, p) in patterns.into_iter().enumerate() {
@@ -296,7 +371,7 @@ impl Policy {
             }
         }
         if let Some(windows) = list(
-            field(section, "landing_windows"),
+            section.get("landing_windows"),
             "cuenca.gates.landing_windows",
         )? {
             if windows.is_empty() {
@@ -304,8 +379,8 @@ impl Policy {
                     "cuenca.gates.landing_windows is empty: landing would never be allowed".into(),
                 );
             }
-            for w in windows {
-                policy.landing_windows.push(window(w)?);
+            for (i, w) in windows.iter().enumerate() {
+                policy.landing_windows.push(window(w, i)?);
             }
         }
         let rules =
@@ -327,31 +402,17 @@ fn governance(gates: Option<&Yaml>) -> Res<Option<Governance>> {
     const KEY: &str = "auto_merge.gates.governance";
     let gates = match gates {
         None => return Ok(None),
-        Some(Yaml::Null) => &NULL,
-        Some(gates) => mapping(Some(gates), "auto_merge.gates")?,
+        Some(Yaml::Null) => None,
+        gates => gates,
     };
-    // p9's keys (`_parse_gates`): a misspelt `governance` would drop the tier (r5).
-    only_keys(
-        gates,
-        &["review_bots", "aggregate_checks", "p20", "governance"],
-        "auto_merge.gates",
-    )?;
-    let gov = match field(gates, "governance") {
-        None | Some(Yaml::Null) => &NULL,
-        gov => mapping(gov, KEY)?,
+    // A misspelt `governance` would drop the tier (r5).
+    let gates = Section::read(gates, "auto_merge.gates", "auto_merge.gates")?;
+    let gov = match gates.get("governance") {
+        Some(Yaml::Null) => None,
+        gov => gov,
     };
-    only_keys(
-        gov,
-        &[
-            "paths",
-            "required_strata",
-            "required_checks",
-            "l3_max_per_window",
-            "l3_window_seconds",
-        ],
-        KEY,
-    )?;
-    let paths = match strings(field(gov, "paths"), &format!("{KEY}.paths"))? {
+    let gov = Section::read(gov, KEY, KEY)?;
+    let paths = match strings(gov.get("paths"), &format!("{KEY}.paths"))? {
         None => GOVERNANCE_PATHS.iter().map(|p| p.to_string()).collect(),
         Some(paths) => {
             let have: Vec<String> = paths.iter().map(|p| p.to_lowercase()).collect();
@@ -369,7 +430,7 @@ fn governance(gates: Option<&Yaml>) -> Res<Option<Governance>> {
         }
     };
     if let Some(max) = int(
-        field(gov, "l3_max_per_window"),
+        gov.get("l3_max_per_window"),
         &format!("{KEY}.l3_max_per_window"),
     )? && max != 1
     {
@@ -377,7 +438,7 @@ fn governance(gates: Option<&Yaml>) -> Res<Option<Governance>> {
     }
     let (lo, hi) = GOVERNANCE_WINDOW_SECONDS;
     let window = int(
-        field(gov, "l3_window_seconds"),
+        gov.get("l3_window_seconds"),
         &format!("{KEY}.l3_window_seconds"),
     )?
     .unwrap_or(lo);
@@ -456,20 +517,54 @@ static NULL: Yaml = Yaml::Null;
 /// to convert, and that is how a malformed section kept reading as absent and dropping
 /// its gates (r3 and r4). Here a key that is present must hold its type: `key:` with
 /// no value and a failed tag are errors, except where [`governance`] reads p9's
-/// defaults.
+/// defaults. Only [`Section::get`] calls it.
 fn field<'y>(y: &'y Yaml, key: &str) -> Option<&'y Yaml> {
     y.as_hash()?.get(&Yaml::String(key.to_string()))
 }
 
-/// Refuses a key of mapping `y` (at `at`) that is not in `known`.
-fn only_keys(y: &Yaml, known: &[&str], at: &str) -> Res<()> {
-    for key in y.as_hash().into_iter().flat_map(|m| m.keys()) {
-        match key.as_str() {
-            Some(k) if known.contains(&k) => {}
-            _ => return Err(format!("{at}: unknown key {key:?}")),
+/// A mapping of the policy, checked against its [`Schema`]: the only way the engine
+/// reads a key (r3 to r6 each found one more mapping whose misspelt key read as absent).
+#[derive(Clone, Copy)]
+struct Section<'y> {
+    y: &'y Yaml,
+    schema: &'static Schema,
+}
+
+impl<'y> Section<'y> {
+    /// The mapping `y` (a missing one has no keys) read as the schema at `path`; `at`
+    /// names it in errors. Refuses a key the schema does not list and a missing key it
+    /// requires.
+    fn read(y: Option<&'y Yaml>, path: &str, at: &str) -> Res<Self> {
+        let schema = SCHEMA
+            .iter()
+            .find(|s| s.path == path)
+            .unwrap_or_else(|| panic!("no schema for policy section {path:?}"));
+        let y = mapping(y, at)?;
+        for key in y.as_hash().into_iter().flat_map(|m| m.keys()) {
+            match key.as_str() {
+                Some(k) if schema.known.contains(&k) => {}
+                _ => return Err(format!("{at}: unknown key {key:?}")),
+            }
         }
+        if y.as_hash().is_some() {
+            for key in schema.required {
+                if field(y, key).is_none() {
+                    return Err(format!("{at}.{key} is missing"));
+                }
+            }
+        }
+        Ok(Self { y, schema })
     }
-    Ok(())
+
+    /// The value of `key`, which the schema must declare.
+    fn get(&self, key: &str) -> Option<&'y Yaml> {
+        assert!(
+            self.schema.known.contains(&key),
+            "policy key {key:?} is not in the schema of {:?}",
+            self.schema.path
+        );
+        field(self.y, key)
+    }
 }
 
 /// Refuses a pattern before it is compiled once the cap (built-ins included) is
@@ -540,44 +635,37 @@ fn int(y: Option<&Yaml>, key: &str) -> Res<Option<u64>> {
 
 const DAYS: [&str; 7] = ["mon", "tue", "wed", "thu", "fri", "sat", "sun"];
 
-fn window(y: &Yaml) -> Res<Window> {
-    const KEY: &str = "cuenca.gates.landing_windows[]";
-    let Some(map) = y.as_hash() else {
-        return Err(format!("{KEY} is not a mapping"));
-    };
-    for key in map.keys() {
-        if !matches!(key.as_str(), Some("days" | "from" | "to" | "utc_offset")) {
-            return Err(format!("{KEY}: unknown key {key:?}"));
-        }
-    }
-    let days = strings(field(y, "days"), &format!("{KEY}.days"))?
-        .ok_or_else(|| format!("{KEY}.days is missing"))?
+fn window(y: &Yaml, i: usize) -> Res<Window> {
+    let key = format!("cuenca.gates.landing_windows[{i}]");
+    let y = Section::read(Some(y), "cuenca.gates.landing_windows[]", &key)?;
+    let days = strings(y.get("days"), &format!("{key}.days"))?
+        .ok_or_else(|| format!("{key}.days is missing"))?
         .iter()
         .map(|d| {
             DAYS.iter()
                 .position(|x| x.eq_ignore_ascii_case(d))
                 .map(|i| i as u8)
-                .ok_or_else(|| format!("{KEY}.days: {d:?} is not one of {DAYS:?}"))
+                .ok_or_else(|| format!("{key}.days: {d:?} is not one of {DAYS:?}"))
         })
         .collect::<Res<Vec<_>>>()?;
     if days.is_empty() {
-        return Err(format!("{KEY}.days is empty"));
+        return Err(format!("{key}.days is empty"));
     }
     let clock = |name: &str| -> Res<u16> {
-        let s = string(field(y, name), &format!("{KEY}.{name}"))?
-            .ok_or_else(|| format!("{KEY}.{name} is missing"))?;
-        parse_clock(&s).ok_or_else(|| format!("{KEY}.{name}: {s:?} is not HH:MM"))
+        let s = string(y.get(name), &format!("{key}.{name}"))?
+            .ok_or_else(|| format!("{key}.{name} is missing"))?;
+        parse_clock(&s).ok_or_else(|| format!("{key}.{name}: {s:?} is not HH:MM"))
     };
     let (from, to) = (clock("from")?, clock("to")?);
     if from >= to {
         return Err(format!(
-            "{KEY}: from must be before to (a window may not cross midnight; use two)"
+            "{key}: from must be before to (a window may not cross midnight; use two)"
         ));
     }
-    let utc_offset = match string(field(y, "utc_offset"), &format!("{KEY}.utc_offset"))? {
+    let utc_offset = match string(y.get("utc_offset"), &format!("{key}.utc_offset"))? {
         None => 0,
         Some(s) => {
-            parse_offset(&s).ok_or_else(|| format!("{KEY}.utc_offset: {s:?} is not ±HH:MM"))?
+            parse_offset(&s).ok_or_else(|| format!("{key}.utc_offset: {s:?} is not ±HH:MM"))?
         }
     };
     Ok(Window {
@@ -681,7 +769,8 @@ cuenca:
             b"cuenca:\n  gates:\n    landing_windows: []\n",
             b"cuenca:\n  gates:\n    landing_windows: [{days: [mon], from: '10:00', to: '09:00'}]\n",
             b"gates:\n  hard:\n    - id: G4\n      pattern: '('\n",
-            b"base: &a [x, x]\nmore: [*a, *a]\n",
+            // Under a key the engine ignores, so only the alias refusal catches it.
+            b"catalog:\n  base: &a [x, x]\n  more: [*a, *a]\n",
             b"auto_merge:\n  rules:\n    - path_touched: ''\n      action: require_human\n",
             b"\xff\xfe",
             b"a: 1\n---\nb: 2\n",
@@ -736,10 +825,155 @@ cuenca:
             b"auto_merge:\n  rules:\n    - {action: require_human}\n",
             b"auto_merge:\n  rules:\n    - {path_touched: CLAUDE.md, branch_pattern: x, action: notify}\n",
             b"gates:\n  hard:\n    - id: G4\n      patern: '\\.pem$'\n",
+            b"gates:\n  hard:\n    - {id: G4, rule: r}\n",
+            // ... and at the top level (A10): `auto_marge` would drop every rule.
+            b"auto_marge:\n  rules:\n    - {path_touched: CLAUDE.md, action: require_human}\n",
+            b"cuenca_gates: {max_file_bytes: 1}\n",
         ] {
             assert!(Policy::parse(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
         }
         assert!(Policy::parse(&vec![b' '; MAX_POLICY_BYTES + 1]).is_err());
+    }
+
+    /// A policy that has every section the engine reads and every key it reads.
+    const FULL: &str = r#"
+version: 1
+gates:
+  hard:
+    - {id: G1, rule: r, measurement: m}
+    - {id: G4, pattern: '\.pem$', rule: r, measurement: m}
+  soft: []
+auto_merge:
+  enabled: true
+  rules:
+    - {path_touched: CLAUDE.md, action: require_human}
+    - {branch_pattern: 'release/*', action: notify}
+  gates:
+    governance:
+      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml]
+      l3_max_per_window: 1
+      l3_window_seconds: 86400
+cuenca:
+  gates:
+    max_file_bytes: 100
+    secret_paths: ['\.key$']
+    secret_patterns: ['SECRET_[A-Z]+']
+    landing_windows:
+      - {days: [mon], from: '09:00', to: '17:00', utc_offset: '-05:00'}
+"#;
+
+    /// The mapping of `doc` at a [`Schema`] path (`[]`: the list's last item).
+    fn at<'y>(doc: &'y mut Yaml, path: &str) -> &'y mut Yaml {
+        at_labelled(doc, path).0
+    }
+
+    /// [`at`], and the mapping's name as an error gives it (`rules[1]`).
+    fn at_labelled<'y>(doc: &'y mut Yaml, path: &str) -> (&'y mut Yaml, String) {
+        let mut y = doc;
+        let mut label = Vec::new();
+        for seg in path.split('.').filter(|s| !s.is_empty()) {
+            let (name, item) = match seg.strip_suffix("[]") {
+                Some(name) => (name, true),
+                None => (seg, false),
+            };
+            let Yaml::Hash(map) = y else {
+                panic!("{path}: {name} is under no mapping")
+            };
+            y = map
+                .get_mut(&Yaml::String(name.into()))
+                .unwrap_or_else(|| panic!("FULL has no {path}"));
+            if item {
+                let Yaml::Array(items) = y else {
+                    panic!("{path}: {name} is not a list")
+                };
+                label.push(format!("{name}[{}]", items.len() - 1));
+                y = items.last_mut().expect("an item");
+            } else {
+                label.push(name.to_string());
+            }
+        }
+        let label = if label.is_empty() {
+            POLICY_PATH.to_string()
+        } else {
+            label.join(".")
+        };
+        (y, label)
+    }
+
+    fn emit(doc: &Yaml) -> String {
+        let mut out = String::new();
+        yaml_rust2::YamlEmitter::new(&mut out).dump(doc).unwrap();
+        out
+    }
+
+    /// Every mapping the engine reads, in [`SCHEMA`]: an unknown key, any key it reads
+    /// misspelt, and a required key left out are each an error naming the mapping,
+    /// never a key read as absent (A10: rounds 3 to 6 each found one more mapping).
+    #[test]
+    fn every_mapping_refuses_an_unknown_misspelt_or_missing_key() {
+        let full = yaml_rust2::YamlLoader::load_from_str(FULL)
+            .unwrap()
+            .remove(0);
+        let p = Policy::parse(emit(&full).as_bytes()).unwrap();
+        assert_eq!((p.secret_paths.len(), p.secret_patterns.len()), (3, 1));
+        assert_eq!(p.protected, ["CLAUDE.md"]);
+        assert!(p.governance.is_some() && p.max_file_bytes == 100);
+        assert_eq!(p.landing_windows.len(), 1);
+
+        for schema in SCHEMA {
+            let label = at_labelled(&mut full.clone(), schema.path).1;
+            let mut edits: Vec<(String, Yaml)> = Vec::new();
+            let mut doc = full.clone();
+            let Yaml::Hash(map) = at(&mut doc, schema.path) else {
+                panic!("{label} is not a mapping in FULL")
+            };
+            map.insert(Yaml::String("zz_unknown".into()), Yaml::Integer(1));
+            edits.push((format!("{label}: unknown key"), doc));
+
+            let mut present = Vec::new();
+            let mut doc = full.clone();
+            if let Yaml::Hash(map) = at(&mut doc, schema.path) {
+                present.extend(map.keys().filter_map(Yaml::as_str).map(str::to_string));
+            }
+            assert!(
+                schema
+                    .required
+                    .iter()
+                    .all(|r| present.iter().any(|p| p == r)),
+                "FULL lacks a required key of {label}"
+            );
+            for key in &present {
+                let mut doc = full.clone();
+                let Yaml::Hash(map) = at(&mut doc, schema.path) else {
+                    unreachable!()
+                };
+                let value = map.remove(&Yaml::String(key.clone())).unwrap();
+                if schema.required.contains(&key.as_str()) {
+                    let mut left_out = full.clone();
+                    *at(&mut left_out, schema.path) = Yaml::Hash(map.clone());
+                    edits.push((format!("{label}.{key} is missing"), left_out));
+                }
+                map.insert(Yaml::String(format!("{key}_")), value);
+                edits.push((format!("{label}: unknown key"), doc));
+            }
+            for (want, doc) in edits {
+                let text = emit(&doc);
+                let err = Policy::parse(text.as_bytes()).expect_err(&text);
+                assert!(err.contains(&want), "{want:?} not in {err:?} for\n{text}");
+            }
+        }
+    }
+
+    /// An entry that looks like the engine's G4 without being it is an error, not a
+    /// gate that is never read.
+    #[test]
+    fn an_id_that_looks_like_g4_is_an_error() {
+        for id in ["g4", "G4 ", " g4"] {
+            let text = format!("gates:\n  hard:\n    - {{id: '{id}', pattern: '\\.pem$'}}\n");
+            let err = Policy::parse(text.as_bytes()).unwrap_err();
+            assert!(err.contains("gates.hard[0].id"), "{err}");
+        }
+        assert!(Policy::parse(b"gates:\n  hard:\n    - {id: G4b, pattern: x}\n").is_ok());
     }
 
     /// A byte-order mark is skipped, as p9's loader skips it, and never turns the first

@@ -201,7 +201,7 @@ mutate src/gates/builtin.rs 'Some(c) if c.len() as u64 > self.0 =>' 'Some(c) if 
 mutate src/gates/mod.rs 'findings.truncate(MAX_FINDINGS_PER_GATE);' '' --lib
 mutate src/gates/policy.rs '            Ok((Event::Alias(_), mark)) => {' '            Ok((Event::Alias(_), mark)) if false => {' --lib
 mutate src/gates/policy.rs 'if bytes.len() > MAX_POLICY_BYTES {' 'if false {' --lib
-mutate src/gates/policy.rs '            _ => return Err(format!("{at}: unknown key {key:?}")),' '            _ => {}' --lib
+mutate src/gates/policy.rs '                _ => return Err(format!("{at}: unknown key {key:?}")),' '                _ => {}' --lib
 mutate src/store.rs '        let bytes = if matches!(entry, Entry::Symlink(_)) {' '        let bytes = if false {' --lib
 
 # Gate engine floors (P20 r1, C): p9's governance tier and the size limit cannot be loosened; an unreadable check manifest fails.
@@ -209,7 +209,9 @@ mutate src/gates/policy.rs '            if !missing.is_empty() {' '            i
 mutate src/gates/policy.rs ')? && max != 1' ')? && false' --lib
 mutate src/gates/policy.rs '    if !(lo..=hi).contains(&window) {' '    if false {' --lib
 mutate src/gates/policy.rs '        None => GOVERNANCE_PATHS.iter().map(|p| p.to_string()).collect(),' '        None => Vec::new(),' --lib
-mutate src/gates/policy.rs '        Some(Yaml::Null) => &NULL,' '        Some(Yaml::Null) => return Ok(None),' --lib
+mutate src/gates/policy.rs '        Some(Yaml::Null) => None,
+        gates => gates,' '        Some(Yaml::Null) => return Ok(None),
+        gates => gates,' --lib
 mutate src/gates/policy.rs '            if max > DEFAULT_MAX_FILE_BYTES {' '            if false {' --lib
 mutate src/gates/mod.rs '        if let Err(error) = &input.checks.bytes {' '        if let Err(error) = &Ok::<(), String>(()) {' --lib
 
@@ -239,20 +241,17 @@ mutate src/gates/policy.rs "        let text = text.strip_prefix('\\u{feff}').un
 mutate src/gates/policy.rs '                if !RULE_ACTIONS.contains(&action) {' '                if false {' --lib
 mutate src/gates/policy.rs '                        return Err(format!("{key} sets both branch_pattern and path_touched"));' '                        return Ok(policy);' --lib
 mutate src/gates/policy.rs '                    (None, None) => {' '                    (None, None) if false => {' --lib
-mutate src/gates/policy.rs '                        .ok_or("gates.hard[G4].pattern is missing")?;' '                        .unwrap_or_default();' --lib
+mutate src/gates/policy.rs '                    .ok_or_else(|| format!("{key}.pattern is missing"))?;' '                    .unwrap_or_default();' --lib
 
-# P20 r5 (A, B, C): a misspelt section one level up is an error, not an absent section.
-mutate src/gates/policy.rs '        only_keys(cuenca, &["gates"], "cuenca")?;' '' --lib
-mutate src/gates/policy.rs '            "auto_merge",
-        )?;' '            "auto_merge",
-        )
-        .ok();' --lib
-mutate src/gates/policy.rs '        "auto_merge.gates",
-    )?;' '        "auto_merge.gates",
-    )
-    .ok();' --lib
-
-# P20 r6 (A, B): a rule's keys are pinned, so a misspelt action is an error.
-mutate src/gates/policy.rs '                only_keys(rule, &["action", "branch_pattern", "path_touched"], &key)?;' '' --lib
+# P20 r5, r6 and A10: every mapping, the top level included, is read through one schema
+# (`Section`), which refuses an unknown key and a missing required key; an id that looks
+# like G4 is an error. One mechanism, so one mutant each; the walk test covers every
+# mapping in SCHEMA.
+mutate src/gates/policy.rs '                if field(y, key).is_none() {' '                if false {' --lib
+mutate src/gates/policy.rs '                    if id.trim().eq_ignore_ascii_case("G4") {' '                    if false {' --lib
+mutate src/gates/policy.rs '            "catalog",
+            "cuenca",' '            "catalog",
+            "cuenca",
+            "auto_marge",' --lib
 
 exit $survived
