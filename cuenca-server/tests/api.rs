@@ -481,6 +481,7 @@ fn a_location_registers_from_a_git_repository() {
             repo: repo.path().to_path_buf(),
             rev: "HEAD".into(),
         }),
+        dir: None,
     });
     assert_eq!(v["main"], tree.trim(), "{v}");
     let d = s.mint("d1", OwnerDevice, ND, grant(&[], &[]));
@@ -490,6 +491,47 @@ fn a_location_registers_from_a_git_repository() {
     let blob = cuenca_tree::GitOid::for_blob(b"hello\n");
     let r = s.get(&d, &format!("/v1/locations/repo/blobs/{}", blob.to_hex()));
     assert_eq!(r.bytes().unwrap().as_ref(), b"hello\n");
+}
+
+/// A directory that is not a git repository registers through cuenca-fs: main is its
+/// snapshot under the default `.forkignore`, and every blob it names is served.
+#[test]
+fn a_plain_directory_registers_as_a_location() {
+    let s = Server::start();
+    let site = tempfile::tempdir().unwrap();
+    std::fs::create_dir(site.path().join("docs")).unwrap();
+    std::fs::write(site.path().join("docs/a.md"), "plain\n").unwrap();
+    std::fs::write(site.path().join(".DS_Store"), "finder").unwrap();
+    let v = s.admin(AdminRequest::LocationAdd {
+        name: cuenca_core::LocationName::new("site").unwrap(),
+        remote: None,
+        git: None,
+        dir: Some(site.path().to_path_buf()),
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let d = s.mint("d1", OwnerDevice, ND, grant(&[], &[]));
+    s.whois.node(ND);
+    let r: Value = s.get(&d, "/v1/locations/site/tree").json().unwrap();
+    let tree: Tree = serde_json::from_value(r["tree"].clone()).unwrap();
+    let paths: Vec<_> = tree
+        .entries()
+        .map(|(p, _)| p.as_str().to_string())
+        .collect();
+    assert_eq!(paths, ["docs/a.md"]);
+    let blob = cuenca_tree::GitOid::for_blob(b"plain\n");
+    let r = s.get(&d, &format!("/v1/locations/site/blobs/{}", blob.to_hex()));
+    assert_eq!(r.bytes().unwrap().as_ref(), b"plain\n");
+
+    let both = s.admin(AdminRequest::LocationAdd {
+        name: cuenca_core::LocationName::new("both").unwrap(),
+        remote: None,
+        git: Some(cuenca_server::admin::GitSource {
+            repo: site.path().to_path_buf(),
+            rev: "HEAD".into(),
+        }),
+        dir: Some(site.path().to_path_buf()),
+    });
+    assert_eq!(both["ok"], false, "{both}");
 }
 
 #[test]

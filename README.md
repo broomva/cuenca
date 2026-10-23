@@ -8,6 +8,9 @@ The design is the spec, rev 2.2: [`docs/specs/2026-10-19-agent-native-change-pla
 |---|---|
 | `cuenca-tree` | Git-isomorphic trees and changesets, and a bridge that reads and writes them through git with every object checked |
 | `cuenca-core` | The authority's durable log, locations, forks with fencing epochs, and the blob store |
+| `cuenca-fs` | Snapshot any directory into a tree under its `.forkignore`, and check a tree out with copy-on-write clones |
+| `cuenca-server` | The authority: the agent API on the tailnet, per-principal keys, node identity, and the local admin socket |
+| `cuenca-cli` | The `cuenca` binary: agent verbs (`forks`, `fork`, `checkout`, `status`, `snapshot`, `diff`, `log`, `verify`, `land`) with `--json`, a per-checkout outbox, watch mode, `cuenca admin` owner verbs, and `cuenca serve` |
 
 More crates land as the plan's nodes do. Install, operate and recover sections arrive with the close-out node (BRO-3260).
 

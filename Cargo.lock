@@ -315,6 +315,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "cuenca-cli"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "cuenca-core",
+ "cuenca-fs",
+ "cuenca-server",
+ "cuenca-tree",
+ "hex",
+ "rand",
+ "reqwest",
+ "rustix",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "tracing-subscriber",
+]
+
+[[package]]
 name = "cuenca-core"
 version = "0.1.0"
 dependencies = [
@@ -350,6 +373,7 @@ dependencies = [
  "axum",
  "clap",
  "cuenca-core",
+ "cuenca-fs",
  "cuenca-tree",
  "futures-util",
  "hex",

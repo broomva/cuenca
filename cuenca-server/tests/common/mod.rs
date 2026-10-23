@@ -113,6 +113,7 @@ impl Server {
             name: cuenca_core::LocationName::new(name).unwrap(),
             remote: None,
             git: None,
+            dir: None,
         });
         assert_eq!(v["ok"], true, "{v}");
     }
