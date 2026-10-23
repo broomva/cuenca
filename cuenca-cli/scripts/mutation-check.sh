@@ -114,7 +114,7 @@ struct ForkArgs {' 'struct ForkArgs {' --test mcp owner_acts
 mutate src/mcp.rs '    if dir.is_absolute() {' '    if true {' --test mcp owner_acts
 mutate src/mcp.rs '(Some(_), Some(_), None) | (None, None, Some(_)) => {}' '_ if true => {}' --test mcp owner_acts
 mutate src/mcp.rs '            let mut r = if report.exit == 0 {' '            let mut r = if report.exit < 2 {' --test mcp
-mutate src/mcp.rs '                        error["status"] = json!(status);' '' --test mcp owner_acts
+mutate src/verbs.rs '            v["status"] = json!(status);' '' --test mcp owner_acts
 mutate src/mcp.rs '                .with_raw_output_schema(object(output))' '' --test mcp an_mcp_client
 mutate src/verbs.rs '        ClientError::Offline { .. } => v["offline"] = json!(true),' '        ClientError::Offline { .. } => {}' --test mcp an_unreachable
 
