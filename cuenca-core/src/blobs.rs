@@ -1,7 +1,8 @@
 //! Blob content on disk, one file per git id. A file only counts once the log database
-//! indexes it (see `Store::ingest_blob`); a file without an index row is an interrupted
+//! indexes it (see `Store::ingest_blobs`); a file without an index row is an interrupted
 //! ingest and is overwritten by the next one.
 
+use std::collections::BTreeSet;
 use std::fs::{self, File};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
@@ -14,6 +15,20 @@ use crate::error::{CoreError, Result};
 pub const MAX_BLOB_BYTES: u64 = cuenca_tree::git::DEFAULT_MAX_BLOB_BYTES;
 
 const CHUNK: usize = 64 * 1024;
+
+/// A blob whose bytes were verified and written to a temporary file, not yet in place.
+/// The file is closed once staged, so a batch of any size holds no descriptor per blob;
+/// dropping a `Staged` removes the file.
+pub(crate) struct Staged {
+    pub(crate) blob: Blob,
+    tmp: tempfile::TempPath,
+}
+
+/// Hand a file's writes to the disk (`fsync`), without the drive-cache flush that
+/// `File::sync_all` adds on macOS; [`BlobFiles::place`] ends with one such flush.
+fn fsync(file: &File) -> io::Result<()> {
+    rustix::fs::fsync(file).map_err(io::Error::from)
+}
 
 pub(crate) struct BlobFiles {
     objects: PathBuf,
@@ -46,9 +61,10 @@ impl BlobFiles {
     }
 
     /// Stream `size` bytes from `content` into a temporary file, hashing as they pass,
-    /// and move the file into place only if they hash to `claimed`. On any failure the
-    /// temporary file is removed, so nothing is stored.
-    pub(crate) fn write(&self, claimed: GitOid, size: u64, content: impl Read) -> Result<Blob> {
+    /// and keep the file only if they hash to `claimed`; on any failure it is removed,
+    /// so nothing is staged. A staged blob is handed to the disk with a plain `fsync`
+    /// and is not in place until [`BlobFiles::place`].
+    pub(crate) fn stage(&self, claimed: GitOid, size: u64, content: impl Read) -> Result<Staged> {
         if size > MAX_BLOB_BYTES {
             return Err(CoreError::TooLarge {
                 size,
@@ -77,21 +93,40 @@ impl BlobFiles {
                 actual: blob.oid(),
             });
         }
-        tmp.as_file().sync_all()?;
-        let dest = self.path(claimed);
-        let dir = dest.parent().expect("objects/<xx>");
-        match fs::create_dir(dir) {
-            Ok(()) => {}
-            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
-            Err(e) => return Err(e.into()),
+        fsync(tmp.as_file())?;
+        Ok(Staged {
+            blob,
+            tmp: tmp.into_temp_path(),
+        })
+    }
+
+    /// Move staged blobs into place and make them durable: a plain `fsync` of each
+    /// directory they land in, then one full sync (`F_FULLFSYNC` on macOS, which flushes
+    /// the drive's cache, every earlier `fsync`'s writes included). Only after this
+    /// returns may the index name them. A file in place without an index row is an
+    /// interrupted ingest, never read, and overwritten by the next ingest of its blob.
+    pub(crate) fn place(&self, staged: Vec<Staged>) -> Result<()> {
+        let mut dirs = BTreeSet::new();
+        for Staged { blob, tmp } in staged {
+            let dest = self.path(blob.oid());
+            let dir = dest.parent().expect("objects/<xx>");
+            match fs::create_dir(dir) {
+                Ok(()) => {}
+                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e.into()),
+            }
+            tmp.persist(&dest).map_err(|e| e.error)?;
+            dirs.insert(dir.to_path_buf());
         }
-        // The shard's own entry must be durable before the index names the blob. Done
-        // on every ingest: a concurrent ingest may have created the shard and not yet
-        // made it durable.
-        File::open(&self.objects)?.sync_all()?;
-        tmp.persist(&dest).map_err(|e| e.error)?;
-        File::open(dir)?.sync_all()?;
-        Ok(blob)
+        // The shards' own entries too, synced on every ingest: a concurrent ingest may
+        // have created a shard and not yet made it durable.
+        for dir in &dirs {
+            fsync(&File::open(dir)?)?;
+        }
+        let objects = File::open(&self.objects)?;
+        fsync(&objects)?;
+        objects.sync_all()?;
+        Ok(())
     }
 
     /// The content of `oid`, re-hashed on the way out so disk corruption surfaces as an

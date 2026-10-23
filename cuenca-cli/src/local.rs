@@ -32,6 +32,31 @@ use crate::client::{Client, ClientError};
 const FORMAT: u32 = 1;
 /// How many blobs are uploaded at once.
 const UPLOADERS: usize = 8;
+/// Most blobs in one upload batch.
+const BATCH_BLOBS: usize = 256;
+/// Most bytes of blobs, headers included, in one upload batch. A larger blob goes alone.
+const BATCH_BYTES: u64 = 16 * 1024 * 1024;
+
+/// `blobs` cut, in order, into batches within [`BATCH_BLOBS`] and [`BATCH_BYTES`]; a
+/// blob larger than a batch is a batch of its own.
+fn batches(blobs: &[(GitOid, u64)]) -> Vec<Vec<(GitOid, u64)>> {
+    let mut out: Vec<Vec<(GitOid, u64)>> = Vec::new();
+    let mut bytes = 0;
+    for &(oid, size) in blobs {
+        let len = crate::client::batch_len(std::iter::once(size));
+        match out.last_mut() {
+            Some(last) if last.len() < BATCH_BLOBS && bytes + len <= BATCH_BYTES => {
+                bytes += len;
+                last.push((oid, size));
+            }
+            _ => {
+                bytes = len;
+                out.push(vec![(oid, size)]);
+            }
+        }
+    }
+    out
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct State {
@@ -566,20 +591,39 @@ impl Local {
         Ok(Some(sent))
     }
 
+    /// Upload `blobs` from `objects/`: in batches of up to [`BATCH_BLOBS`] blobs and
+    /// [`BATCH_BYTES`] bytes, each one durable commit on the authority, by
+    /// [`UPLOADERS`] threads; a blob too large for a batch goes alone.
     fn upload(&self, client: &Client, blobs: &[(GitOid, u64)]) -> anyhow::Result<()> {
+        let units = batches(blobs);
         let next = std::sync::atomic::AtomicUsize::new(0);
         let first_error = std::sync::Mutex::new(None);
         std::thread::scope(|s| {
-            for _ in 0..UPLOADERS.min(blobs.len()) {
+            for _ in 0..UPLOADERS.min(units.len()) {
                 s.spawn(|| {
                     loop {
                         let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                        let Some(&(oid, size)) = blobs.get(i) else {
+                        let Some(unit) = units.get(i) else {
                             return;
                         };
-                        if let Err(e) = client.put_blob(oid, &self.object_path(oid), size) {
+                        let sent = match unit.as_slice() {
+                            [(oid, size)] if *size > BATCH_BYTES => {
+                                client.put_blob(*oid, &self.object_path(*oid), *size)
+                            }
+                            unit => {
+                                let paths: Vec<_> =
+                                    unit.iter().map(|(oid, _)| self.object_path(*oid)).collect();
+                                let batch: Vec<_> = unit
+                                    .iter()
+                                    .zip(&paths)
+                                    .map(|(&(oid, size), path)| (oid, path.as_path(), size))
+                                    .collect();
+                                client.put_blobs(&batch)
+                            }
+                        };
+                        if let Err(e) = sent {
                             first_error.lock().unwrap().get_or_insert(e);
-                            next.store(blobs.len(), std::sync::atomic::Ordering::Relaxed);
+                            next.store(units.len(), std::sync::atomic::Ordering::Relaxed);
                             return;
                         }
                     }
@@ -637,6 +681,28 @@ pub struct Flush {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn uploads_are_cut_into_batches_within_both_limits() {
+        let oid = |i: u64| GitOid::for_blob(&i.to_le_bytes());
+        let sizes = |b: &[Vec<(GitOid, u64)>]| -> Vec<usize> { b.iter().map(Vec::len).collect() };
+        assert!(batches(&[]).is_empty());
+        // By count: 600 small blobs are 256 + 256 + 88, in order.
+        let small: Vec<_> = (0..600).map(|i| (oid(i), 10)).collect();
+        let cut = batches(&small);
+        assert_eq!(sizes(&cut), [256, 256, 88]);
+        assert_eq!(cut.concat(), small);
+        // By bytes: three blobs of 6 MiB fit two to a 16 MiB batch.
+        let mid: Vec<_> = (0..3).map(|i| (oid(i), 6 << 20)).collect();
+        assert_eq!(sizes(&batches(&mid)), [2, 1]);
+        // A blob over the byte limit is a batch of its own, between its neighbours.
+        let big = BATCH_BYTES + 1;
+        let mixed = [(oid(0), 1), (oid(1), big), (oid(2), 1)];
+        assert_eq!(sizes(&batches(&mixed)), [1, 1, 1]);
+        for batch in batches(&[(oid(0), 1), (oid(1), 2), (oid(2), BATCH_BYTES - 40)]) {
+            assert!(crate::client::batch_len(batch.iter().map(|b| b.1)) <= BATCH_BYTES);
+        }
+    }
 
     fn local(dir: &Path) -> Local {
         Local {

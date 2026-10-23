@@ -45,6 +45,72 @@ pub struct BlobInfo {
     pub size: u64,
 }
 
+/// Blobs being ingested together: one full sync and one log commit for all of them.
+///
+/// Each [`BlobBatch::add`] hashes its bytes as git does (with SHA-1 collision
+/// detection); unless they are exactly `size` bytes hashing to the claim, the add fails
+/// and nothing of it is kept, and a caller that wants all or nothing drops the batch.
+/// The SHA-256 is derived from the same verified bytes. [`BlobBatch::commit`] moves the
+/// blobs into place, makes them durable, then indexes them in one redb transaction, so
+/// after a crash the store holds every blob of the batch or none of them. Dropping a
+/// batch stores nothing.
+///
+/// A blob the store already holds is ingested the same way, every byte read, verified,
+/// written and synced again: an ingest takes as long, and fails the same way, whether
+/// or not the store had the blob, so its outcome and timing do not say which (an
+/// authority that serves ingests to principals must not tell one what another stored).
+/// Blobs are never removed.
+#[must_use = "a batch stores nothing until it is committed"]
+pub struct BlobBatch<'s> {
+    store: &'s Store,
+    staged: Vec<crate::blobs::Staged>,
+}
+
+impl BlobBatch<'_> {
+    /// Verify and stage a blob that claims to be `claimed`, streaming `size` bytes from
+    /// `content`.
+    pub fn add(&mut self, claimed: GitOid, size: u64, content: impl Read) -> Result<BlobInfo> {
+        let staged = self.store.blobs.stage(claimed, size, content)?;
+        let info = BlobInfo {
+            sha256: staged.blob.sha256(),
+            size: staged.blob.size(),
+        };
+        self.staged.push(staged);
+        Ok(info)
+    }
+
+    /// How many blobs are staged.
+    pub fn len(&self) -> usize {
+        self.staged.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.staged.is_empty()
+    }
+
+    /// Store every staged blob: in place and durable first, then indexed in one commit.
+    pub fn commit(self) -> Result<()> {
+        if self.staged.is_empty() {
+            return Ok(());
+        }
+        let rows: Vec<([u8; 20], Vec<u8>)> = self
+            .staged
+            .iter()
+            .map(|s| (*s.blob.oid().as_bytes(), encode_blob(&s.blob)))
+            .collect();
+        self.store.blobs.place(self.staged)?;
+        let txn = self.store.begin()?;
+        {
+            let mut table = txn.open_table(BLOBS)?;
+            for (oid, row) in &rows {
+                table.insert(oid.as_slice(), row.as_slice())?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
+}
+
 /// The result of a publish.
 #[derive(Debug, Clone, PartialEq, Eq)]
 #[non_exhaustive]
@@ -118,24 +184,21 @@ impl Store {
     // ---- blobs ------------------------------------------------------------------
 
     /// Ingest a blob that claims to be `claimed`, streaming `size` bytes from
-    /// `content`. The bytes are hashed as git does (with SHA-1 collision detection);
-    /// unless they are exactly `size` bytes hashing to `claimed`, nothing is stored.
-    /// The SHA-256 is derived from the same verified bytes. A blob the store already
-    /// holds is ingested the same way, every byte read, verified, written and synced
-    /// again: an ingest takes as long, and fails the same way, whether or not the store
-    /// had the blob, so its outcome and timing do not say which (an authority that
-    /// serves ingests to principals must not tell one what another stored). Blobs are
-    /// never removed.
+    /// `content`: a [`BlobBatch`] of one.
     pub fn ingest_blob(&self, claimed: GitOid, size: u64, content: impl Read) -> Result<BlobInfo> {
-        let blob = self.blobs.write(claimed, size, content)?;
-        let txn = self.begin()?;
-        txn.open_table(BLOBS)?
-            .insert(claimed.as_bytes().as_slice(), encode_blob(&blob).as_slice())?;
-        txn.commit()?;
-        Ok(BlobInfo {
-            sha256: blob.sha256(),
-            size: blob.size(),
-        })
+        let mut batch = self.blob_batch();
+        let info = batch.add(claimed, size, content)?;
+        batch.commit()?;
+        Ok(info)
+    }
+
+    /// Start ingesting a batch of blobs, which the store holds all of, or none, once
+    /// [`BlobBatch::commit`] returns.
+    pub fn blob_batch(&self) -> BlobBatch<'_> {
+        BlobBatch {
+            store: self,
+            staged: Vec::new(),
+        }
     }
 
     pub fn blob_info(&self, oid: GitOid) -> Result<Option<BlobInfo>> {

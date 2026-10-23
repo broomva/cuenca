@@ -55,6 +55,65 @@ fn a_held_blob_is_ingested_like_a_new_one() {
     assert_eq!(store.read_blob(oid).unwrap(), content);
 }
 
+/// A batch stores every blob it was given, in one commit.
+#[test]
+fn a_blob_batch_stores_all_of_its_blobs() {
+    let (_d, store) = store();
+    let blobs: Vec<Vec<u8>> = (0..5).map(|i| format!("blob {i}\n").into_bytes()).collect();
+    let mut batch = store.blob_batch();
+    assert!(batch.is_empty());
+    for b in &blobs {
+        let info = batch
+            .add(GitOid::for_blob(b), b.len() as u64, b.as_slice())
+            .unwrap();
+        assert_eq!(info.sha256, sha256(b));
+        // Staged is not stored.
+        assert_eq!(store.blob_info(GitOid::for_blob(b)).unwrap(), None);
+    }
+    assert_eq!(batch.len(), 5);
+    batch.commit().unwrap();
+    for b in &blobs {
+        let oid = GitOid::for_blob(b);
+        assert_eq!(store.blob_info(oid).unwrap().unwrap().sha256, sha256(b));
+        assert_eq!(store.read_blob(oid).unwrap(), *b);
+    }
+    // An empty batch commits nothing, and a blob twice in a batch is stored once.
+    store.blob_batch().commit().unwrap();
+    let mut batch = store.blob_batch();
+    for _ in 0..2 {
+        batch
+            .add(GitOid::for_blob(b"twice"), 5, &b"twice"[..])
+            .unwrap();
+    }
+    batch.commit().unwrap();
+    assert_eq!(
+        store.read_blob(GitOid::for_blob(b"twice")).unwrap(),
+        b"twice"
+    );
+}
+
+/// A batch dropped after a refused blob stores none of its blobs, and leaves no file.
+#[test]
+fn a_blob_batch_that_is_not_committed_stores_nothing() {
+    let (dir, store) = store();
+    let mut batch = store.blob_batch();
+    batch
+        .add(GitOid::for_blob(b"good"), 4, &b"good"[..])
+        .unwrap();
+    let wrong = GitOid::for_blob(b"claimed");
+    assert!(matches!(
+        batch.add(wrong, 5, &b"other"[..]),
+        Err(CoreError::OidMismatch { .. })
+    ));
+    drop(batch);
+    assert_eq!(store.blob_info(GitOid::for_blob(b"good")).unwrap(), None);
+    assert_eq!(store.blob_info(wrong).unwrap(), None);
+    assert_eq!(
+        files_under(&dir.path().join("blobs")),
+        Vec::<std::path::PathBuf>::new()
+    );
+}
+
 #[test]
 fn a_blob_that_does_not_hash_to_its_claim_is_refused_and_nothing_is_stored() {
     let (dir, store) = store();
