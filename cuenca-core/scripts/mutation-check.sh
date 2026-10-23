@@ -218,7 +218,7 @@ mutate src/gates/policy.rs '            if max > DEFAULT_MAX_FILE_BYTES {' '    
 mutate src/gates/mod.rs '        if let Err(error) = &input.checks.bytes {' '        if let Err(error) = &Ok::<(), String>(()) {' --lib
 
 # P20 r1 (A): the pattern count is capped.
-mutate src/gates/policy.rs '        if patterns > MAX_POLICY_PATTERNS {' '        if false {' --lib
+mutate src/gates/policy.rs '    if patterns >= MAX_POLICY_PATTERNS {' '    if false {' --lib
 
 # P20 r1 (B): only governance moves count; directory declarations; the built-in G4 is case-folded.
 mutate src/gates/builtin.rs '*at >= since && self.touches(paths.iter().map(|p| p.as_str()))' '*at >= since' --lib
@@ -234,5 +234,7 @@ mutate src/gates/policy.rs '                if depth > MAX_POLICY_DEPTH {' '    
 mutate src/store.rs '        (Some(info.sha256), bytes)' '        (None, bytes)' --lib
 mutate src/gates/mod.rs '            if RepoPath::new(key.trim_end_matches('"'"'/'"'"')).is_err() {' '            if false {' --lib
 mutate src/gates/mod.rs '        let dirs = path.match_indices('"'"'/'"'"').map(|(i, _)| &path[..=i]);' '        let dirs = std::iter::empty::<&str>();' --lib
+
+mutate src/gates/policy.rs '    if absent(y) || y.as_hash().is_some() {' '    if true {' --lib
 
 exit $survived

@@ -152,12 +152,18 @@ impl Policy {
             return Err(format!("{POLICY_PATH} is not a mapping"));
         }
 
+        let gates = mapping(&root["gates"], "gates")?;
+        let auto_merge = mapping(&root["auto_merge"], "auto_merge")?;
+        let cuenca = mapping(&root["cuenca"], "cuenca")?;
+
         // gates.hard[id: G4].pattern
-        if let Some(hard) = list(&root["gates"]["hard"], "gates.hard")? {
+        if let Some(hard) = list(&gates["hard"], "gates.hard")? {
             for gate in hard {
+                mapping(gate, "gates.hard[]")?;
                 if gate["id"].as_str() == Some("G4")
                     && let Some(pattern) = string(&gate["pattern"], "gates.hard[G4].pattern")?
                 {
+                    one_more_pattern(&policy)?;
                     policy.secret_paths.push(
                         compile(&pattern)
                             .map_err(|e| not_compiled("gates.hard[G4].pattern", &e))?,
@@ -167,8 +173,9 @@ impl Policy {
         }
 
         // auto_merge.rules[action: require_human].path_touched
-        if let Some(rules) = list(&root["auto_merge"]["rules"], "auto_merge.rules")? {
+        if let Some(rules) = list(&auto_merge["rules"], "auto_merge.rules")? {
             for rule in rules {
+                mapping(rule, "auto_merge.rules[]")?;
                 if rule["action"].as_str() == Some("require_human")
                     && let Some(path) =
                         string(&rule["path_touched"], "auto_merge.rules[].path_touched")?
@@ -181,10 +188,10 @@ impl Policy {
             }
         }
 
-        policy.governance = governance(&root["auto_merge"]["gates"])?;
+        policy.governance = governance(&auto_merge["gates"])?;
 
         // cuenca.gates
-        let section = &root["cuenca"]["gates"];
+        let section = &cuenca["gates"];
         if let Some(map) = section.as_hash() {
             for key in map.keys() {
                 let known = [
@@ -212,6 +219,7 @@ impl Policy {
         }
         if let Some(paths) = strings(&section["secret_paths"], "cuenca.gates.secret_paths")? {
             for p in paths {
+                one_more_pattern(&policy)?;
                 policy.secret_paths.push(
                     compile(&p).map_err(|e| not_compiled("cuenca.gates.secret_paths[]", &e))?,
                 );
@@ -221,6 +229,7 @@ impl Policy {
             strings(&section["secret_patterns"], "cuenca.gates.secret_patterns")?
         {
             for (i, p) in patterns.into_iter().enumerate() {
+                one_more_pattern(&policy)?;
                 let re = compile_bytes(&p)
                     .map_err(|e| not_compiled("cuenca.gates.secret_patterns[]", &e))?;
                 policy
@@ -237,14 +246,6 @@ impl Policy {
             for w in windows {
                 policy.landing_windows.push(window(w)?);
             }
-        }
-        let patterns = policy.secret_paths.len()
-            + policy.secret_patterns.len()
-            + super::builtin::SECRET_PATTERNS.len();
-        if patterns > MAX_POLICY_PATTERNS {
-            return Err(format!(
-                "{patterns} secret patterns, over the limit of {MAX_POLICY_PATTERNS}"
-            ));
         }
         let rules =
             policy.protected.len() + policy.governance.as_ref().map_or(0, |g| g.paths.len());
@@ -382,6 +383,31 @@ pub(super) fn compile_bytes(pattern: &str) -> std::result::Result<BytesRegex, re
 
 fn absent(y: &Yaml) -> bool {
     y.is_badvalue() || y.is_null()
+}
+
+/// Refuses a pattern before it is compiled once the cap (built-ins included) is
+/// reached, so a policy listing thousands costs at most the cap in compiles (r3, B).
+fn one_more_pattern(policy: &Policy) -> Res<()> {
+    let patterns = policy.secret_paths.len()
+        + policy.secret_patterns.len()
+        + super::builtin::SECRET_PATTERNS.len();
+    if patterns >= MAX_POLICY_PATTERNS {
+        return Err(format!(
+            "more than {MAX_POLICY_PATTERNS} secret patterns, built-ins included"
+        ));
+    }
+    Ok(())
+}
+
+/// A section that must be a mapping when present. Indexing a scalar or a list
+/// yields a bad value, which would otherwise read as "absent" and silently drop
+/// every gate under it.
+fn mapping<'y>(y: &'y Yaml, key: &str) -> Res<&'y Yaml> {
+    if absent(y) || y.as_hash().is_some() {
+        Ok(y)
+    } else {
+        Err(format!("{key} is not a mapping"))
+    }
 }
 
 fn list<'y>(y: &'y Yaml, key: &str) -> Res<Option<&'y Vec<Yaml>>> {
@@ -585,6 +611,16 @@ cuenca:
             b"auto_merge:\n  gates: [1]\n",
             b"cuenca:\n  gates:\n    max_file_bytes: 10485761\n",
             b"cuenca:\n  gates:\n    declare_deletions: false\n",
+            // A section of the wrong type is an error, never "absent" (r3, A):
+            // otherwise `auto_merge: disabled` silently drops the protected paths
+            // and the governance tier.
+            b"auto_merge: disabled\n",
+            b"auto_merge: [rules]\n",
+            b"gates: off\n",
+            b"cuenca: 1\n",
+            b"cuenca:\n  gates: on\n",
+            b"auto_merge:\n  rules: [require_human]\n",
+            b"gates:\n  hard: [G4]\n",
         ] {
             assert!(Policy::parse(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
         }
@@ -652,9 +688,14 @@ cuenca:
         assert_eq!(room, 53);
         assert!(Policy::parse(many(room).as_bytes()).is_ok());
         assert!(Policy::parse(many(room + 1).as_bytes()).is_err());
+        // The cap is checked before compiling, so a long list fails fast (r3, B:
+        // 10,000 patterns took 32 s when every one was compiled first).
+        let started = std::time::Instant::now();
+        assert!(Policy::parse(many(10_000).as_bytes()).is_err());
+        assert!(started.elapsed() < std::time::Duration::from_secs(5));
     }
 
-    /// Deep nesting is refused by the parser's own recursion limit, quickly and without
+    /// Deep nesting is refused by the pre-scan's depth cap, quickly and without
     /// exhausting the stack (an evaluation thread must never abort on a base policy).
     #[test]
     fn deep_nesting_is_refused_not_a_crash() {
@@ -667,7 +708,7 @@ cuenca:
         let block: String = (0..1200)
             .map(|i| format!("{}k{i}:\n", " ".repeat(i)))
             .collect();
-        let _ = Policy::parse(block.as_bytes());
+        assert!(Policy::parse(block.as_bytes()).is_err());
     }
 
     #[test]
