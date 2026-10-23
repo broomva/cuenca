@@ -505,16 +505,42 @@ pub fn tools() -> Vec<Tool> {
         ),
         (
             "verify",
-            "Run the location's checks, read from the base tree, on the checkout's head (not built yet: answers unavailable).",
+            "Run the checks the location's main declares in .cuenca/checks.toml (never the candidate's own) on the fork's head, in a temporary checkout, and record how they ended. Publishes anything queued first; the head must be the checkout's last snapshot. Advisory: the record blocks nothing. isError when a check failed.",
             input(
                 json!({ "dir": dir("a directory inside the checkout") }),
                 &["dir"],
             ),
             output(
-                json!({ "fork": s, "status": s, "reason": s }),
-                &["fork", "status"],
+                json!({
+                    "fork": s, "changeset": s, "candidate": s, "base": s,
+                    "manifest": { "type": ["object", "null"] },
+                    "checks": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "name": s, "argv": strings(), "timeout_secs": n,
+                                "status": { "enum": ["passed", "failed", "timed_out", "not_run"] },
+                                "exit_code": { "type": ["integer", "null"] },
+                                "duration_ms": n, "output": s,
+                            },
+                            "required": ["name", "argv", "status", "exit_code", "duration_ms"],
+                        },
+                    },
+                    "passed": b, "offset": n,
+                }),
+                &[
+                    "fork",
+                    "changeset",
+                    "candidate",
+                    "base",
+                    "manifest",
+                    "checks",
+                    "passed",
+                    "offset",
+                ],
             ),
-            read,
+            write.clone(),
         ),
         (
             "land",

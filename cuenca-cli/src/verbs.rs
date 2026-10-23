@@ -9,6 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
+use cuenca_core::checks::{CheckRun, CheckStatus, MANIFEST_PATH, Manifest};
 use cuenca_core::{Event, ForkName, LocationName};
 use cuenca_fs::{BlobSource, Fetched, SnapshotOptions};
 use cuenca_tree::{Changeset, Entry, GitOid, Op, Tree};
@@ -17,6 +18,7 @@ use serde_json::{Value, json};
 
 use crate::client::Client;
 use crate::local::{Flush, Local, State};
+use crate::run;
 
 /// What a verb did: `json` for agents, `text` for people. `exit` is the process's exit
 /// status: 0 done, 1 refused or failed, 2 unavailable (the verb is not built yet).
@@ -708,6 +710,23 @@ fn summarise(record: &cuenca_core::Record) -> (Value, String) {
         } => {
             format!("asked to land {changeset} from {fork}")
         }
+        Event::VerifyRecorded {
+            fork,
+            changeset,
+            checks,
+            manifest,
+            ..
+        } => {
+            let passed = checks
+                .iter()
+                .filter(|c| c.status == CheckStatus::Passed)
+                .count();
+            format!(
+                "verify of {changeset} on {fork}: {passed} of {} check(s) passed ({})",
+                checks.len(),
+                manifest.map_or("no manifest".to_string(), |m| format!("manifest {}", m.oid))
+            )
+        }
         other => format!("{other:?}"),
     };
     (
@@ -727,15 +746,139 @@ pub fn log(client: &Client, dir: &Path, fork: Option<&str>) -> anyhow::Result<Re
     Ok(Report::ok(json!({ "fork": name, "records": json }), text))
 }
 
-/// `cuenca verify`: run the location's checks, read from the base tree, on the
-/// checkout's head. Not built yet (BRO-3254): it says so and exits 2.
+/// `cuenca verify`: run the checks the location's main declares
+/// ([`cuenca_core::checks`], `.cuenca/checks.toml` of the base, never the candidate's) on
+/// the fork's head, in a temporary checkout of it, and have the authority record how
+/// they ended beside the head changeset. Everything queued is published first, and the
+/// authority's head must be the checkout's last snapshot, so what is verified is what
+/// the checkout holds (edits since the last snapshot are not). Exits 0 when every check
+/// passed (a base that declares none passes with zero), 1 otherwise.
+///
+/// Advisory (spec rev 2.2 section 6): the results are the caller's own and a check
+/// reads the candidate's files, so the record blocks nothing; GitHub's required checks
+/// are the gate at landing.
 pub fn verify(client: &Client, dir: &Path) -> anyhow::Result<Report> {
-    let local = open(client, dir)?;
-    let reason = "verify is not built yet: checks read from the base tree arrive with BRO-3254";
+    let mut local = open(client, dir)?;
+    let flush = local.flush(client);
+    if let Some(e) = flush.error {
+        bail!(
+            "{} snapshot(s) are still queued, so nothing was verified: {e}",
+            flush.pending
+        );
+    }
+    let f = client.fork(&local.state.fork)?;
+    let ours = local.state.published.git_tree_id();
+    if f.head != ours {
+        bail!(
+            "the fork's head is {}, not this checkout's last snapshot {ours}; nothing was verified",
+            f.head
+        );
+    }
+    let Some((id, _)) = f.head_changeset else {
+        bail!("{} has no draft to verify", f.name);
+    };
+
+    let (base, main) = client.location_tree(&f.location)?;
+    let manifest = match main.get(MANIFEST_PATH) {
+        None => Manifest::default(),
+        Some(Entry::File(oid) | Entry::Executable(oid)) => {
+            let bytes = client
+                .location_blob(&f.location, *oid)?
+                .with_context(|| format!("the main of {} moved while it was read", f.location))?;
+            Manifest::parse(&bytes).with_context(|| format!("the base {base} of {}", f.location))?
+        }
+        Some(_) => bail!(
+            "{MANIFEST_PATH} in the base {base} of {} is not a regular file",
+            f.location
+        ),
+    };
+
+    // The candidate as the authority has it, in a directory of this verify's own.
+    let scratch = tempfile::Builder::new()
+        .prefix("cuenca-verify-")
+        .tempdir()?;
+    let root = scratch.path().join("candidate");
+    let (head, tree) = client.fork_tree(&f.name)?;
+    if head != f.head {
+        bail!("{} moved while it was read; nothing was verified", f.name);
+    }
+    let source = Remote {
+        client,
+        fork: &f.name,
+    };
+    cuenca_fs::checkout(&tree, &root, &source)?;
+    let ran: Vec<run::Ran> = manifest
+        .checks
+        .iter()
+        .map(|c| run::check(c, &root))
+        .collect();
+    drop(scratch);
+
+    let runs: Vec<CheckRun> = ran.iter().map(|r| r.run.clone()).collect();
+    let (offset, manifest_id) = client
+        .verdict(&f.name, local.state.epoch, id, base, &runs)
+        .with_context(|| format!("recording the verify of {id}"))?;
+    let passed = runs
+        .iter()
+        .filter(|r| r.status == CheckStatus::Passed)
+        .count();
+    let all = passed == runs.len();
+
+    let mut text = format!(
+        "verify of {id} on {}: {passed} of {} check(s) passed, judged by {}
+",
+        f.name,
+        runs.len(),
+        match &manifest_id {
+            Some(m) => format!("{MANIFEST_PATH} {} of base {base}", m.oid),
+            None => format!("base {base}, which declares no checks"),
+        }
+    );
+    let mut checks = Vec::new();
+    for r in &ran {
+        let c = &r.run;
+        let verdict = match c.status {
+            CheckStatus::Passed => "pass".to_string(),
+            CheckStatus::Failed => match c.exit_code {
+                Some(code) => format!("FAIL (exit {code})"),
+                None => "FAIL (killed by a signal)".to_string(),
+            },
+            CheckStatus::TimedOut => format!("FAIL (timed out after {} s)", c.check.timeout_secs),
+            CheckStatus::NotRun => "FAIL (not run)".to_string(),
+        };
+        text.push_str(&format!(
+            "  {verdict}  {}  {} ms
+",
+            c.check.name, c.duration_ms
+        ));
+        if c.status != CheckStatus::Passed {
+            for line in r.output.lines() {
+                text.push_str(&format!(
+                    "      {line}
+"
+                ));
+            }
+        }
+        let mut v = serde_json::to_value(c)?;
+        v["output"] = json!(r.output);
+        checks.push(v);
+    }
+    text.push_str(&format!(
+        "recorded at log offset {offset}; advisory, it blocks nothing\n"
+    ));
     Ok(Report {
-        json: json!({ "fork": local.state.fork, "status": "unavailable", "reason": reason }),
-        text: format!("{reason}\n"),
-        exit: 2,
+        json: json!({
+            "fork": f.name,
+            "changeset": id,
+            "candidate": f.head,
+            "base": base,
+            "manifest": manifest_id,
+            "checks": checks,
+            "passed": all,
+            "offset": offset,
+        }),
+        text,
+        exit: i32::from(!all),
     })
 }
 

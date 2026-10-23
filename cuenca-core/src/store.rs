@@ -13,6 +13,7 @@ use redb::{
 use serde::{Deserialize, Serialize};
 
 use crate::blobs::BlobFiles;
+use crate::checks::{CheckRun, MANIFEST_PATH, Manifest, ManifestError, ManifestId};
 use crate::error::{CoreError, Result};
 use crate::event::{ChangesetId, Event, Record};
 use crate::names::{ForkName, LocationName, PrincipalName};
@@ -458,6 +459,90 @@ impl Store {
             changeset: id,
         };
         Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record a verify of `id`, the fork's head changeset, by its holder: `checks` is
+    /// how each check `base` declares ended, where `base` must be the main the fork's
+    /// location has now. The authority reads the manifest from `base` itself
+    /// ([`MANIFEST_PATH`]) and refuses the record unless `checks` names exactly that
+    /// manifest's checks, in order, so a candidate's own manifest can never be the
+    /// list that was run. Returns the record's offset and the manifest it was judged
+    /// by (`None`: the base declares no checks). Each verify is a new record.
+    pub fn record_verify(
+        &self,
+        fork: &ForkName,
+        writer: &Writer,
+        id: ChangesetId,
+        base: GitOid,
+        checks: Vec<CheckRun>,
+    ) -> Result<(u64, Option<ManifestId>)> {
+        let state = self
+            .fork(fork)?
+            .ok_or_else(|| CoreError::UnknownFork(fork.to_string()))?;
+        let main = self
+            .location(&state.location)?
+            .ok_or_else(|| CoreError::UnknownLocation(state.location.to_string()))?
+            .main;
+        // Checked again by the rules, inside the transaction; this keeps a base that is
+        // not a main away from the tree table.
+        if main != base {
+            return Err(CoreError::BaseMoved {
+                location: state.location.to_string(),
+                main,
+                base,
+            });
+        }
+        let (manifest, declared) = self.manifest(base)?;
+        let reported: Vec<_> = checks.iter().map(|r| &r.check).collect();
+        let expected: Vec<_> = declared.checks.iter().collect();
+        if reported != expected {
+            let names = |v: &[&crate::checks::Check]| -> Vec<String> {
+                v.iter().map(|c| c.name.clone()).collect()
+            };
+            return Err(CoreError::ManifestMismatch(format!(
+                "the base declares {:?}, the record runs {:?} (names, argv and timeouts must match)",
+                names(&expected),
+                names(&reported)
+            )));
+        }
+        let build = |view: &Tables<'_>| {
+            let candidate = view
+                .fork(fork)?
+                .ok_or_else(|| CoreError::UnknownFork(fork.to_string()))?
+                .head;
+            Ok(Event::VerifyRecorded {
+                fork: fork.clone(),
+                writer: writer.clone(),
+                changeset: id,
+                candidate,
+                base,
+                manifest,
+                checks: checks.clone(),
+            })
+        };
+        let (offset, _) = self.record_with(build, |_| Ok(()))?;
+        Ok((offset, manifest))
+    }
+
+    /// The manifest tree `base` declares, with its id; an absent one declares nothing.
+    fn manifest(&self, base: GitOid) -> Result<(Option<ManifestId>, Manifest)> {
+        let tree = self.tree(base)?;
+        let Some(entry) = tree.get(MANIFEST_PATH) else {
+            return Ok((None, Manifest::default()));
+        };
+        let oid = match entry {
+            Entry::File(oid) | Entry::Executable(oid) => *oid,
+            _ => return Err(ManifestError("is not a regular file".to_string()).into()),
+        };
+        let info = self.blob_info(oid)?.ok_or(CoreError::MissingBlob(oid))?;
+        let manifest = Manifest::parse(&self.read_blob(oid)?)?;
+        Ok((
+            Some(ManifestId {
+                oid,
+                sha256: info.sha256,
+            }),
+            manifest,
+        ))
     }
 
     /// Move the main of `fork`'s location by `id`, the fork's head, as a

@@ -190,10 +190,10 @@ async fn an_mcp_client_lists_the_agent_verbs_and_forks_snapshots_and_diffs() {
     let by_dir = mcp.ok("log", json!({ "dir": dir })).await;
     assert_eq!(by_dir, v);
 
-    // verify is not built yet (BRO-3254): a structured "unavailable", flagged an error.
-    let (error, v) = mcp.call("verify", json!({ "dir": dir })).await;
-    assert!(error);
-    assert_eq!(v["status"], "unavailable", "{v}");
+    // The site declares no checks: verify passes with zero.
+    let v = mcp.ok("verify", json!({ "dir": dir })).await;
+    assert_eq!(v["passed"], true, "{v}");
+    assert_eq!(v["checks"], json!([]));
 
     let v = mcp.ok("land", json!({ "dir": dir })).await;
     assert_eq!(v["fork"], "m1");

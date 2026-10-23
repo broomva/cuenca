@@ -8,6 +8,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use cuenca_core::checks::{CheckRun, ManifestId};
 use cuenca_core::{ChangesetId, Fork, ForkName, Location, LocationName, Record};
 use cuenca_server::http::{BATCH_HEADER_BYTES, MAX_BATCH_BLOBS, MAX_BATCH_BYTES, batch_header};
 use cuenca_tree::{Changeset, GitOid, Tree};
@@ -188,7 +189,23 @@ impl Client {
     /// Blob `oid` of the fork's head, `None` if the head does not name it. Unchecked:
     /// whoever writes it hashes it.
     pub fn fork_blob(&self, name: &ForkName, oid: GitOid) -> Result<Option<Vec<u8>>> {
-        let url = format!("{}/v1/forks/{name}/blobs/{}", self.url, oid.to_hex());
+        self.blob(&format!("/v1/forks/{name}/blobs/{}", oid.to_hex()))
+    }
+
+    /// Blob `oid` of the location's main, `None` if main does not name it, checked
+    /// against its id.
+    pub fn location_blob(&self, name: &LocationName, oid: GitOid) -> Result<Option<Vec<u8>>> {
+        let bytes = self.blob(&format!("/v1/locations/{name}/blobs/{}", oid.to_hex()))?;
+        match bytes {
+            Some(b) if GitOid::for_blob(&b) != oid => Err(ClientError::Other(format!(
+                "the authority sent blob {oid} with content that is not {oid}"
+            ))),
+            b => Ok(b),
+        }
+    }
+
+    fn blob(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        let url = format!("{}{path}", self.url);
         match self.send(self.http.get(url)) {
             Ok(r) => r
                 .bytes()
@@ -288,6 +305,28 @@ impl Client {
             json!({ "epoch": epoch, "changeset": id.to_hex() }),
         )?;
         Ok(o.offset)
+    }
+
+    /// Record a verify of `id`, the fork's head, run against `base` (the location's
+    /// main): the record's offset, and the manifest the authority judged it by.
+    pub fn verdict(
+        &self,
+        fork: &ForkName,
+        epoch: u64,
+        id: ChangesetId,
+        base: GitOid,
+        checks: &[CheckRun],
+    ) -> Result<(u64, Option<ManifestId>)> {
+        #[derive(Deserialize)]
+        struct Recorded {
+            offset: u64,
+            manifest: Option<ManifestId>,
+        }
+        let r: Recorded = self.post(
+            &format!("/v1/forks/{fork}/verdicts"),
+            json!({ "epoch": epoch, "changeset": id.to_hex(), "base": base.to_hex(), "checks": checks }),
+        )?;
+        Ok((r.offset, r.manifest))
     }
 }
 

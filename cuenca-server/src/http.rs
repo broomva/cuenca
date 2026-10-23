@@ -28,6 +28,7 @@
 //! | GET | `/v1/forks/{fork}/history` | the log records naming the fork (and only forks the caller reads) |
 //! | POST | `/v1/forks/{fork}/drafts` | `{epoch, changeset}`: publish a draft |
 //! | POST | `/v1/forks/{fork}/landing` | `{epoch, changeset}` (an id): ask to land |
+//! | POST | `/v1/forks/{fork}/verdicts` | `{epoch, changeset, base, checks}`: record a verify ([`cuenca_core::checks`]) |
 //! | PUT | `/v1/blobs/{oid}` | upload a blob; `Content-Length` is its size |
 //! | POST | `/v1/blobs` | upload a batch of blobs ([`batch_header`]), all or none |
 
@@ -42,6 +43,7 @@ use axum::middleware::{self, Next};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post, put};
 use axum::{Json, Router};
+use cuenca_core::checks::CheckRun;
 use cuenca_core::{
     ChangesetId, CoreError, Event, Fork, ForkName, LocationName, MAX_BLOB_BYTES, Writer,
 };
@@ -89,6 +91,7 @@ pub fn router(authority: Arc<Authority>) -> Router {
         .route("/v1/forks/{fork}/history", get(history))
         .route("/v1/forks/{fork}/drafts", post(publish))
         .route("/v1/forks/{fork}/landing", post(landing))
+        .route("/v1/forks/{fork}/verdicts", post(verdict))
         .route(
             "/v1/blobs/{oid}",
             put(upload_blob).layer(DefaultBodyLimit::max(MAX_BLOB_BYTES as usize)),
@@ -187,7 +190,20 @@ impl From<CoreError> for ApiError {
                     }),
                 };
             }
+            CoreError::BaseMoved { main, .. } => {
+                return Self {
+                    status: S::CONFLICT,
+                    body: json!({
+                        "error": "base_moved",
+                        "message": message,
+                        "main": main.to_hex(),
+                    }),
+                };
+            }
+            CoreError::BadManifest(_) => (S::UNPROCESSABLE_ENTITY, "bad_manifest"),
+            CoreError::ManifestMismatch(_) => (S::CONFLICT, "manifest_mismatch"),
             CoreError::Name(_)
+            | CoreError::BadCheckRun { .. }
             | CoreError::Path(_)
             | CoreError::Tree(_)
             | CoreError::Changeset(_)
@@ -484,6 +500,38 @@ async fn landing(
             a.store.record_landing_intent(&name, &writer, id)
         })?;
         Ok(Json(json!({ "offset": offset })))
+    })
+    .await
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct Verdict {
+    epoch: u64,
+    changeset: String,
+    base: String,
+    checks: Vec<CheckRun>,
+}
+
+/// Record the holder's verify of the fork's head: the core refuses it unless `checks`
+/// is exactly the list `base` (the location's main now) declares.
+async fn verdict(
+    State(a): Shared,
+    Extension(c): Me,
+    Path(fork): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let name = parse(&fork, ForkName::new)?;
+    let req: Verdict = json_body(&body)?;
+    let id = parse(&req.changeset, ChangesetId::from_hex)?;
+    let base = parse(&req.base, GitOid::from_hex)?;
+    blocking(&a, move |a| {
+        writable_fork(a, &c, &name)?;
+        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let (offset, manifest) = a.guarded(&c.key.principal, || {
+            a.store.record_verify(&name, &writer, id, base, req.checks)
+        })?;
+        Ok(Json(json!({ "offset": offset, "manifest": manifest })))
     })
     .await
 }

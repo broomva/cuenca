@@ -118,4 +118,20 @@ mutate src/mcp.rs '                        error["status"] = json!(status);' '' 
 mutate src/mcp.rs '                .with_raw_output_schema(object(output))' '' --test mcp an_mcp_client
 mutate src/mcp.rs '                    ClientError::Offline { .. } => error["offline"] = json!(true),' '                    ClientError::Offline { .. } => {}' --test mcp an_unreachable
 
+
+# `cuenca verify` (BRO-3254): the list run is the base's, from the location's main, never
+# the candidate's; a checkout behind its fork verifies nothing; a check past its limit
+# is killed with everything it started; the exit says whether every check passed.
+mutate src/verbs.rs '    let (base, main) = client.location_tree(&f.location)?;' '    let (base, _) = client.location_tree(&f.location)?;
+    let (_, main) = client.fork_tree(&f.name)?;' --test cli rewrites
+mutate src/verbs.rs '    if f.head != ours {
+        bail!(
+            "the fork'"'"'s head is {}, not this checkout'"'"'s last snapshot {ours}; nothing was verified",' '    if false {
+        bail!(
+            "the fork'"'"'s head is {}, not this checkout'"'"'s last snapshot {ours}; nothing was verified",' --test cli verify_refuses
+mutate src/verbs.rs '        exit: i32::from(!all),' '        exit: 0,' --test cli rewrites
+mutate src/run.rs '    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);' '' --lib run::
+mutate src/run.rs '            Ok(None) if Instant::now() >= deadline => break None,' '' --lib run::
+mutate src/run.rs '            Some(0) => ended(CheckStatus::Passed, Some(0), output),' '            Some(_) => ended(CheckStatus::Passed, Some(0), output),' --lib run::
+
 exit $survived

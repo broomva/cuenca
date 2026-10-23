@@ -140,4 +140,14 @@ mutate src/http.rs '        a.guarded(&c.key.principal, || {
             batch.commit()?;' '        a.guarded(&cuenca_core::PrincipalName::new("unrevoked").unwrap(), || {
             batch.commit()?;' --test api a_write_in_flight
 
+
+# Verify records (BRO-3254): the holder's only, the request pinned, a moved base answered
+# with the main to rerun against.
+mutate src/http.rs '#[serde(deny_unknown_fields)]
+struct Verdict {' 'struct Verdict {' --test api a_verify_is_recorded
+mutate src/http.rs '                        "main": main.to_hex(),' '' --test api a_verify_is_recorded
+mutate src/http.rs '        let (offset, manifest) = a.guarded(&c.key.principal, || {
+            a.store.record_verify(&name, &writer, id, base, req.checks)' '        let (offset, manifest) = a.guarded(&c.key.principal, || {
+            a.store.record_verify(&name, &Writer::new(a.store.fork(&name)?.and_then(|f| f.holder().cloned()).unwrap(), req.epoch), id, base, req.checks)' --test api a_verify_is_recorded
+
 exit $survived

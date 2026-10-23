@@ -1294,3 +1294,45 @@ fn a_blob_batch_over_its_limits_is_refused() {
         .unwrap();
     assert_eq!(r.status(), 401);
 }
+
+/// A verify record: only the holder's, only the base's list (an empty base declares
+/// none), only against the main of the moment.
+#[test]
+fn a_verify_is_recorded_for_the_holder_against_the_bases_list() {
+    let c = Cast::new();
+    let s = &c.s;
+    s.whois.node(NA);
+    let f: Value = s.get(&c.a1, "/v1/forks/f1").json().unwrap();
+    let id = f["head_changeset"][0].as_str().unwrap().to_string();
+    let main: Value = s.get(&c.a1, "/v1/locations/l1/tree").json().unwrap();
+    let base = main["oid"].as_str().unwrap().to_string();
+    let body = |checks: Value, base: &str| json!({ "epoch": 1, "changeset": id, "base": base, "checks": checks });
+    let r = s.post(&c.a1, "/v1/forks/f1/verdicts", body(json!([]), &base));
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().unwrap();
+    assert_eq!(v["manifest"], Value::Null, "{v}");
+    assert!(v["offset"].is_u64());
+
+    let theirs = json!([{ "name": "gate", "argv": ["true"], "timeout_secs": 5,
+        "status": "passed", "exit_code": 0, "duration_ms": 1 }]);
+    let r = s.post(&c.a1, "/v1/forks/f1/verdicts", body(theirs, &base));
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.json::<Value>().unwrap()["error"], "manifest_mismatch");
+
+    let head = f["head"].as_str().unwrap();
+    let r = s.post(&c.a1, "/v1/forks/f1/verdicts", body(json!([]), head));
+    assert_eq!(r.status(), 409);
+    let r: Value = r.json().unwrap();
+    assert_eq!(r["error"], "base_moved");
+    assert_eq!(r["main"], base.as_str());
+
+    let mut extra = body(json!([]), &base);
+    extra["passed"] = json!(true);
+    assert_eq!(s.post(&c.a1, "/v1/forks/f1/verdicts", extra).status(), 400);
+
+    // A reader that does not hold the fork cannot record one.
+    s.whois.node(NB);
+    let r = s.post(&c.a2, "/v1/forks/f1/verdicts", body(json!([]), &base));
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.json::<Value>().unwrap()["error"], "not_holder");
+}

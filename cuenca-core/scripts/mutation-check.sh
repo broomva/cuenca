@@ -217,4 +217,37 @@ mutate src/store.rs 'let (Some(sha), Some(size)) = (bytes.get(..32), bytes.get(3
 # Commits are durable before they return: without it, a kill loses acknowledged drafts.
 mutate src/store.rs 'txn.set_durability(Durability::Immediate);' 'txn.set_durability(Durability::None);' --test crash
 
+
+# Verify records (BRO-3254): the checks run are the base's list, read by the store from
+# the location's main, exactly and in order; only the holder, on the head, against the
+# main of the moment; a run's status and exit code agree; the manifest parses strictly.
+# Not mutated alone: the base check in `record_verify` and the same check in the rules,
+# each of which catches what the other would let by (the rules hold it under a race; the
+# early check keeps a non-main tree, and the check names it holds, out of reach).
+mutate src/store.rs '        if reported != expected {' '        if false && reported != expected {' --test verify
+mutate src/store.rs '        let Some(entry) = tree.get(MANIFEST_PATH) else {' '        let Some(entry) = tree.get(MANIFEST_PATH).filter(|_| false) else {' --test verify
+mutate src/store.rs '            _ => return Err(ManifestError("is not a regular file".to_string()).into()),' '            other => other.oid(),' --test verify
+mutate src/store.rs '                sha256: info.sha256,' '                sha256: cuenca_tree::ContentHash::of(oid.as_bytes()),' --test verify
+mutate src/state.rs '            checks.iter().try_for_each(check_run)?;' '' --test verify
+mutate src/state.rs '        CheckStatus::Failed => run.exit_code != Some(0),' '        CheckStatus::Failed => true,' --test verify
+mutate src/state.rs '            if state.head != *candidate {' '            if false && state.head != *candidate {' --test verify
+mutate src/state.rs '            check_writer(view, &state, writer)?;
+            if state.head_changeset.map(|(head, _)| head) != Some(*id) {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {' '            if state.head_changeset.map(|(head, _)| head) != Some(*id) {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {' --test verify
+mutate src/checks.rs '            if !names.insert(c.name.as_str()) {' '            if !names.insert(c.name.as_str()) && false {' --lib checks
+mutate src/checks.rs '            if c.timeout_secs == 0 || c.timeout_secs > MAX_TIMEOUT_SECS {' '            if c.timeout_secs > MAX_TIMEOUT_SECS {' --lib checks
+mutate src/checks.rs '#[serde(deny_unknown_fields)]
+pub struct Check {' 'pub struct Check {' --lib checks
+
 exit $survived

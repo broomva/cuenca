@@ -87,8 +87,8 @@ enum Verb {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Run the location's checks, read from the base tree, on the checkout's head
-    /// (BRO-3254; not built yet, exits 2).
+    /// Run the checks the location's main declares (`.cuenca/checks.toml`, never the
+    /// candidate's) on the fork's head, and record the result; exits 1 if any failed.
     Verify {
         #[arg(long, default_value = ".")]
         dir: PathBuf,

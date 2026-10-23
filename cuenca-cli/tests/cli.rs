@@ -113,9 +113,12 @@ fn every_agent_verb_works_on_a_plain_directory() {
     let v = a1.ok(&["diff", "location:site", "f1"]);
     assert_eq!(v["changes"].as_array().unwrap().len(), 3, "{v}");
 
-    let (code, v) = a1.run(&[&["verify"][..], &dir].concat());
-    assert_eq!(code, 2, "{v}");
-    assert_eq!(v["status"], "unavailable");
+    // The site declares no checks: verify passes with zero, and is recorded.
+    let v = a1.ok(&[&["verify"][..], &dir].concat());
+    assert_eq!(v["passed"], true, "{v}");
+    assert_eq!(v["checks"].as_array().unwrap().len(), 0, "{v}");
+    assert_eq!(v["manifest"], Value::Null);
+    assert_eq!(v["candidate"], target.as_str());
 
     let v = a1.ok(&[&["land"][..], &dir].concat());
     assert_eq!(v["status"], "requested", "{v}");
@@ -899,4 +902,202 @@ fn a_git_location_with_ignored_paths_is_reported_not_broken() {
         ]
     );
     assert!(co.join("node_modules/dep.js").exists(), "left on disk");
+}
+
+/// A location whose main declares checks: `gate`, which fails, and `ok`, which passes.
+const GATED: &str = "[[check]]\nname = \"gate\"\nargv = [\"sh\", \"-c\", \"exit 3\"]\ntimeout_secs = 60\n\n[[check]]\nname = \"ok\"\nargv = [\"true\"]\n";
+
+fn gated_site(a: &Authority, name: &str, manifest: &str) -> tempfile::TempDir {
+    let site = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(site.path().join(".cuenca")).unwrap();
+    std::fs::write(site.path().join(".cuenca/checks.toml"), manifest).unwrap();
+    std::fs::write(site.path().join("README"), "gated\n").unwrap();
+    a.admin(&["location", "add", name, "--dir", s(site.path())]);
+    site
+}
+
+/// Spec rev 2.2 row "a candidate that edits its own .cuenca/checks.toml to pass while
+/// breaking the base tree's check": verify runs the base's list, 10 of 10 variants, and
+/// the record names the base manifest's hash.
+#[test]
+fn a_candidate_that_rewrites_its_checks_is_judged_by_the_bases_10_of_10() {
+    let a = Authority::start();
+    let _site = gated_site(&a, "gated", GATED);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "gated"]));
+    let base_manifest = cuenca_tree::GitOid::for_blob(GATED.as_bytes()).to_hex();
+    let passing = "[[check]]\nname = \"gate\"\nargv = [\"true\"]\n\n[[check]]\nname = \"ok\"\nargv = [\"true\"]\n";
+    type Edit = fn(&Path, &str);
+    let variants: [(&str, Edit); 10] = [
+        ("gate made `true`", |co, p| {
+            write(co, ".cuenca/checks.toml", p)
+        }),
+        ("manifest deleted", |co, _| {
+            std::fs::remove_file(co.join(".cuenca/checks.toml")).unwrap()
+        }),
+        ("manifest emptied", |co, _| {
+            write(co, ".cuenca/checks.toml", "")
+        }),
+        ("manifest made unparseable", |co, _| {
+            write(co, ".cuenca/checks.toml", "[[check]\n")
+        }),
+        ("gate renamed", |co, _| {
+            write(
+                co,
+                ".cuenca/checks.toml",
+                "[[check]]\nname = \"gate-old\"\nargv = [\"true\"]\n",
+            )
+        }),
+        ("only ok kept", |co, _| {
+            write(
+                co,
+                ".cuenca/checks.toml",
+                "[[check]]\nname = \"ok\"\nargv = [\"true\"]\n",
+            )
+        }),
+        ("manifest made a symlink to a passing one", |co, p| {
+            write(co, "passing.toml", p);
+            std::fs::remove_file(co.join(".cuenca/checks.toml")).unwrap();
+            std::os::unix::fs::symlink("../passing.toml", co.join(".cuenca/checks.toml")).unwrap();
+        }),
+        ("gate made `exit 0`", |co, _| {
+            write(
+                co,
+                ".cuenca/checks.toml",
+                &GATED.replace("exit 3", "exit 0"),
+            )
+        }),
+        ("manifest moved to the root", |co, p| {
+            std::fs::remove_dir_all(co.join(".cuenca")).unwrap();
+            write(co, "checks.toml", p);
+        }),
+        ("a passing gate declared first", |co, _| {
+            write(
+                co,
+                ".cuenca/checks.toml",
+                &format!("[[check]]\nname = \"gate\"\nargv = [\"true\"]\n\n{GATED}"),
+            )
+        }),
+    ];
+    let work = tempfile::tempdir().unwrap();
+    for (i, (what, edit)) in variants.iter().enumerate() {
+        let fork = format!("v{i}");
+        a1.ok(&["fork", "gated", "--name", &fork]);
+        let co = work.path().join(&fork);
+        a1.ok(&["checkout", &fork, s(&co)]);
+        edit(&co, passing);
+        let dir = ["--dir", s(&co)];
+        let v = a1.ok(&[&["snapshot"][..], &dir].concat());
+        assert_eq!(
+            v["flush"]["published"].as_array().unwrap().len(),
+            1,
+            "{what}: {v}"
+        );
+
+        let (code, v) = a1.run(&[&["verify"][..], &dir].concat());
+        assert_eq!(code, 1, "{what}: {v}");
+        assert_eq!(v["passed"], false, "{what}: {v}");
+        assert_eq!(v["manifest"]["oid"], base_manifest.as_str(), "{what}: {v}");
+        let ran: Vec<(&str, &str, Value)> = v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().unwrap(),
+                    c["status"].as_str().unwrap(),
+                    c["exit_code"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ran,
+            [
+                ("gate", "failed", Value::from(3)),
+                ("ok", "passed", Value::from(0))
+            ],
+            "{what}: {v}"
+        );
+        assert_eq!(v["candidate"], a1.head(&fork).as_str(), "{what}");
+        let records = a1.records(&fork);
+        assert_eq!(
+            records.last().unwrap(),
+            "verify_recorded",
+            "{what}: {records:?}"
+        );
+    }
+}
+
+fn write(root: &Path, path: &str, content: &str) {
+    std::fs::write(root.join(path), content).unwrap();
+}
+
+/// A base whose checks pass: verify exits 0, says so in its text, and a check that runs
+/// past its limit fails as `timed_out`.
+#[test]
+fn verify_passes_when_the_bases_checks_pass_and_times_a_check_out() {
+    let a = Authority::start();
+    let _ok = gated_site(
+        &a,
+        "fine",
+        "[[check]]\nname = \"ok\"\nargv = [\"sh\", \"-c\", \"test -f README\"]\n",
+    );
+    let _slow = gated_site(
+        &a,
+        "slow",
+        "[[check]]\nname = \"slow\"\nargv = [\"sleep\", \"30\"]\ntimeout_secs = 1\n",
+    );
+    let a1 = Agent::login(
+        &a,
+        &a.mint("a1", &["--location", "fine", "--location", "slow"]),
+    );
+    let work = tempfile::tempdir().unwrap();
+    for (location, fork) in [("fine", "f"), ("slow", "s")] {
+        a1.ok(&["fork", location, "--name", fork]);
+        a1.ok(&["checkout", fork, s(&work.path().join(fork))]);
+        write(&work.path().join(fork), "new.txt", "x\n");
+        a1.ok(&["snapshot", "--dir", s(&work.path().join(fork))]);
+    }
+    let dir = work.path().join("f");
+    let v = a1.ok(&["verify", "--dir", s(&dir)]);
+    assert_eq!(v["passed"], true, "{v}");
+    assert_eq!(v["checks"][0]["status"], "passed", "{v}");
+    let out = a1.cmd(&["verify", "--dir", s(&dir)]).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("1 of 1 check(s) passed"));
+
+    let started = Instant::now();
+    let (code, v) = a1.run(&["verify", "--dir", s(&work.path().join("s"))]);
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["checks"][0]["status"], "timed_out", "{v}");
+    assert!(started.elapsed() < Duration::from_secs(20));
+}
+
+/// Verify judges the fork's head as the checkout last snapshotted it; a checkout whose
+/// fork moved on without it verifies nothing.
+#[test]
+fn verify_refuses_a_checkout_behind_its_fork_and_a_fork_with_no_draft() {
+    let a = Authority::start();
+    let _site = gated_site(&a, "gated", GATED);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "gated"]));
+    a1.ok(&["fork", "gated", "--name", "f"]);
+    let work = tempfile::tempdir().unwrap();
+    let (one, two) = (work.path().join("one"), work.path().join("two"));
+    a1.ok(&["checkout", "f", s(&one)]);
+    let (code, v) = a1.run(&["verify", "--dir", s(&one)]);
+    assert_eq!(code, 1, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("no draft"), "{v}");
+
+    a1.ok(&["checkout", "f", s(&two)]);
+    write(&two, "x", "x\n");
+    a1.ok(&["snapshot", "--dir", s(&two)]);
+    let (code, v) = a1.run(&["verify", "--dir", s(&one)]);
+    assert_eq!(code, 1, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("nothing was verified"),
+        "{v}"
+    );
+    assert_eq!(a1.records("f").last().unwrap(), "draft_published");
 }
