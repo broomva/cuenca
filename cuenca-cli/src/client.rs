@@ -5,7 +5,7 @@
 
 use std::collections::VecDeque;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use cuenca_core::{ChangesetId, Fork, ForkName, Location, LocationName, Record};
@@ -227,10 +227,15 @@ impl Client {
         self.upload_retried(&format!("a batch of {} blobs", blobs.len()), || {
             let mut parts: Vec<Box<dyn Read + Send>> = Vec::with_capacity(blobs.len() * 2);
             for &(oid, path, size) in blobs {
-                let file = std::fs::File::open(path)
+                // A missing file is an error here, not a cut-off body; this opens nothing.
+                std::fs::metadata(path)
                     .map_err(|e| ClientError::Other(format!("{}: {e}", path.display())))?;
                 parts.push(Box::new(std::io::Cursor::new(batch_header(oid, size))));
-                parts.push(Box::new(file.take(size)));
+                parts.push(Box::new(Lazy {
+                    path: path.to_path_buf(),
+                    size,
+                    file: None,
+                }));
             }
             let body = Concat(parts.into());
             let url = format!("{}/v1/blobs", self.url);
@@ -248,8 +253,10 @@ impl Client {
     /// the refusal is the answer. If that is answered too, the upload is tried once more,
     /// and a second cut-off is reported as an error, not as offline.
     fn upload_retried(&self, what: &str, once: impl Fn() -> Result<()>) -> Result<()> {
-        let Err(ClientError::Offline { url, reason }) = once() else {
-            return Ok(());
+        let (url, reason) = match once() {
+            Ok(()) => return Ok(()),
+            Err(ClientError::Offline { url, reason }) => (url, reason),
+            Err(e) => return Err(e),
         };
         match self.whoami() {
             Ok(_) => once().map_err(|e| match e {
@@ -289,7 +296,34 @@ pub fn batch_len(sizes: impl Iterator<Item = u64>) -> u64 {
     sizes.map(|s| s + BATCH_HEADER_BYTES as u64).sum()
 }
 
-/// Readers read one after another.
+/// The first `size` bytes of the file at `path`, opened on the first read and closed
+/// at its end, so a batch body holds one open file at a time, not one per blob.
+struct Lazy {
+    path: PathBuf,
+    size: u64,
+    file: Option<std::io::Take<std::fs::File>>,
+}
+
+impl Read for Lazy {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let file = match &mut self.file {
+            Some(f) => f,
+            None => {
+                let f = std::fs::File::open(&self.path).map_err(|e| {
+                    std::io::Error::new(e.kind(), format!("{}: {e}", self.path.display()))
+                })?;
+                self.file.insert(f.take(self.size))
+            }
+        };
+        let n = file.read(buf)?;
+        if n == 0 && !buf.is_empty() {
+            self.file = None;
+        }
+        Ok(n)
+    }
+}
+
+/// Readers read one after another, each dropped once it has ended.
 struct Concat(VecDeque<Box<dyn Read + Send>>);
 
 impl Read for Concat {

@@ -24,15 +24,36 @@ fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_cuenca")
 }
 
+/// `cuenca`, run with its soft open-file limit at `fd_limit` if one is given.
+fn cuenca(fd_limit: Option<u32>) -> Command {
+    match fd_limit {
+        None => Command::new(bin()),
+        Some(n) => {
+            let mut c = Command::new("/bin/sh");
+            c.args([
+                "-c",
+                &format!("ulimit -Sn {n} && exec \"$0\" \"$@\""),
+                bin(),
+            ]);
+            c
+        }
+    }
+}
+
 /// A `cuenca serve` on a port of its own, restartable on the same state and port.
 struct Authority {
     dir: tempfile::TempDir,
     port: u16,
     child: Option<Child>,
+    fd_limit: Option<u32>,
 }
 
 impl Authority {
     fn start() -> Self {
+        Self::start_with(None)
+    }
+
+    fn start_with(fd_limit: Option<u32>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let script = dir.path().join("tailscale");
@@ -48,6 +69,7 @@ impl Authority {
             dir,
             port: 0,
             child: None,
+            fd_limit,
         };
         // A port found free can be taken by a parallel test before the server binds it:
         // then the server exits, and another port is tried.
@@ -85,7 +107,7 @@ impl Authority {
             .append(true)
             .open(self.dir.path().join("serve.log"))
             .unwrap();
-        let mut child = Command::new(bin())
+        let mut child = cuenca(self.fd_limit)
             .args(["serve", "--unsafe-bind", "--bind"])
             .arg(format!("127.0.0.1:{}", self.port))
             .arg("--state")
@@ -154,12 +176,14 @@ impl Drop for Authority {
 /// One principal's `cuenca`, with its own HOME, config and state.
 struct Agent {
     home: tempfile::TempDir,
+    fd_limit: Option<u32>,
 }
 
 impl Agent {
     fn login(a: &Authority, token: &str) -> Self {
         let me = Self {
             home: tempfile::tempdir().unwrap(),
+            fd_limit: None,
         };
         let mut child = me
             .cmd(&["login", "--url", &a.url(), "--token-stdin"])
@@ -186,7 +210,7 @@ impl Agent {
     }
 
     fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(bin());
+        let mut c = cuenca(self.fd_limit);
         c.args(args)
             .env("HOME", self.home.path())
             .env("CUENCA_CONFIG", self.home.path().join("config.json"))
@@ -714,9 +738,12 @@ fn owner_acts_have_no_agent_verb() {
 /// batches, each one full sync and one log commit on the authority (BRO-3416).
 #[test]
 fn a_thousand_file_snapshot_publishes_within_5_s() {
-    let a = Authority::start();
+    // Both sides under a soft open-file limit below the stock macOS one (256): an
+    // upload batch must not hold a descriptor per blob, on either side.
+    let a = Authority::start_with(Some(FD_LIMIT));
     let _site = site(&a);
-    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    let mut a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.fd_limit = Some(FD_LIMIT);
     a1.ok(&["fork", "site", "--name", "f1"]);
     let work = tempfile::tempdir().unwrap();
     let co = work.path().join("f1");
@@ -734,6 +761,63 @@ fn a_thousand_file_snapshot_publishes_within_5_s() {
     assert_eq!(v["flush"]["published"].as_array().unwrap().len(), 1, "{v}");
     eprintln!("R07: 1,000-file snapshot published in {took:?}");
     assert!(took < Duration::from_secs(5), "took {took:?}");
+}
+
+/// The soft open-file limit the R07 test runs under, below a batch's 256 blobs.
+const FD_LIMIT: u32 = 128;
+
+/// An upload batch the authority refuses reports the authority's refusal, not success:
+/// a blob in the outbox that is not its oid is refused as `bad_blob`, and nothing of the
+/// batch publishes.
+#[test]
+fn a_refused_upload_batch_reports_its_refusal() {
+    let mut a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    let head = a1.head("f1");
+
+    a.down();
+    for i in 0..3 {
+        std::fs::write(co.join(format!("new-{i}.txt")), format!("new {i}\n")).unwrap();
+    }
+    let (code, v) = a1.run(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["flush"]["offline"], true, "{v}");
+    // Every queued object, rewritten with other bytes of the same length.
+    let mut corrupted = 0;
+    let mut dirs = vec![a1.checkout_state().join("objects")];
+    while let Some(dir) = dirs.pop() {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let path = e.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                let len = std::fs::metadata(&path).unwrap().len() as usize;
+                let mut perm = std::fs::metadata(&path).unwrap().permissions();
+                perm.set_mode(0o600);
+                std::fs::set_permissions(&path, perm).unwrap();
+                std::fs::write(&path, vec![b'x'; len]).unwrap();
+                corrupted += 1;
+            }
+        }
+    }
+    assert!(corrupted >= 3, "{corrupted}");
+
+    a.up();
+    let (code, v) = a1.run(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(code, 1, "{v}");
+    let error = v["flush"]["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"));
+    assert!(error.contains("bad_blob"), "{v}");
+    assert!(!error.contains("missing_blob"), "{v}");
+    assert_eq!(v["flush"]["offline"], false, "{v}");
+    assert_eq!(v["flush"]["pending"], 1, "{v}");
+    assert_eq!(a1.head("f1"), head);
 }
 
 /// A blob too large for an upload batch goes up alone, among small ones that are

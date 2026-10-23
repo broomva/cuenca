@@ -17,9 +17,11 @@ pub const MAX_BLOB_BYTES: u64 = cuenca_tree::git::DEFAULT_MAX_BLOB_BYTES;
 const CHUNK: usize = 64 * 1024;
 
 /// A blob whose bytes were verified and written to a temporary file, not yet in place.
+/// The file is closed once staged, so a batch of any size holds no descriptor per blob;
+/// dropping a `Staged` removes the file.
 pub(crate) struct Staged {
     pub(crate) blob: Blob,
-    tmp: tempfile::NamedTempFile,
+    tmp: tempfile::TempPath,
 }
 
 /// Hand a file's writes to the disk (`fsync`), without the drive-cache flush that
@@ -92,7 +94,10 @@ impl BlobFiles {
             });
         }
         fsync(tmp.as_file())?;
-        Ok(Staged { blob, tmp })
+        Ok(Staged {
+            blob,
+            tmp: tmp.into_temp_path(),
+        })
     }
 
     /// Move staged blobs into place and make them durable: a plain `fsync` of each

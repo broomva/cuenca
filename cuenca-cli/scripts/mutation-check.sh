@@ -99,4 +99,10 @@ mutate src/client.rs '                0 if !buf.is_empty() => {
                     self.0.pop_front();
                 }' '                0 if !buf.is_empty() => return Ok(0),' --test cli a_thousand
 
+# P20 r1 (C): a batch body opens one file at a time, so a snapshot of more files than
+# the open-file limit publishes; an upload refused for any reason but a lost connection
+# reports that refusal.
+mutate src/client.rs '                    file: None,' '                    file: Some(std::fs::File::open(path).map_err(|e| ClientError::Other(e.to_string()))?.take(size)),' --test cli a_thousand
+mutate src/client.rs '            Err(e) => return Err(e),' '            Err(_) => return Ok(()),' --test cli a_refused_upload_batch
+
 exit $survived

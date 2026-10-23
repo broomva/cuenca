@@ -68,6 +68,10 @@ mutate src/store.rs '        self.store.blobs.place(self.staged)?;
         self.store.blobs.place(self.staged)?;' --test batch_crash
 
 mutate src/blobs.rs 'if blob.oid() != claimed {' 'if false {' --test store
+# P20 r1 (C): a staged blob holds no open file, so a batch larger than the open-file
+# limit is stored (the mutant keeps one descriptor per staged blob).
+mutate src/blobs.rs '        fsync(tmp.as_file())?;' '        fsync(tmp.as_file())?;
+        std::mem::forget(tmp.reopen()?);' --test batch_fds
 mutate src/blobs.rs 'content.take(size + 1)' 'content.take(size)' --test store
 mutate src/blobs.rs 'if size > MAX_BLOB_BYTES {' 'if false {' --test store
 mutate src/blobs.rs 'Some(blob) if blob.oid() == oid => Ok(bytes),' 'Some(_) => Ok(bytes),' --test store
