@@ -280,14 +280,9 @@ fn result(done: anyhow::Result<Report>) -> CallToolResult {
             let message = format!("{e:#}");
             let mut error = json!({ "message": message });
             if let Some(c) = e.chain().find_map(|c| c.downcast_ref::<ClientError>()) {
-                match c {
-                    ClientError::Api { status, code, .. } => {
-                        error["code"] = json!(code);
-                        error["status"] = json!(status);
-                    }
-                    ClientError::Offline { .. } => error["offline"] = json!(true),
-                    ClientError::Other(_) => {}
-                }
+                let mut shaped = verbs::client_error(c);
+                shaped["message"] = json!(message);
+                error = shaped;
             }
             let mut r = CallToolResult::structured_error(json!({ "error": error }));
             r.content = vec![ContentBlock::text(message)];
@@ -505,7 +500,7 @@ pub fn tools() -> Vec<Tool> {
         ),
         (
             "verify",
-            "Run the checks the location's main declares in .cuenca/checks.toml (never the candidate's own) on the fork's head, in a temporary checkout, and record how they ended. Publishes anything queued first; the head must be the checkout's last snapshot. Advisory: the record blocks nothing. isError when a check failed.",
+            "Run the checks the location's main declares in .cuenca/checks.toml (never the candidate's own) on the fork's head, in a temporary checkout, and record how they ended. Publishes anything queued first; the head must be the checkout's last snapshot. Advisory: the record blocks nothing. isError when a check failed, or when the authority did not take the record (recorded false, offset null, record_error says why; the check results are still reported).",
             input(
                 json!({ "dir": dir("a directory inside the checkout") }),
                 &["dir"],
@@ -527,7 +522,9 @@ pub fn tools() -> Vec<Tool> {
                             "required": ["name", "argv", "status", "exit_code", "duration_ms"],
                         },
                     },
-                    "passed": b, "offset": n,
+                    "passed": b, "recorded": b,
+                    "offset": { "type": ["integer", "null"] },
+                    "record_error": { "type": ["object", "null"] },
                 }),
                 &[
                     "fork",
@@ -537,7 +534,9 @@ pub fn tools() -> Vec<Tool> {
                     "manifest",
                     "checks",
                     "passed",
+                    "recorded",
                     "offset",
+                    "record_error",
                 ],
             ),
             write.clone(),

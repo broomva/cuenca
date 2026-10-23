@@ -9,19 +9,20 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
-use cuenca_core::checks::{CheckRun, CheckStatus, MANIFEST_PATH, Manifest};
+use cuenca_core::checks::{CheckRun, CheckStatus, MANIFEST_PATH, Manifest, ManifestId};
 use cuenca_core::{Event, ForkName, LocationName};
 use cuenca_fs::{BlobSource, Fetched, SnapshotOptions};
-use cuenca_tree::{Changeset, Entry, GitOid, Op, Tree};
+use cuenca_tree::{Changeset, ContentHash, Entry, GitOid, Op, Tree};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::client::Client;
+use crate::client::{Client, ClientError};
 use crate::local::{Flush, Local, State};
 use crate::run;
 
 /// What a verb did: `json` for agents, `text` for people. `exit` is the process's exit
-/// status: 0 done, 1 refused or failed, 2 unavailable (the verb is not built yet).
+/// status: 0 done, 1 refused or failed, 2 unavailable (the verb is not built yet),
+/// 3 verify ran its checks but the authority did not record them.
 #[derive(Debug, Clone)]
 pub struct Report {
     pub json: Value,
@@ -779,18 +780,23 @@ pub fn verify(client: &Client, dir: &Path) -> anyhow::Result<Report> {
     };
 
     let (base, main) = client.location_tree(&f.location)?;
-    let manifest = match main.get(MANIFEST_PATH) {
-        None => Manifest::default(),
-        Some(Entry::File(oid) | Entry::Executable(oid)) => {
-            let bytes = client
+    let manifest_bytes = match main.get(MANIFEST_PATH) {
+        None => None,
+        Some(Entry::File(oid) | Entry::Executable(oid)) => Some(
+            client
                 .location_blob(&f.location, *oid)?
-                .with_context(|| format!("the main of {} moved while it was read", f.location))?;
-            Manifest::parse(&bytes).with_context(|| format!("the base {base} of {}", f.location))?
-        }
+                .with_context(|| format!("the main of {} moved while it was read", f.location))?,
+        ),
         Some(_) => bail!(
             "{MANIFEST_PATH} in the base {base} of {} is not a regular file",
             f.location
         ),
+    };
+    let manifest = match &manifest_bytes {
+        None => Manifest::default(),
+        Some(bytes) => {
+            Manifest::parse(bytes).with_context(|| format!("the base {base} of {}", f.location))?
+        }
     };
 
     // The candidate as the authority has it, in a directory of this verify's own.
@@ -815,14 +821,26 @@ pub fn verify(client: &Client, dir: &Path) -> anyhow::Result<Report> {
     drop(scratch);
 
     let runs: Vec<CheckRun> = ran.iter().map(|r| r.run.clone()).collect();
-    let (offset, manifest_id) = client
-        .verdict(&f.name, local.state.epoch, id, base, &runs)
-        .with_context(|| format!("recording the verify of {id}"))?;
+    // A refused or failed record (the head moved, a takeover, a revoked key, the
+    // authority gone) must not cost the caller the run: the results are still reported,
+    // marked unrecorded, with exit 3.
+    let recorded = client.verdict(&f.name, local.state.epoch, id, base, &runs);
     let passed = runs
         .iter()
         .filter(|r| r.status == CheckStatus::Passed)
         .count();
     let all = passed == runs.len();
+    let (offset, manifest_id, record_error) = match &recorded {
+        Ok((offset, m)) => (Some(*offset), *m, None),
+        Err(e) => (
+            None,
+            manifest_bytes.as_deref().map(|b| ManifestId {
+                oid: GitOid::for_blob(b),
+                sha256: ContentHash::of(b),
+            }),
+            Some(e),
+        ),
+    };
 
     let mut text = format!(
         "verify of {id} on {}: {passed} of {} check(s) passed, judged by {}
@@ -863,9 +881,15 @@ pub fn verify(client: &Client, dir: &Path) -> anyhow::Result<Report> {
         v["output"] = json!(r.output);
         checks.push(v);
     }
-    text.push_str(&format!(
-        "recorded at log offset {offset}; advisory, it blocks nothing\n"
-    ));
+    match (offset, record_error) {
+        (Some(offset), _) => text.push_str(&format!(
+            "recorded at log offset {offset}; advisory, it blocks nothing\n"
+        )),
+        (None, Some(e)) => text.push_str(&format!(
+            "NOT recorded: the authority did not take the record of {id}: {e}\n"
+        )),
+        (None, None) => unreachable!("a verify is either recorded or has a record error"),
+    }
     Ok(Report {
         json: json!({
             "fork": f.name,
@@ -875,11 +899,30 @@ pub fn verify(client: &Client, dir: &Path) -> anyhow::Result<Report> {
             "manifest": manifest_id,
             "checks": checks,
             "passed": all,
+            "recorded": offset.is_some(),
             "offset": offset,
+            "record_error": record_error.map(client_error),
         }),
         text,
-        exit: i32::from(!all),
+        exit: match (offset, all) {
+            (None, _) => 3,
+            (Some(_), all) => i32::from(!all),
+        },
     })
+}
+
+/// A client error as structured JSON, the shape MCP tools report errors in.
+pub(crate) fn client_error(e: &ClientError) -> Value {
+    let mut v = json!({ "message": e.to_string() });
+    match e {
+        ClientError::Api { status, code, .. } => {
+            v["code"] = json!(code);
+            v["status"] = json!(status);
+        }
+        ClientError::Offline { .. } => v["offline"] = json!(true),
+        ClientError::Other(_) => {}
+    }
+    v
 }
 
 /// `cuenca land`: ask to land the checkout's fork at its head. Everything queued must be

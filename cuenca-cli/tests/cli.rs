@@ -1072,6 +1072,67 @@ fn verify_passes_when_the_bases_checks_pass_and_times_a_check_out() {
     assert!(started.elapsed() < Duration::from_secs(20));
 }
 
+/// A record the authority refuses does not cost the run: when the fork's head moves while
+/// the checks run, verify still reports every check, marked unrecorded, and exits 3.
+#[test]
+fn a_refused_record_still_reports_the_checks_it_ran() {
+    let a = Authority::start();
+    let sync = tempfile::tempdir().unwrap();
+    let (started, go) = (sync.path().join("started"), sync.path().join("go"));
+    let manifest = format!(
+        "[[check]]\nname = \"gate\"\nargv = [\"sh\", \"-c\", \"touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; echo gate-output; exit 3\"]\ntimeout_secs = 60\n",
+        started.display(),
+        go.display()
+    );
+    let _site = gated_site(&a, "gated", &manifest);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "gated"]));
+    a1.ok(&["fork", "gated", "--name", "f"]);
+    let work = tempfile::tempdir().unwrap();
+    let (one, two) = (work.path().join("one"), work.path().join("two"));
+    a1.ok(&["checkout", "f", s(&one)]);
+    write(&one, "a", "a\n");
+    a1.ok(&["snapshot", "--dir", s(&one)]);
+    a1.ok(&["checkout", "f", s(&two)]);
+
+    let verify = a1
+        .cmd(&["--json", "verify", "--dir", s(&one)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "the check never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    write(&two, "b", "b\n");
+    a1.ok(&["snapshot", "--dir", s(&two)]);
+    std::fs::write(&go, "").unwrap();
+
+    let out = verify.wait_with_output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert_eq!(v["recorded"], false, "{v}");
+    assert_eq!(v["offset"], Value::Null, "{v}");
+    assert_eq!(v["record_error"]["code"], "not_head", "{v}");
+    assert_eq!(v["checks"][0]["status"], "failed", "{v}");
+    assert_eq!(v["checks"][0]["exit_code"], 3, "{v}");
+    assert!(
+        v["checks"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("gate-output"),
+        "{v}"
+    );
+    assert_eq!(
+        v["manifest"]["oid"],
+        cuenca_tree::GitOid::for_blob(manifest.as_bytes()).to_hex(),
+        "{v}"
+    );
+    assert!(!a1.records("f").iter().any(|e| e == "verify_recorded"));
+}
+
 /// Verify judges the fork's head as the checkout last snapshotted it; a checkout whose
 /// fork moved on without it verifies nothing.
 #[test]

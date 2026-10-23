@@ -88,7 +88,8 @@ enum Verb {
         dir: PathBuf,
     },
     /// Run the checks the location's main declares (`.cuenca/checks.toml`, never the
-    /// candidate's) on the fork's head, and record the result; exits 1 if any failed.
+    /// candidate's) on the fork's head, and record the result; exits 1 if any failed, 3 if
+    /// the authority did not take the record (the results are still printed).
     Verify {
         #[arg(long, default_value = ".")]
         dir: PathBuf,

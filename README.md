@@ -43,6 +43,8 @@ timeout_secs = 900
 
 `cuenca verify` runs this list on the fork's head, in a temporary checkout. The list always comes from the location's main, never from the fork: a fork that edits its own `.cuenca/checks.toml` is still judged by main's. The authority records the result beside the head changeset, with the hash of the manifest it was judged by, and refuses any record whose checks are not exactly main's list. If main has no manifest, verify passes with zero checks.
 
+`cuenca verify` exits 0 if every check passed and the record was taken, and 1 if a check failed. It exits 3 if the authority did not take the record: the fork moved during the run, it was taken over, the key was revoked, or the authority could not be reached. The check results are still printed. In `--json` and MCP output they come with `recorded: false`, `offset: null` and a `record_error`. Re-run verify on the new head to record it.
+
 Verify is advisory for now. The results are the caller's own, and a check reads the fork's files, so a fork that rewrites a script a check calls can make that check pass. The record blocks nothing. GitHub's required checks are the gate at landing.
 
 More crates land as the plan's nodes do. Install, operate and recover sections arrive with the close-out node (BRO-3260).
