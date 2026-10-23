@@ -179,9 +179,11 @@ fn a_draft_lands_as_one_pull_request_whose_tree_is_the_drafts() {
     let body = up.body(&export.branch);
     assert!(body.contains(&id.to_hex()), "{body}");
     assert!(body.contains("declares no checks"), "{body}");
-    // The commit names the changeset and who asked.
+    // The commit names the changeset, and nothing of the request: who asked is in
+    // the PR body.
     let message = up.git(&["log", "-1", "--format=%an%n%B", &export.branch]);
-    assert!(message.starts_with("a1\n"), "{message}");
+    assert!(message.starts_with("Cuenca\n"), "{message}");
+    assert!(body.contains("`a1@"), "{body}");
     assert!(
         message.contains(&format!("Cuenca-Changeset: {id}")),
         "{message}"
@@ -258,8 +260,8 @@ fn a_branch_that_is_someone_elses_fails_the_landing() {
     let tmp = tempfile::tempdir().unwrap();
     let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
     let (_a1, id) = requested(&s, &up, Some(&up.url));
-    // Someone pushed cp/<id> first: a commit onto main (so its parent's tree is the
-    // base), but not the draft's tree.
+    // Someone pushed cp/<id> first: a commit onto main (so its parent's tree is
+    // main's), but not the draft's tree.
     std::fs::write(up.work.join("README"), "someone else\n").unwrap();
     git(&up.work, &["commit", "-q", "-am", "theirs"]);
     git(
@@ -407,6 +409,15 @@ fn a_changeset_landed_again_reuses_its_export_and_pull_request() {
     });
     assert_eq!(v["ok"], true, "{v}");
     s.whois.node(NB);
+    // The authority's copy of the export is lost too: the export it builds again
+    // must be the one on the remote.
+    drop(_lander);
+    std::fs::remove_dir_all(tmp.path().join("repos")).unwrap();
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
     verify_and_ask_at(&s, &a2, "f1", 2, id);
     let step = wait_for(s.authority.store(), &f1(), |st| {
         in_review(st) || matches!(st, LandingStep::Failed { .. })
@@ -544,6 +555,53 @@ fn a_fork_with_several_drafts_lands_its_head() {
     // The first draft's file is there, from the authority's blobs.
     assert_eq!(up.git(&["show", &format!("{branch}:new/file.txt")]), "new");
     assert_eq!(up.git(&["show", &format!("{branch}:more/1.txt")]), "1");
+}
+
+/// A branch with the draft's tree onto a parent that is not main is not an export of
+/// this landing either.
+#[test]
+fn a_branch_with_the_drafts_tree_onto_another_parent_fails_the_landing() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (_a1, id) = requested(&s, &up, Some(&up.url));
+    // main → "other" (adds z) → the draft's tree exactly (z gone, the draft's files).
+    std::fs::write(up.work.join("z"), "z").unwrap();
+    git(&up.work, &["add", "-A"]);
+    git(&up.work, &["commit", "-q", "-m", "other"]);
+    std::fs::remove_file(up.work.join("z")).unwrap();
+    std::fs::write(up.work.join("README"), "landed\n").unwrap();
+    std::fs::create_dir_all(up.work.join("new")).unwrap();
+    std::fs::write(up.work.join("new/file.txt"), "new\n").unwrap();
+    git(&up.work, &["add", "-A"]);
+    git(&up.work, &["commit", "-q", "-m", "the draft's tree"]);
+    let target = s.authority.store().changeset(id).unwrap().unwrap().target;
+    assert_eq!(
+        git(&up.work, &["rev-parse", "HEAD^{tree}"]),
+        target.to_hex()
+    );
+    git(
+        &up.work,
+        &[
+            "push",
+            "-q",
+            up.remote.to_str().unwrap(),
+            &format!("HEAD:refs/heads/cp/{id}"),
+        ],
+    );
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
+    let step = wait_for(s.authority.store(), &f1(), |st| {
+        matches!(st, LandingStep::Failed { .. })
+    });
+    let LandingStep::Failed { reason } = step else {
+        unreachable!()
+    };
+    assert!(reason.contains("not an export"), "{reason}");
+    assert!(up.creates().is_empty());
 }
 
 /// A pull request from the export's branch at another commit is not this landing's.
@@ -712,6 +770,75 @@ fn a_kill_at_each_landing_step_is_finished_on_restart() {
         assert_landed_once(&up, authority.store(), id);
         eprintln!("killed at {at}: finished on restart, one commit, one branch, one PR");
     }
+}
+
+/// Two landings of one changeset, one killed mid-export: fork f1's lander dies after
+/// its export intent, before the push; then fork e2 (the same edit, and first in the
+/// lander's order) is asked to land it, and its export is pushed first. f1's own export
+/// must be that same commit, so both reach review on the one pull request.
+#[test]
+fn a_landing_killed_mid_export_finishes_on_the_branch_another_landing_pushed() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    let up = Upstream::new(dir, &[("README", "one\n")]);
+    let id = prepare(dir, &up);
+    let mut child = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "child_lander", "--nocapture"])
+        .env(DIR_ENV, dir)
+        .env(FAULT_ENV, "export_intent")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while child.try_wait().unwrap().is_none() {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "never reached its fault"
+        );
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    let authority = Arc::new(Authority::open(&dir.join("state"), Arc::new(Nobody)).unwrap());
+    let store = authority.store();
+    assert_eq!(
+        store
+            .fork(&f1())
+            .unwrap()
+            .unwrap()
+            .landing
+            .unwrap()
+            .step
+            .name(),
+        "exporting"
+    );
+    // e2: a fork of the same main with the same draft, verified and asked to land.
+    let e2 = ForkName::new("e2").unwrap();
+    let holder = Holder::new(PrincipalName::new("a2").unwrap(), NodeId::new(NA).unwrap());
+    let writer = Writer::new(holder.clone(), 1);
+    store.create_fork(&e2, &l1(), &holder).unwrap();
+    let cs = store.changeset(id).unwrap().unwrap();
+    assert_eq!(store.publish_draft(&e2, &writer, &cs).unwrap().id, id);
+    let main = store.location(&l1()).unwrap().unwrap().main;
+    store
+        .record_verify(&e2, &writer, id, main, Vec::new())
+        .unwrap();
+    store.record_landing_intent(&e2, &writer, id).unwrap();
+    let lander = Lander::spawn(authority.clone(), up.land_config(dir.join("repos"))).unwrap();
+    for fork in [&e2, &f1()] {
+        let step = wait_for(store, fork, |st| {
+            in_review(st) || matches!(st, LandingStep::Failed { .. })
+        });
+        assert!(
+            matches!(step, LandingStep::InReview { pr: 1, .. }),
+            "{fork}: {step:?}"
+        );
+    }
+    drop(lander);
+    assert_eq!(up.creates().len(), 1);
+    assert_eq!(
+        up.git(&["rev-list", "--count", &format!("main..cp/{id}")]),
+        "1"
+    );
 }
 
 impl Upstream {

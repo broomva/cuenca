@@ -10,7 +10,7 @@ use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
 use cuenca_core::checks::{CheckRun, CheckStatus, MANIFEST_PATH, Manifest, ManifestId};
-use cuenca_core::{Event, ForkName, LocationName};
+use cuenca_core::{ChangesetId, Event, ForkName, LocationName};
 use cuenca_fs::{BlobSource, Fetched, SnapshotOptions};
 use cuenca_tree::{Changeset, ContentHash, Entry, GitOid, Op, Tree};
 use serde::Serialize;
@@ -1013,20 +1013,35 @@ pub fn land(client: &Client, dir: &Path, wait: std::time::Duration) -> anyhow::R
         }
         std::thread::sleep(std::time::Duration::from_millis(250));
     };
+    Ok(landing_report(&f.name, id, offset, &state))
+}
+
+/// What `cuenca land` reports, from the authority's `GET /v1/forks/{fork}/landing`
+/// answer `state` after the request for `id` (recorded at `offset`).
+fn landing_report(fork: &ForkName, id: ChangesetId, offset: u64, state: &Value) -> Report {
     let landing = &state["landing"];
-    let step = &landing["step"];
-    // A takeover (or the holder's newer request) dropped this one while it waited.
-    let status = if landing["changeset"] != json!(id) {
-        "dropped".to_string()
-    } else {
+    // A takeover (or the holder's newer request) dropped this one while it waited: what
+    // the fork's landing says now is another request's, and is not reported as ours.
+    let ours = landing["changeset"] == json!(id);
+    let none = Value::Null;
+    let step = if ours { &landing["step"] } else { &none };
+    let status = if ours {
         step["step"].as_str().unwrap_or("unknown").to_string()
+    } else {
+        "dropped".to_string()
     };
     let waiting_for = match status.as_str() {
         "requested" if state["remote"] != true => Some("owner"),
         "requested" | "exporting" | "exported" | "reviewing" => Some("authority"),
         _ => None,
     };
-    let mut text = format!("asked to land {id} from {}: {}\n", f.name, step_line(step));
+    let mut text = if ours {
+        format!("asked to land {id} from {fork}: {}\n", step_line(step))
+    } else {
+        format!(
+            "asked to land {id} from {fork}, but the request was dropped (the fork was taken over, or a newer request replaced it)\n"
+        )
+    };
     match waiting_for {
         Some("owner") => text.push_str(
             "the location has no git remote: the owner lands it with `cuenca admin land`\n",
@@ -1034,17 +1049,18 @@ pub fn land(client: &Client, dir: &Path, wait: std::time::Duration) -> anyhow::R
         Some(_) => text.push_str("the authority is still exporting it; see `cuenca status`\n"),
         None => {}
     }
-    if let Some(e) = state["error"].as_str() {
+    let error = if ours { &state["error"] } else { &none };
+    if let Some(e) = error.as_str() {
         text.push_str(&format!("the authority is retrying after: {e}\n"));
     }
-    Ok(Report {
+    Report {
         exit: if matches!(status.as_str(), "failed" | "dropped") {
             1
         } else {
             0
         },
         json: json!({
-            "fork": f.name,
+            "fork": fork,
             "changeset": id,
             "offset": offset,
             "status": status,
@@ -1052,8 +1068,50 @@ pub fn land(client: &Client, dir: &Path, wait: std::time::Duration) -> anyhow::R
             "pr": step.get("pr"),
             "url": step.get("url"),
             "reason": step.get("reason"),
-            "retrying_after": state["error"],
+            "retrying_after": error,
         }),
         text,
-    })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(n: u8) -> ChangesetId {
+        ChangesetId::from_hex(&format!("{n:02x}").repeat(32)).unwrap()
+    }
+
+    #[test]
+    fn a_landing_report_names_the_step_and_exits_1_on_failure_or_a_dropped_request() {
+        let fork = ForkName::new("f1").unwrap();
+        let state = |changeset: ChangesetId, step: Value, remote: bool| json!({ "landing": { "changeset": changeset, "step": step }, "remote": remote, "error": "e" });
+        let pr = json!({ "step": "in_review", "pr": 4, "url": "https://github.com/o/r/pull/4" });
+        let r = landing_report(&fork, id(1), 9, &state(id(1), pr.clone(), true));
+        assert_eq!(
+            (r.exit, &r.json["status"], &r.json["pr"]),
+            (0, &json!("in_review"), &json!(4))
+        );
+        let failed = json!({ "step": "failed", "reason": "no" });
+        let r = landing_report(&fork, id(1), 9, &state(id(1), failed, true));
+        assert_eq!((r.exit, &r.json["reason"]), (1, &json!("no")));
+        let r = landing_report(
+            &fork,
+            id(1),
+            9,
+            &state(id(1), json!({ "step": "requested" }), false),
+        );
+        assert_eq!((r.exit, &r.json["waiting_for"]), (0, &json!("owner")));
+        // Replaced by another request: dropped, and nothing of the other one is ours.
+        let r = landing_report(&fork, id(1), 9, &state(id(2), pr, true));
+        assert_eq!(r.exit, 1);
+        assert_eq!(r.json["status"], "dropped");
+        for field in ["pr", "url", "reason", "retrying_after", "waiting_for"] {
+            assert_eq!(r.json[field], Value::Null, "{field}");
+        }
+        assert!(r.text.contains("dropped"), "{}", r.text);
+        // No landing at all (a takeover cleared it): dropped too.
+        let r = landing_report(&fork, id(1), 9, &json!({ "landing": null, "remote": true }));
+        assert_eq!((r.exit, &r.json["status"]), (1, &json!("dropped")));
+    }
 }

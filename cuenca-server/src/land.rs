@@ -6,11 +6,14 @@
 //!
 //! 1. **requested → exporting.** Fetch the remote's default branch into the authority's
 //!    own bare repository for the location (`<state>/git/<location>.git`), find the
-//!    newest first-parent commit whose tree is the changeset's base, write the
-//!    changeset's target tree with [`cuenca_tree::git::Repo::write_tree`] and commit it
-//!    onto that parent. The commit is deterministic (author, committer and date come
-//!    from the log), so building it again after a crash gives the same id. Record the
-//!    export intent, naming the commit.
+//!    newest first-parent commit whose tree is the main the request's verify judged
+//!    ([`cuenca_core::Landing::main`]), write the fork's head tree with
+//!    [`cuenca_tree::git::Repo::write_tree`] and commit it onto that parent. A
+//!    `cp/<id>` already on the remote that is an export of this changeset onto that
+//!    main is taken as this landing's instead. The commit depends on the changeset and its parent alone
+//!    (author and committer `Cuenca`, dated when the changeset was first recorded), so
+//!    every landing of one changeset builds the same commit and a rebuild after a crash
+//!    gives the same id. Record the export intent, naming the commit.
 //! 2. **exporting → exported.** Push the commit to `cp/<changeset id>` with an
 //!    expected-old value of "absent", so a push cannot move a branch that exists; a
 //!    branch already at the commit is a push that happened. Record the export.
@@ -245,16 +248,17 @@ impl Worker {
                     // already: that export is this one's.
                     let export = match git.remote_branch(&remote, &export_branch(id))? {
                         Some(at) => git.adopt(&remote, &self.a.store, id, landing.main, at)?,
-                        None => self.build(&git, &remote, &fork, &landing, None)?,
+                        None => self.build(&git, &remote, &landing, None)?,
                     };
                     self.a.store.record_export_intent(name, id, &export)?;
                     self.fault("export_intent");
                 }
                 LandingStep::Exporting { export } => {
-                    if !git.has_commit(export.commit)? {
+                    let pushed = git.remote_branch(&remote, &export.branch)? == Some(export.commit);
+                    if !pushed && !git.has_commit(export.commit)? {
                         // Lost with the crash, or never fsynced: build it again, onto
                         // the parent the intent names; it must come out the same.
-                        let again = self.build(&git, &remote, &fork, &landing, Some(export))?;
+                        let again = self.build(&git, &remote, &landing, Some(export))?;
                         if again.commit != export.commit {
                             return Err(LandError::Fail(format!(
                                 "the export rebuilt as {}, not {}, the commit its intent names",
@@ -262,7 +266,9 @@ impl Worker {
                             )));
                         }
                     }
-                    git.push(&remote, export)?;
+                    if !pushed {
+                        git.push(&remote, export)?;
+                    }
                     self.fault("pushed");
                     self.a.store.record_exported(name, id)?;
                 }
@@ -293,7 +299,6 @@ impl Worker {
         &self,
         git: &Git,
         remote: &str,
-        fork: &Fork,
         landing: &Landing,
         intent: Option<&Export>,
     ) -> Step<Export> {
@@ -346,24 +351,20 @@ impl Worker {
                 changeset.target
             )));
         }
+        // The commit is a function of the changeset and its parent alone, never of the
+        // request (who asked, from which fork, when): every landing of one changeset
+        // onto one main builds the same commit, so the one branch `cp/<id>` always
+        // holds the commit any of them expects. Who asked goes in the PR body.
         let at_secs = store
-            .records(landing.offset, 1)?
-            .first()
-            .map(|r| r.at_ms / 1000)
-            .unwrap_or(0);
-        let holder = fork
-            .holder()
-            .map(|h| h.principal.to_string())
-            .unwrap_or_default();
+            .changeset_first_at(landing.changeset)?
+            .ok_or_else(|| LandError::Fail(format!("no changeset {}", landing.changeset)))?
+            / 1000;
         let message = format!(
-            "cuenca: land {} from {}\n\nCuenca-Changeset: {}\nCuenca-Fork: {}\nCuenca-Requested-By: {}\n",
+            "cuenca: land {}\n\nCuenca-Changeset: {}\n",
             &landing.changeset.to_hex()[..12],
-            fork.name,
             landing.changeset,
-            fork.name,
-            holder,
         );
-        let commit = git.commit(written, parent, &holder, at_secs, &message)?;
+        let commit = git.commit(written, parent, at_secs, &message)?;
         Ok(Export::new(landing.changeset, commit, parent, &base_ref))
     }
 
@@ -630,16 +631,8 @@ impl<'c> Git<'c> {
     }
 
     /// Commit `tree` onto `parent`: the same inputs give the same id.
-    fn commit(
-        &self,
-        tree: GitOid,
-        parent: GitOid,
-        author: &str,
-        at_secs: u64,
-        message: &str,
-    ) -> Step<GitOid> {
+    fn commit(&self, tree: GitOid, parent: GitOid, at_secs: u64, message: &str) -> Step<GitOid> {
         let date = format!("{at_secs} +0000");
-        let author = if author.is_empty() { "cuenca" } else { author };
         let out = self
             .command(
                 Some(&self.dir),
@@ -653,8 +646,8 @@ impl<'c> Git<'c> {
                     "-",
                 ],
             )
-            .env("GIT_AUTHOR_NAME", author)
-            .env("GIT_AUTHOR_EMAIL", format!("{author}@cuenca.invalid"))
+            .env("GIT_AUTHOR_NAME", "Cuenca")
+            .env("GIT_AUTHOR_EMAIL", "authority@cuenca.invalid")
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_NAME", "Cuenca")
             .env("GIT_COMMITTER_EMAIL", "authority@cuenca.invalid")

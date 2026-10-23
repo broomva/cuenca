@@ -175,7 +175,7 @@ mutate src/http.rs '            CoreError::NotVerified { .. } => (S::CONFLICT, "
 
 mutate src/land.rs '            && tree_of(ids[0])? == changeset.target.to_hex()' '' --test land a_branch_that
 mutate src/land.rs '                    let export = match git.remote_branch(&remote, &export_branch(id))? {
-                        Some(at) => git.adopt(&remote, &self.a.store, id, at)?,
+                        Some(at) => git.adopt(&remote, &self.a.store, id, landing.main, at)?,
                         None => self.build(&git, &remote, &fork, &landing, None)?,
                     };' '                    let export = self.build(&git, &remote, &fork, &landing, None)?;' --test land a_changeset_landed_again
 mutate src/land.rs '            Ok(None) if std::time::Instant::now() >= deadline => {' '            Ok(None) if false => {' --test land a_hung_call
@@ -183,5 +183,10 @@ mutate src/land.rs '            Ok(None) if std::time::Instant::now() >= deadlin
 mutate src/land.rs '            if !on_main.contains(&oid)' '            if false' --test land a_fork_with_several
 mutate src/land.rs '        let main = landing.main;' '        let main = changeset.base;' --test land a_fork_with_several
 mutate src/land.rs '            Some(p) if p.head_ref_oid == export.commit.to_hex() => Ok(Some((p.number, p.url))),' '            Some(p) => Ok(Some((p.number, p.url))),' --test land a_pull_request_from
+
+mutate src/land.rs '            && tree_of(ids[1])? == main.to_hex();' ';' --test land a_branch_with_the_drafts_tree
+mutate src/land.rs '                    if !pushed {
+                        git.push(&remote, export)?;
+                    }' '' --test land a_kill
 
 exit $survived

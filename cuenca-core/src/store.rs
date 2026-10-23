@@ -716,6 +716,22 @@ impl Store {
         indexed_changeset(&txn.open_table(CHANGESETS)?, &txn.open_table(LOG)?, id)
     }
 
+    /// When `id` was first recorded: the wall-clock time (ms) of the first draft that
+    /// carried it, the same for every fork and holder that publishes it.
+    pub fn changeset_first_at(&self, id: ChangesetId) -> Result<Option<u64>> {
+        let txn = self.db.begin_read()?;
+        let index = txn.open_table(CHANGESETS)?;
+        let Some(offset) = index.get(id.as_bytes().as_slice())?.map(|v| v.value()) else {
+            return Ok(None);
+        };
+        let log = txn.open_table(LOG)?;
+        let value = log.get(offset)?.ok_or(CoreError::CorruptLog {
+            offset,
+            reason: "the changeset index points past the log".into(),
+        })?;
+        Ok(Some(decode_record(offset, value.value())?.at_ms))
+    }
+
     /// The number of records in the log.
     pub fn len(&self) -> Result<u64> {
         let txn = self.db.begin_read()?;

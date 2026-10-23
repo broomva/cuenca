@@ -53,8 +53,8 @@ Verify is advisory for now. The results are the caller's own, and a check reads 
 
 **A location with a git remote** (a GitHub repository: `https://github.com/o/r`, `git@github.com:o/r.git` or `ssh://git@github.com/o/r`) lands through a pull request:
 
-1. The authority keeps a bare repository per location in `<state>/git/`. It fetches the remote's default branch and finds the newest first-parent commit (of the last 1000) whose tree is the fork's base.
-2. It writes the draft's tree and commits it onto that commit. The author is the fork's holder. The date comes from the log, so rebuilding the commit gives the same id.
+1. The authority keeps a bare repository per location in `<state>/git/`. It fetches the remote's default branch and finds the newest first-parent commit (of the last 1000) whose tree is the main the verify was judged against.
+2. It writes the fork's head tree and commits it onto that commit. The commit depends on the changeset and its parent only: its author and committer are `Cuenca`, and its date is when the changeset was first recorded. So every landing of one changeset onto one main builds the same commit, whichever fork or holder asks, and rebuilding it after a crash gives the same id. The pull request's body names who asked.
 3. It pushes the commit to `cp/<changeset id>`, but only if that branch does not exist yet. A branch already at the commit counts as pushed. A changeset landed before is reused: after a takeover dropped the first request, or from another fork with the same edit, the branch already holds one commit with the changeset's target tree onto a parent with its base tree, and that export and its pull request become this landing's. A branch holding anything else fails the landing.
 4. It opens a pull request with `gh`, the login on the authority host, or finds the one already open from that branch.
 
