@@ -209,11 +209,7 @@ mutate src/gates/policy.rs '            if !missing.is_empty() {' '            i
 mutate src/gates/policy.rs ')? && max != 1' ')? && false' --lib
 mutate src/gates/policy.rs '    if !(lo..=hi).contains(&window) {' '    if false {' --lib
 mutate src/gates/policy.rs '        None => GOVERNANCE_PATHS.iter().map(|p| p.to_string()).collect(),' '        None => Vec::new(),' --lib
-mutate src/gates/policy.rs '    if gates.is_badvalue() {
-        return Ok(None);
-    }' '    if gates.as_hash().is_none() {
-        return Ok(None);
-    }' --lib
+mutate src/gates/policy.rs '        Some(Yaml::Null) => &NULL,' '        Some(Yaml::Null) => return Ok(None),' --lib
 mutate src/gates/policy.rs '            if max > DEFAULT_MAX_FILE_BYTES {' '            if false {' --lib
 mutate src/gates/mod.rs '        if let Err(error) = &input.checks.bytes {' '        if let Err(error) = &Ok::<(), String>(()) {' --lib
 
@@ -235,6 +231,14 @@ mutate src/store.rs '        (Some(info.sha256), bytes)' '        (None, bytes)'
 mutate src/gates/mod.rs '            if RepoPath::new(key.trim_end_matches('"'"'/'"'"')).is_err() {' '            if false {' --lib
 mutate src/gates/mod.rs '        let dirs = path.match_indices('"'"'/'"'"').map(|(i, _)| &path[..=i]);' '        let dirs = std::iter::empty::<&str>();' --lib
 
-mutate src/gates/policy.rs '    if absent(y) || y.as_hash().is_some() {' '    if true {' --lib
+mutate src/gates/policy.rs '        Some(y) if y.as_hash().is_some() => Ok(y),' '        Some(y) => Ok(y),' --lib
+
+# P20 r4 (A, B, C): only a missing key is absent; a byte-order mark is skipped; rules are checked as p9 checks them.
+mutate src/gates/policy.rs '    y.as_hash()?.get(&Yaml::String(key.to_string()))' '    Some(&y[key]).filter(|v| !v.is_badvalue() && !v.is_null())' --lib
+mutate src/gates/policy.rs "        let text = text.strip_prefix('\\u{feff}').unwrap_or(text);" '' --lib
+mutate src/gates/policy.rs '                if !RULE_ACTIONS.contains(&action) {' '                if false {' --lib
+mutate src/gates/policy.rs '                        return Err(format!("{key} sets both branch_pattern and path_touched"));' '                        return Ok(policy);' --lib
+mutate src/gates/policy.rs '                    (None, None) => {' '                    (None, None) if false => {' --lib
+mutate src/gates/policy.rs '                        .ok_or("gates.hard[G4].pattern is missing")?;' '                        .unwrap_or_default();' --lib
 
 exit $survived
