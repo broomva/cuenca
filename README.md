@@ -30,6 +30,21 @@ command = "cuenca"
 args = ["mcp"]
 ```
 
+## Checks and `cuenca verify`
+
+A location declares its checks in `.cuenca/checks.toml` on its main. Each check is a name and an argv, run from the checkout's root, with an optional time limit (the default is 1800 s):
+
+```toml
+[[check]]
+name = "test"
+argv = ["cargo", "test", "--locked"]
+timeout_secs = 900
+```
+
+`cuenca verify` runs this list on the fork's head, in a temporary checkout. The list always comes from the location's main, never from the fork: a fork that edits its own `.cuenca/checks.toml` is still judged by main's. The authority records the result beside the head changeset, with the hash of the manifest it was judged by, and refuses any record whose checks are not exactly main's list. If main has no manifest, verify passes with zero checks.
+
+Verify is advisory for now. The results are the caller's own, and a check reads the fork's files, so a fork that rewrites a script a check calls can make that check pass. The record blocks nothing. GitHub's required checks are the gate at landing.
+
 More crates land as the plan's nodes do. Install, operate and recover sections arrive with the close-out node (BRO-3260).
 
 ```bash
