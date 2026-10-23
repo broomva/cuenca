@@ -123,8 +123,18 @@ if [ "$(uname)" = Darwin ]; then
 fi
 
 # A checkout creates dest, never its parent, and never writes what a snapshot refuses.
-mutate src/checkout.rs '.recursive(false)' '.recursive(true)' --test fs parent_of_dest
-mutate src/checkout.rs '            too_large(&abs, size)?;' '' --test fs larger_than_a_snapshot
+mutate src/checkout.rs '    let parent =
+        openat(CWD, parent,' '    let _ = fs::create_dir_all(parent);
+    let parent =
+        openat(CWD, parent,' --test fs parent_of_dest
+mutate src/checkout.rs '    too_large(abs, stamp.size())?;' '' --test fs larger_than_a_snapshot
+# dest is examined, created and opened relative to one parent descriptor; reopening it
+# by path lets a writer of the parent's path split created from written (P20 r10, A).
+mutate src/checkout.rs '    let fd = match openat(
+        &parent,
+        &*name,' '    let fd = match openat(
+        CWD,
+        dest,' --test fs parent_swapped
 mutate src/checkout.rs '            too_large(&abs, bytes.len() as u64)?;' '' --test fs larger_than_a_snapshot
 
 exit $survived

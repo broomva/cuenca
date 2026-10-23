@@ -782,6 +782,23 @@ fn checkout_refuses_a_destination_that_is_a_link_or_a_file() {
     fs::create_dir(out.path().join("shared")).unwrap();
     set_mode(out.path(), "shared", 0o777);
     assert!(checkout(&tree, &out.path().join("shared"), &empty).is_ok());
+    // A trailing slash does not get the link past the check (P20 r10, C): the final
+    // name is examined without following it, so nothing lands in `real`.
+    let mut slashed = out.path().join("link").into_os_string();
+    slashed.push("/");
+    let one = Tree::from_entries([(
+        cuenca_tree::RepoPath::new("f").unwrap(),
+        Entry::file(b"x\n"),
+    )])
+    .unwrap();
+    assert!(matches!(
+        checkout(&one, Path::new(&slashed), &Answer::Bytes(b"x\n".to_vec())),
+        Err(FsError::Destination {
+            why: "it is a symlink",
+            ..
+        })
+    ));
+    assert!(!out.path().join("real/f").exists());
     write(out.path(), "file", b"x");
     assert!(matches!(
         checkout(&tree, &out.path().join("file"), &empty),
@@ -1094,4 +1111,55 @@ fn a_file_that_became_a_directory_under_a_rule_for_both_kinds_is_refused() {
         snapshot(dir.path(), &base.tree, &mut StatCache::new()),
         Err(FsError::Ignored(_))
     ));
+}
+
+/// A writer of the parent's path swaps it for a link while checkouts run (P20 r10, A).
+/// The destination a checkout creates must be the one it writes into: never `dest`
+/// created under the real parent while the files land in a directory the link names.
+#[test]
+fn a_parent_swapped_mid_checkout_never_splits_created_from_written() {
+    let base = tempfile::tempdir().unwrap();
+    let (p, q, o) = (
+        base.path().join("p"),
+        base.path().join("q"),
+        base.path().join("o"),
+    );
+    fs::create_dir(&p).unwrap();
+    fs::create_dir(&o).unwrap();
+    const N: usize = 4000;
+    for i in 0..N {
+        fs::create_dir(o.join(format!("d{i}"))).unwrap(); // planted, empty
+    }
+    let tree = Tree::from_entries([(
+        cuenca_tree::RepoPath::new("f").unwrap(),
+        Entry::file(b"x\n"),
+    )])
+    .unwrap();
+    let source = Answer::Bytes(b"x\n".to_vec());
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let swapper = {
+        let (p, q, stop) = (p.clone(), q.clone(), stop.clone());
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                fs::rename(&p, &q).unwrap();
+                symlink("o", &p).unwrap();
+                fs::remove_file(&p).unwrap();
+                fs::rename(&q, &p).unwrap();
+            }
+        })
+    };
+    for i in 0..N {
+        let _ = checkout(&tree, &p.join(format!("d{i}")), &source);
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    swapper.join().unwrap();
+    let split: Vec<usize> = (0..N)
+        .filter(|i| p.join(format!("d{i}")).is_dir() && o.join(format!("d{i}/f")).exists())
+        .collect();
+    assert!(
+        split.is_empty(),
+        "{} of {N} split: {:?}",
+        split.len(),
+        &split[..split.len().min(5)]
+    );
 }

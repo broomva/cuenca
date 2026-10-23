@@ -16,7 +16,9 @@ use cuenca_tree::{
     TreeError, check_content, has_content_rule,
 };
 use rayon::prelude::*;
-use rustix::fs::{AtFlags, CWD, Dir, OFlags, mkdirat, openat, symlinkat, unlinkat};
+use rustix::fs::{
+    AtFlags, CWD, Dir, FileType, OFlags, mkdirat, openat, statat, symlinkat, unlinkat,
+};
 use rustix::io::Errno;
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::ffi::{CString, OsStr};
@@ -24,7 +26,7 @@ use std::fs::{self, File};
 use std::io::{self, Read, Write as _};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::{OsStrExt, OsStringExt};
-use std::os::unix::fs::{DirBuilderExt, FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
+use std::os::unix::fs::{FileExt, MetadataExt, OpenOptionsExt, PermissionsExt};
 use std::path::{Path, PathBuf};
 
 /// How many files a checkout writes at once. Clones on one APFS volume contend: on a
@@ -345,28 +347,51 @@ fn errno(path: PathBuf) -> impl Fn(Errno) -> FsError {
 
 /// The destination, open, after checking it is a directory, not a link, that holds
 /// nothing.
+///
+/// `dest`'s parent is resolved once, as given, and held; the final name is then
+/// examined, created and opened relative to that descriptor, never by path again. So the
+/// directory checked, the one created and the one written into are the same, whatever
+/// a writer of the parent's path does meanwhile (P20 r10, A). A trailing slash does not
+/// get a link past this: the final name is examined without following it.
 fn prepare(dest: &Path) -> Result<OwnedFd> {
     let refuse = |why| FsError::Destination {
         path: dest.into(),
         why,
     };
-    match fs::symlink_metadata(dest) {
+    let name = match dest.file_name() {
+        Some(name) => CString::new(name.as_bytes()).map_err(|_| refuse("it holds a NUL"))?,
+        None => return Err(refuse("it has no final name")),
+    };
+    let parent = match dest.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;
+    let parent =
+        openat(CWD, parent, dir_flags, rustix::fs::Mode::empty()).map_err(errno(parent.into()))?;
+    match statat(&parent, &*name, AtFlags::SYMLINK_NOFOLLOW) {
         // A symlink is refused by the open below, which does not follow one.
-        Ok(meta) if !meta.is_dir() && !meta.file_type().is_symlink() => {
+        Ok(st)
+            if !matches!(
+                FileType::from_raw_mode(st.st_mode),
+                FileType::Directory | FileType::Symlink
+            ) =>
+        {
             return Err(refuse("it is not a directory"));
         }
         Ok(_) => {}
-        // Only `dest` itself is created. A missing parent is an error, never created:
-        // the checkout makes nothing outside `dest`.
-        Err(e) if e.kind() == io::ErrorKind::NotFound => fs::DirBuilder::new()
-            .recursive(false)
-            .mode(0o755)
-            .create(dest)
-            .map_err(FsError::io(dest))?,
-        Err(e) => return Err(FsError::io(dest)(e)),
+        // Only `dest` itself is created. A missing parent is an error (the open above),
+        // never created: the checkout makes nothing outside `dest`.
+        Err(Errno::NOENT) => mkdirat(&parent, &*name, rustix::fs::Mode::from_raw_mode(0o755))
+            .map_err(errno(dest.into()))?,
+        Err(e) => return Err(errno(dest.into())(e)),
     }
-    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
-    let fd = match openat(CWD, dest, flags, rustix::fs::Mode::empty()) {
+    let fd = match openat(
+        &parent,
+        &*name,
+        dir_flags | OFlags::NOFOLLOW,
+        rustix::fs::Mode::empty(),
+    ) {
         Ok(fd) => fd,
         Err(Errno::LOOP | Errno::NOTDIR) => return Err(refuse("it is a symlink")),
         Err(e) => return Err(FsError::io(dest)(e.into())),
@@ -408,14 +433,11 @@ fn write_file(
     let (cloned, written) = match source.fetch(oid).map_err(FsError::io(&abs))? {
         None => return Err(FsError::MissingBlob(oid)),
         Some(fetched @ (Fetched::File(_) | Fetched::Vouched(_))) => {
-            let size = match &fetched {
-                Fetched::File(file) => file.metadata().map_err(FsError::io(&abs))?.len(),
-                Fetched::Vouched(v) => v.stamp.size(),
-                Fetched::Bytes(_) => unreachable!("matched above"),
-            };
-            too_large(&abs, size)?;
             let (file, stamp) = match fetched {
-                Fetched::Vouched(v) if v.oid == oid => (v.file, v.stamp),
+                Fetched::Vouched(v) if v.oid == oid => {
+                    too_large(&abs, v.stamp.size())?;
+                    (v.file, v.stamp)
+                }
                 Fetched::Vouched(v) => {
                     return Err(FsError::BlobMismatch {
                         expected: oid,
@@ -515,6 +537,9 @@ fn read_ruled(file: &File, abs: &Path) -> Result<Vec<u8>> {
 /// or fail if it is not the blob `oid`.
 fn verify_file(oid: GitOid, file: &File, abs: &Path) -> Result<Stamp> {
     let stamp = Stamp::of(&file.metadata().map_err(FsError::io(abs))?);
+    // Checked on the stamp the hash binds its length to, before any hashing: a file
+    // that grows after this fails as changed, never passes a stale size (P20 r10, A).
+    too_large(abs, stamp.size())?;
     let mut hasher = cuenca_tree::BlobHasher::new(stamp.size());
     let mut buf = vec![0u8; 64 * 1024];
     let mut at = 0u64;
