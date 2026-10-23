@@ -201,7 +201,7 @@ mutate src/gates/builtin.rs 'Some(c) if c.len() as u64 > self.0 =>' 'Some(c) if 
 mutate src/gates/mod.rs 'findings.truncate(MAX_FINDINGS_PER_GATE);' '' --lib
 mutate src/gates/policy.rs '            Ok((Event::Alias(_), mark)) => {' '            Ok((Event::Alias(_), mark)) if false => {' --lib
 mutate src/gates/policy.rs 'if bytes.len() > MAX_POLICY_BYTES {' 'if false {' --lib
-mutate src/gates/policy.rs '                    _ => return Err(format!("cuenca.gates: unknown key {key:?}")),' '                    _ => {}' --lib
+mutate src/gates/policy.rs '            _ => return Err(format!("{at}: unknown key {key:?}")),' '            _ => {}' --lib
 mutate src/store.rs '        let bytes = if matches!(entry, Entry::Symlink(_)) {' '        let bytes = if false {' --lib
 
 # Gate engine floors (P20 r1, C): p9's governance tier and the size limit cannot be loosened; an unreadable check manifest fails.
@@ -240,5 +240,16 @@ mutate src/gates/policy.rs '                if !RULE_ACTIONS.contains(&action) {
 mutate src/gates/policy.rs '                        return Err(format!("{key} sets both branch_pattern and path_touched"));' '                        return Ok(policy);' --lib
 mutate src/gates/policy.rs '                    (None, None) => {' '                    (None, None) if false => {' --lib
 mutate src/gates/policy.rs '                        .ok_or("gates.hard[G4].pattern is missing")?;' '                        .unwrap_or_default();' --lib
+
+# P20 r5 (A, B, C): a misspelt section one level up is an error, not an absent section.
+mutate src/gates/policy.rs '        only_keys(cuenca, &["gates"], "cuenca")?;' '' --lib
+mutate src/gates/policy.rs '            "auto_merge",
+        )?;' '            "auto_merge",
+        )
+        .ok();' --lib
+mutate src/gates/policy.rs '        "auto_merge.gates",
+    )?;' '        "auto_merge.gates",
+    )
+    .ok();' --lib
 
 exit $survived

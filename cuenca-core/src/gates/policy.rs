@@ -25,9 +25,11 @@
 //! `p20`, `review_bots`) feed no gate here; they are p9's to validate. A location whose policy has no `auto_merge.gates` (any directory tree, not a
 //! workspace) has no governance tier, as under p9.
 //!
-//! Every other key is ignored, so the rest of the policy can change freely. Under
-//! `cuenca.gates` and `auto_merge.gates.governance` an unknown key is an error, so a
-//! misspelt setting is not silently dropped. A key the engine reads must hold its type
+//! Top-level keys other than `gates`, `auto_merge` and `cuenca` are ignored, so the
+//! rest of the policy can change freely. Under `auto_merge` and `auto_merge.gates` an
+//! unknown key is an error, as under p9, and so it is under `cuenca`, `cuenca.gates` and
+//! `auto_merge.gates.governance`, so a misspelt setting, or a misspelt section holding
+//! settings, is not silently dropped. A key the engine reads must hold its type
 //! when it is present: only a missing key is absent. `key:` with no value is an error,
 //! except `auto_merge.gates` and its `governance`, which p9 reads as its defaults. So
 //! `auto_merge: ~` is an error here, where p9 reads it as auto-merge switched off:
@@ -168,6 +170,24 @@ impl Policy {
         let gates = mapping(field(root, "gates"), "gates")?;
         let auto_merge = mapping(field(root, "auto_merge"), "auto_merge")?;
         let cuenca = mapping(field(root, "cuenca"), "cuenca")?;
+        // A misspelt key one level up from the settings would drop them all as absent
+        // (r5, A, B and C): `auto_merge` has p9's keys (`_parse_auto_merge`), and
+        // `cuenca` is the engine's own.
+        only_keys(
+            auto_merge,
+            &[
+                "enabled",
+                "require_no_requested_changes",
+                "require_branch_up_to_date",
+                "merge_method",
+                "delete_branch",
+                "rules",
+                "default_action",
+                "gates",
+            ],
+            "auto_merge",
+        )?;
+        only_keys(cuenca, &["gates"], "cuenca")?;
 
         // gates.hard[id: G4].pattern
         if let Some(hard) = list(field(gates, "hard"), "gates.hard")? {
@@ -228,20 +248,16 @@ impl Policy {
 
         // cuenca.gates
         let section = mapping(field(cuenca, "gates"), "cuenca.gates")?;
-        if let Some(map) = section.as_hash() {
-            for key in map.keys() {
-                let known = [
-                    "max_file_bytes",
-                    "secret_paths",
-                    "secret_patterns",
-                    "landing_windows",
-                ];
-                match key.as_str() {
-                    Some(k) if known.contains(&k) => {}
-                    _ => return Err(format!("cuenca.gates: unknown key {key:?}")),
-                }
-            }
-        }
+        only_keys(
+            section,
+            &[
+                "max_file_bytes",
+                "secret_paths",
+                "secret_patterns",
+                "landing_windows",
+            ],
+            "cuenca.gates",
+        )?;
         if let Some(max) = int(
             field(section, "max_file_bytes"),
             "cuenca.gates.max_file_bytes",
@@ -310,25 +326,27 @@ fn governance(gates: Option<&Yaml>) -> Res<Option<Governance>> {
         Some(Yaml::Null) => &NULL,
         Some(gates) => mapping(Some(gates), "auto_merge.gates")?,
     };
+    // p9's keys (`_parse_gates`): a misspelt `governance` would drop the tier (r5).
+    only_keys(
+        gates,
+        &["review_bots", "aggregate_checks", "p20", "governance"],
+        "auto_merge.gates",
+    )?;
     let gov = match field(gates, "governance") {
         None | Some(Yaml::Null) => &NULL,
         gov => mapping(gov, KEY)?,
     };
-    if let Some(map) = gov.as_hash() {
-        for key in map.keys() {
-            let known = [
-                "paths",
-                "required_strata",
-                "required_checks",
-                "l3_max_per_window",
-                "l3_window_seconds",
-            ];
-            match key.as_str() {
-                Some(k) if known.contains(&k) => {}
-                _ => return Err(format!("{KEY}: unknown key {key:?}")),
-            }
-        }
-    }
+    only_keys(
+        gov,
+        &[
+            "paths",
+            "required_strata",
+            "required_checks",
+            "l3_max_per_window",
+            "l3_window_seconds",
+        ],
+        KEY,
+    )?;
     let paths = match strings(field(gov, "paths"), &format!("{KEY}.paths"))? {
         None => GOVERNANCE_PATHS.iter().map(|p| p.to_string()).collect(),
         Some(paths) => {
@@ -437,6 +455,17 @@ static NULL: Yaml = Yaml::Null;
 /// defaults.
 fn field<'y>(y: &'y Yaml, key: &str) -> Option<&'y Yaml> {
     y.as_hash()?.get(&Yaml::String(key.to_string()))
+}
+
+/// Refuses a key of mapping `y` (at `at`) that is not in `known`.
+fn only_keys(y: &Yaml, known: &[&str], at: &str) -> Res<()> {
+    for key in y.as_hash().into_iter().flat_map(|m| m.keys()) {
+        match key.as_str() {
+            Some(k) if known.contains(&k) => {}
+            _ => return Err(format!("{at}: unknown key {key:?}")),
+        }
+    }
+    Ok(())
 }
 
 /// Refuses a pattern before it is compiled once the cap (built-ins included) is
@@ -680,6 +709,12 @@ cuenca:
             b"auto_merge: ~\n",
             b"gates: null\n",
             b"cuenca:\n",
+            // A misspelt section one level up reads as absent too, unless the parent's
+            // keys are pinned (r5, A, B and C).
+            b"auto_merge:\n  rule: [{path_touched: CLAUDE.md, action: require_human}]\n",
+            b"auto_merge:\n  gate:\n    governance: {}\n",
+            b"auto_merge:\n  gates:\n    governanse: {}\n",
+            b"cuenca:\n  gate: {max_file_bytes: 1}\n",
             b"cuenca:\n  gates:\n",
             b"auto_merge:\n  rules:\n",
             b"auto_merge: !!int nope\n",
