@@ -41,12 +41,32 @@ PY
 
 # Blob ingest: only bytes that hash to the claim, of exactly the announced size, and
 # the same path whether or not the store holds the blob.
-mutate src/store.rs '    pub fn ingest_blob(&self, claimed: GitOid, size: u64, content: impl Read) -> Result<BlobInfo> {
-        let blob' '    pub fn ingest_blob(&self, claimed: GitOid, size: u64, content: impl Read) -> Result<BlobInfo> {
-        if let Some(info) = self.blob_info(claimed)? {
+mutate src/store.rs '        let mut batch = self.blob_batch();
+        let info = batch.add(claimed, size, content)?;' '        if let Some(info) = self.blob_info(claimed)? {
             return Ok(info);
         }
-        let blob' --test store
+        let mut batch = self.blob_batch();
+        let info = batch.add(claimed, size, content)?;' --test store
+# A batch (BRO-3416): every blob indexed, in one commit, only after all are in place.
+mutate src/store.rs 'for (oid, row) in &rows {' 'for (oid, row) in rows.iter().take(1) {' --test store a_blob_batch_stores
+mutate src/store.rs '        self.store.blobs.place(self.staged)?;
+        let txn = self.store.begin()?;
+        {
+            let mut table = txn.open_table(BLOBS)?;
+            for (oid, row) in &rows {
+                table.insert(oid.as_slice(), row.as_slice())?;
+            }
+        }
+        txn.commit()?;' '        let txn = self.store.begin()?;
+        {
+            let mut table = txn.open_table(BLOBS)?;
+            for (oid, row) in &rows {
+                table.insert(oid.as_slice(), row.as_slice())?;
+            }
+        }
+        txn.commit()?;
+        self.store.blobs.place(self.staged)?;' --test batch_crash
+
 mutate src/blobs.rs 'if blob.oid() != claimed {' 'if false {' --test store
 mutate src/blobs.rs 'content.take(size + 1)' 'content.take(size)' --test store
 mutate src/blobs.rs 'if size > MAX_BLOB_BYTES {' 'if false {' --test store
@@ -185,7 +205,8 @@ mutate src/blobs.rs 'fs::remove_file(path)?;' '' --test store
 mutate src/store.rs 'let (Some(sha), Some(size)) = (bytes.get(..32), bytes.get(32..40)) else {
         return Err(CoreError::CorruptBlob(oid));
     };' 'let (sha, size) = (Some(&bytes[..32]).unwrap(), Some(&bytes[32..40]).unwrap());' --lib
-# Not covered, by design: the fsyncs of blob files and directories. A SIGKILL keeps the
+# Not covered, by design: the fsyncs of blob files and directories, and a batch's one
+# full sync before its index commit. A SIGKILL keeps the
 # page cache, so no test here can tell a missing fsync; power-loss durability of blobs
 # rests on reading the code. The redb commit's durability is covered (below).
 

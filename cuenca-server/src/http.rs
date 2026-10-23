@@ -29,7 +29,9 @@
 //! | POST | `/v1/forks/{fork}/drafts` | `{epoch, changeset}`: publish a draft |
 //! | POST | `/v1/forks/{fork}/landing` | `{epoch, changeset}` (an id): ask to land |
 //! | PUT | `/v1/blobs/{oid}` | upload a blob; `Content-Length` is its size |
+//! | POST | `/v1/blobs` | upload a batch of blobs ([`batch_header`]), all or none |
 
+use std::io::Read;
 use std::net::SocketAddr;
 use std::sync::Arc;
 
@@ -54,6 +56,23 @@ use crate::authority::{AuthError, Authority, Caller};
 /// Largest JSON request body (a changeset of tens of thousands of ops fits).
 const MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
 
+/// Largest `POST /v1/blobs` body, headers included. A larger blob goes alone, by `PUT`.
+pub const MAX_BATCH_BYTES: u64 = 64 * 1024 * 1024;
+/// Most blobs in one `POST /v1/blobs`.
+pub const MAX_BATCH_BLOBS: usize = 4096;
+/// The size of [`batch_header`].
+pub const BATCH_HEADER_BYTES: usize = 28;
+
+/// One blob's header in the body of `POST /v1/blobs`: its git id (20 bytes), then its
+/// size (8 bytes, little-endian). The body is blobs back to back, each its header then
+/// exactly that many bytes, and ends after the last blob's bytes.
+pub fn batch_header(oid: GitOid, size: u64) -> [u8; BATCH_HEADER_BYTES] {
+    let mut h = [0u8; BATCH_HEADER_BYTES];
+    h[..20].copy_from_slice(oid.as_bytes());
+    h[20..].copy_from_slice(&size.to_le_bytes());
+    h
+}
+
 type Shared = State<Arc<Authority>>;
 type Me = Extension<Caller>;
 
@@ -73,6 +92,10 @@ pub fn router(authority: Arc<Authority>) -> Router {
         .route(
             "/v1/blobs/{oid}",
             put(upload_blob).layer(DefaultBodyLimit::max(MAX_BLOB_BYTES as usize)),
+        )
+        .route(
+            "/v1/blobs",
+            post(upload_blobs).layer(DefaultBodyLimit::max(MAX_BATCH_BYTES as usize)),
         )
         .layer(DefaultBodyLimit::max(MAX_JSON_BYTES))
         .route_layer(middleware::from_fn_with_state(
@@ -498,16 +521,7 @@ async fn upload_blob(
         }
         .into());
     }
-    let staged = tempfile::NamedTempFile::new_in(&a.staging).map_err(ApiError::internal)?;
-    let mut file = tokio::fs::File::from_std(staged.reopen().map_err(ApiError::internal)?);
-    let mut stream = body.into_data_stream();
-    while let Some(chunk) = stream.next().await {
-        let chunk =
-            chunk.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "bad_body", e.to_string()))?;
-        file.write_all(&chunk).await.map_err(ApiError::internal)?;
-    }
-    file.flush().await.map_err(ApiError::internal)?;
-    drop(file);
+    let staged = stage(&a, body).await?;
     blocking(&a, move |a| {
         let content = staged.reopen().map_err(ApiError::internal)?;
         let info = a.guarded(&c.key.principal, || {
@@ -522,4 +536,98 @@ async fn upload_blob(
         })))
     })
     .await
+}
+
+/// Stream a request body to a staging file, removed when the handle drops.
+async fn stage(a: &Authority, body: Body) -> ApiResult<tempfile::NamedTempFile> {
+    let staged = tempfile::NamedTempFile::new_in(&a.staging).map_err(ApiError::internal)?;
+    let mut file = tokio::fs::File::from_std(staged.reopen().map_err(ApiError::internal)?);
+    let mut stream = body.into_data_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk =
+            chunk.map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "bad_body", e.to_string()))?;
+        file.write_all(&chunk).await.map_err(ApiError::internal)?;
+    }
+    file.flush().await.map_err(ApiError::internal)?;
+    Ok(staged)
+}
+
+/// Upload a batch of blobs ([`batch_header`]): one full sync and one log commit for
+/// all of them, which costs the same as one blob's. Each blob is verified as by
+/// `PUT /v1/blobs/{oid}`, and the batch is all or nothing: if any blob is not the
+/// bytes it claims, or the body does not end exactly after the last one, nothing is
+/// stored and the answer names the first fault. Once the batch is stored, the caller
+/// has shown it holds every blob in it ([`Authority::check_puts`]).
+async fn upload_blobs(State(a): Shared, Extension(c): Me, h: HeaderMap, body: Body) -> ApiResult {
+    let size: u64 = h
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse().ok())
+        .ok_or_else(|| {
+            ApiError::new(
+                StatusCode::LENGTH_REQUIRED,
+                "length_required",
+                "Content-Length is the batch's size",
+            )
+        })?;
+    if size > MAX_BATCH_BYTES {
+        return Err(ApiError::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "too_large",
+            format!("a batch is at most {MAX_BATCH_BYTES} bytes; send larger blobs alone"),
+        ));
+    }
+    let staged = stage(&a, body).await?;
+    blocking(&a, move |a| {
+        let mut content = std::io::BufReader::new(staged.reopen().map_err(ApiError::internal)?);
+        let bad = |message: String| ApiError::new(StatusCode::BAD_REQUEST, "bad_batch", message);
+        let mut batch = a.store.blob_batch();
+        let mut blobs = Vec::new();
+        let mut oids = Vec::new();
+        while let Some((oid, size)) =
+            read_batch_header(&mut content).map_err(|e| bad(e.to_string()))?
+        {
+            if oids.len() == MAX_BATCH_BLOBS {
+                return Err(bad(format!("a batch is at most {MAX_BATCH_BLOBS} blobs")));
+            }
+            let info = batch.add(oid, size, (&mut content).take(size))?;
+            oids.push(oid);
+            blobs.push(json!({
+                "oid": oid.to_hex(),
+                "size": info.size,
+                "sha256": info.sha256.to_hex(),
+            }));
+        }
+        a.guarded(&c.key.principal, || {
+            batch.commit()?;
+            for oid in oids {
+                a.possesses(&c.key.principal, oid);
+            }
+            Ok::<_, CoreError>(())
+        })?;
+        Ok(Json(json!({ "blobs": blobs })))
+    })
+    .await
+}
+
+/// The next blob's header, or `None` where the body ends cleanly between blobs.
+fn read_batch_header(r: &mut impl Read) -> std::io::Result<Option<(GitOid, u64)>> {
+    let mut h = [0u8; BATCH_HEADER_BYTES];
+    let mut got = 0;
+    while got < h.len() {
+        match r.read(&mut h[got..]) {
+            Ok(0) if got == 0 => return Ok(None),
+            Ok(0) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "the body ends inside a blob's header",
+                ));
+            }
+            Ok(n) => got += n,
+            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+            Err(e) => return Err(e),
+        }
+    }
+    let oid = GitOid::from_bytes(h[..20].try_into().expect("20 bytes"));
+    let size = u64::from_le_bytes(h[20..].try_into().expect("8 bytes"));
+    Ok(Some((oid, size)))
 }

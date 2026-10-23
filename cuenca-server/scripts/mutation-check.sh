@@ -83,7 +83,8 @@ mutate src/authority.rs 'if !known {' 'if false {' --test api
 mutate src/authority.rs 'let head = if caller.sees_fork(fork) {' 'let head = if true {' --test api
 mutate src/authority.rs 'let known = head.as_ref().is_some_and(|set| set.contains(&oid))' 'let known = false' --test api
 mutate src/authority.rs '|| own.is_some_and(|set| set.contains(&oid));' ';' --test api
-mutate src/http.rs 'a.possesses(&c.key.principal, oid);' '' --test api
+mutate src/http.rs 'let info = a.store.ingest_blob(oid, size, content)?;
+            a.possesses(&c.key.principal, oid);' 'let info = a.store.ingest_blob(oid, size, content)?;' --test api
 # History hides drafts fenced into a sibling the caller does not read.
 mutate src/http.rs '!snapshot.fork(sibling)?.is_some_and(|f| c.sees_fork(&f))' 'false' --test api
 # Staging is cleared on open.
@@ -129,5 +130,14 @@ mutate src/http.rs 'let offset = a.guarded(&c.key.principal, || {
 mutate src/http.rs 'let info = a.guarded(&c.key.principal, || {
             let info = a.store.ingest_blob(oid, size, content)?;' 'let info = a.guarded(&cuenca_core::PrincipalName::new("unrevoked").unwrap(), || {
             let info = a.store.ingest_blob(oid, size, content)?;' --test api
+# Batched upload (BRO-3416): its limits, its framing, possession of every blob, and
+# the revocation check right before its commit.
+mutate src/http.rs 'if oids.len() == MAX_BATCH_BLOBS {' 'if false {' --test api a_blob_batch_over
+mutate src/http.rs '    if size > MAX_BATCH_BYTES {' '    if false {' --test api a_blob_batch_over
+mutate src/http.rs 'Ok(0) if got == 0 => return Ok(None),' 'Ok(0) => return Ok(None),' --test api a_blob_batch_is_all
+mutate src/http.rs 'for oid in oids {' 'for oid in oids.into_iter().take(1) {' --test api a_blob_batch_is_stored
+mutate src/http.rs '        a.guarded(&c.key.principal, || {
+            batch.commit()?;' '        a.guarded(&cuenca_core::PrincipalName::new("unrevoked").unwrap(), || {
+            batch.commit()?;' --test api a_write_in_flight
 
 exit $survived

@@ -13,6 +13,7 @@ rust-version.workspace = true
 [dependencies]
 cuenca-tree = { path = "../cuenca-tree" }
 redb.workspace = true
+rustix = { version = "1", features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

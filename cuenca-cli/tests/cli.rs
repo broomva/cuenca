@@ -710,10 +710,9 @@ fn owner_acts_have_no_agent_verb() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
 }
 
-/// Spec row R07: a 1,000-file snapshot is published within 5 s. Not met yet: 11 s on a
-/// Mac, because the authority makes a full sync per blob; batched ingest is BRO-3416.
+/// Spec row R07: a 1,000-file snapshot is published within 5 s. The blobs go up in
+/// batches, each one full sync and one log commit on the authority (BRO-3416).
 #[test]
-#[ignore = "R07 needs batched blob ingest (BRO-3416): 11 s today"]
 fn a_thousand_file_snapshot_publishes_within_5_s() {
     let a = Authority::start();
     let _site = site(&a);
@@ -735,6 +734,33 @@ fn a_thousand_file_snapshot_publishes_within_5_s() {
     assert_eq!(v["flush"]["published"].as_array().unwrap().len(), 1, "{v}");
     eprintln!("R07: 1,000-file snapshot published in {took:?}");
     assert!(took < Duration::from_secs(5), "took {took:?}");
+}
+
+/// A blob too large for an upload batch goes up alone, among small ones that are
+/// batched, and the checkout of the published fork has every byte.
+#[test]
+fn a_blob_larger_than_a_batch_is_uploaded_alone() {
+    let a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    let big: Vec<u8> = (0..17u32 << 20).map(|i| (i % 251) as u8).collect();
+    std::fs::write(co.join("big.bin"), &big).unwrap();
+    for i in 0..300 {
+        std::fs::write(co.join(format!("small{i}.txt")), format!("{i}\n")).unwrap();
+    }
+    let v = a1.ok(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(v["flush"]["published"].as_array().unwrap().len(), 1, "{v}");
+    let again = work.path().join("again");
+    a1.ok(&["checkout", "f1", s(&again)]);
+    assert_eq!(std::fs::read(again.join("big.bin")).unwrap(), big);
+    assert_eq!(
+        std::fs::read_to_string(again.join("small299.txt")).unwrap(),
+        "299\n"
+    );
 }
 
 /// `dir`'s files, recursively, copied into `to`.
