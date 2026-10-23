@@ -303,7 +303,9 @@ fn object(v: Value) -> Arc<JsonObject> {
     }
 }
 
-/// An input schema: an object with exactly these properties.
+/// An input schema: an object with exactly these properties. Which of diff's and log's
+/// forms is given is checked in [`Call::parse`] and said in the tool's description, not
+/// with a top-level `oneOf`/`anyOf`: some hosts refuse a tool list holding one.
 fn input(properties: Value, required: &[&str]) -> Value {
     json!({
         "type": "object",
@@ -311,14 +313,6 @@ fn input(properties: Value, required: &[&str]) -> Value {
         "required": required,
         "additionalProperties": false,
     })
-}
-
-/// `schema` with the forms it accepts beyond its properties (diff's two, log's either).
-fn with_forms(mut schema: Value, forms: Value) -> Value {
-    if let (Value::Object(schema), Value::Object(forms)) = (&mut schema, forms) {
-        schema.extend(forms);
-    }
-    schema
 }
 
 /// An output schema: the verb's own object, or `{ "error": ... }` when it failed.
@@ -481,20 +475,14 @@ pub fn tools() -> Vec<Tool> {
         ),
         (
             "diff",
-            "Show what changed: in the checkout since its last snapshot (give dir), or from tree a to tree b (each a fork name or `location:<name>`).",
-            with_forms(
-                input(
-                    json!({
-                        "dir": dir("a directory inside the checkout"),
-                        "a": { "type": "string", "description": "The tree to compare from." },
-                        "b": { "type": "string", "description": "The tree to compare to." },
-                    }),
-                    &[],
-                ),
-                json!({ "oneOf": [
-                { "required": ["dir"], "not": { "anyOf": [{ "required": ["a"] }, { "required": ["b"] }] } },
-                { "required": ["a", "b"], "not": { "required": ["dir"] } },
-            ] }),
+            "Show what changed: in the checkout since its last snapshot (give dir only), or from tree a to tree b (give a and b only, each a fork name or `location:<name>`).",
+            input(
+                json!({
+                    "dir": dir("a directory inside the checkout"),
+                    "a": { "type": "string", "description": "The tree to compare from." },
+                    "b": { "type": "string", "description": "The tree to compare to." },
+                }),
+                &[],
             ),
             output(
                 json!({ "from": s, "to": s, "changes": changes(), "ignored": strings() }),
@@ -504,13 +492,10 @@ pub fn tools() -> Vec<Tool> {
         ),
         (
             "log",
-            "Show the log records naming a fork (give fork, or dir for the checkout's fork).",
-            with_forms(
-                input(
-                    json!({ "fork": { "type": "string", "description": "The fork." }, "dir": dir("a directory inside a checkout") }),
-                    &[],
-                ),
-                json!({ "anyOf": [{ "required": ["fork"] }, { "required": ["dir"] }] }),
+            "Show the log records naming a fork (give fork, or dir for the checkout's fork; at least one).",
+            input(
+                json!({ "fork": { "type": "string", "description": "The fork." }, "dir": dir("a directory inside a checkout") }),
+                &[],
             ),
             output(
                 json!({ "fork": s, "records": { "type": "array", "items": o } }),

@@ -63,6 +63,11 @@ impl Session {
             .structured_content
             .clone()
             .unwrap_or_else(|| panic!("{tool}: no structured content in {r:?}"));
+        let input = Value::Object((*self.tools[tool].input_schema).clone());
+        assert!(
+            jsonschema::is_valid(&input, &args),
+            "{tool}: {args} fails its input schema"
+        );
         let schema = Value::Object((*self.tools[tool].output_schema.clone().unwrap()).clone());
         let validator = jsonschema::validator_for(&schema).unwrap();
         let errors: Vec<String> = validator.iter_errors(&v).map(|e| e.to_string()).collect();
@@ -103,6 +108,12 @@ async fn an_mcp_client_lists_the_agent_verbs_and_forks_snapshots_and_diffs() {
             assert_eq!(schema["type"], "object", "{name}");
         }
         assert_eq!(input["additionalProperties"], false, "{name}");
+        for combinator in ["oneOf", "anyOf", "allOf"] {
+            assert!(
+                input.get(combinator).is_none(),
+                "{name}: top-level {combinator}"
+            );
+        }
         assert!(tool.description.is_some(), "{name}");
     }
 
@@ -287,8 +298,13 @@ async fn owner_acts_are_no_tools_and_denials_are_structured_errors() {
         let schema = Value::Object((*mcp1.tools[tool].input_schema).clone());
         let e = mcp1.try_call(tool, args.clone()).await.expect_err(tool);
         assert!(e.contains(tool), "{tool} {args}: {e}");
-        // The schema refuses it too, so a client that checks arguments first agrees.
-        assert!(!jsonschema::is_valid(&schema, &args), "{tool} {args}");
+        // The schema refuses it too, except diff's and log's forms, which only the
+        // server checks (no top-level oneOf/anyOf in a tool's input schema).
+        let forms = matches!(tool, "diff" | "log") && args.get("dir").is_none_or(|d| d.is_string());
+        assert!(
+            !jsonschema::is_valid(&schema, &args) || forms,
+            "{tool} {args}"
+        );
     }
 
     // The session is still up.
@@ -296,4 +312,47 @@ async fn owner_acts_are_no_tools_and_denials_are_structured_errors() {
     assert_eq!(v["forks"][0]["name"], "m1", "{v}");
     mcp1.client.cancel().await.unwrap();
     mcp2.client.cancel().await.unwrap();
+}
+
+/// With the authority down, a verb's result says so (`offline`), still within its output
+/// schema, and status reports the authority's error in its own report; a `cuenca mcp`
+/// that cannot start says why on stderr and keeps stdout clean.
+#[tokio::test(flavor = "multi_thread")]
+async fn an_unreachable_authority_is_a_structured_offline_error() {
+    let mut a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    let mcp = Session::start(&a1).await;
+    mcp.ok("fork", json!({ "location": "site", "name": "m1" }))
+        .await;
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("m1");
+    mcp.ok("checkout", json!({ "fork": "m1", "dir": s(&co) }))
+        .await;
+
+    a.down();
+    let (error, v) = mcp.call("forks", json!({})).await;
+    assert!(error, "{v}");
+    assert_eq!(v["error"]["offline"], true, "{v}");
+    let v = mcp.ok("status", json!({ "dir": s(&co) })).await;
+    assert_eq!(v["authority"]["offline"], true, "{v}");
+    std::fs::write(co.join("offline.txt"), "queued\n").unwrap();
+    let v = mcp.ok("snapshot", json!({ "dir": s(&co) })).await;
+    assert_eq!(v["flush"]["offline"], true, "{v}");
+    assert_eq!(v["flush"]["pending"], 1, "{v}");
+    mcp.client.cancel().await.unwrap();
+
+    let out = a1
+        .cmd(&["--json", "mcp"])
+        .env("CUENCA_CONFIG", work.path().join("none.json"))
+        .stdin(std::process::Stdio::null())
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(1));
+    assert!(
+        out.stdout.is_empty(),
+        "{:?}",
+        String::from_utf8_lossy(&out.stdout)
+    );
+    assert!(String::from_utf8_lossy(&out.stderr).contains("not logged in"));
 }

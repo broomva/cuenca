@@ -204,7 +204,15 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Verb::Verify { dir } => verbs::verify(&client()?, &dir)?,
         Verb::Land { dir } => verbs::land(&client()?, &dir)?,
         Verb::Mcp => {
-            let config = Config::load()?;
+            // Standard output is the MCP channel: a startup failure goes to stderr even
+            // under --json.
+            let config = match Config::load() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("cuenca mcp: {e:#}");
+                    return Ok(1);
+                }
+            };
             tokio::runtime::Runtime::new()?.block_on(cuenca_cli::mcp::serve(config))?;
             return Ok(0);
         }
