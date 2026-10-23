@@ -1,6 +1,7 @@
 use cuenca_tree::{Changeset, ContentHash, GitOid};
 use serde::{Deserialize, Serialize};
 
+use crate::checks::{CheckRun, ManifestId};
 use crate::names::{ForkName, LocationName, PrincipalName};
 use crate::owner::{Holder, Writer};
 
@@ -104,6 +105,21 @@ pub enum Event {
         writer: Writer,
         changeset: ChangesetId,
     },
+    /// The fork's holder ran the checks the base declares ([`crate::checks`]) on the
+    /// fork's head changeset, whose target is `candidate`, and reported how they ended.
+    /// `base` is the location's main the checks were read from, `manifest` that tree's
+    /// `.cuenca/checks.toml` as the authority found it (`None`: the base declares no
+    /// checks), and `checks` the base's list, exactly, in order, with each result.
+    /// Advisory in phase 2: it refuses nothing, and the results are the caller's own.
+    VerifyRecorded {
+        fork: ForkName,
+        writer: Writer,
+        changeset: ChangesetId,
+        candidate: GitOid,
+        base: GitOid,
+        manifest: Option<ManifestId>,
+        checks: Vec<CheckRun>,
+    },
 }
 
 impl Event {
@@ -115,7 +131,8 @@ impl Event {
             | Event::DraftPublished { fork, .. }
             | Event::TakenOver { fork, .. }
             | Event::MainAdvanced { fork, .. }
-            | Event::LandingIntent { fork, .. } => vec![fork],
+            | Event::LandingIntent { fork, .. }
+            | Event::VerifyRecorded { fork, .. } => vec![fork],
             Event::DraftFenced { fork, sibling, .. } => vec![fork, sibling],
         }
     }

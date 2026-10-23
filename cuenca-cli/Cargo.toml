@@ -23,7 +23,7 @@ cuenca-server = { path = "../cuenca-server" }
 cuenca-tree = { path = "../cuenca-tree" }
 hex.workspace = true
 rand.workspace = true
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 reqwest = { workspace = true, features = ["blocking", "json"] }
 # MCP for `cuenca mcp`, declared here (BRO-3253): not shared with any other project's rmcp.
 rmcp = { version = "3.6", default-features = false, features = ["server", "transport-io"] }

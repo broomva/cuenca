@@ -13,6 +13,7 @@ use std::collections::{BTreeMap, HashMap};
 use cuenca_tree::{Changeset, GitOid};
 use serde::{Deserialize, Serialize};
 
+use crate::checks::{CheckRun, CheckStatus};
 use crate::error::{CoreError, Result};
 use crate::event::{ChangesetId, Event};
 use crate::names::{ForkName, LocationName, PrincipalName};
@@ -349,6 +350,39 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             state.landing_intent = Some((*id, offset));
             view.put_fork(&state)?;
         }
+        Event::VerifyRecorded {
+            fork: name,
+            writer,
+            changeset: id,
+            candidate,
+            base,
+            manifest: _,
+            checks,
+        } => {
+            let state = fork(view, name)?;
+            check_writer(view, &state, writer)?;
+            if state.head_changeset.map(|(head, _)| head) != Some(*id) {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {
+                return Err(CoreError::Inconsistent(format!(
+                    "verify of {id} names candidate {candidate}, but the fork's head is {}",
+                    state.head
+                )));
+            }
+            let loc = location(view, &state.location)?;
+            if loc.main != *base {
+                return Err(CoreError::BaseMoved {
+                    location: loc.name.to_string(),
+                    main: loc.main,
+                    base: *base,
+                });
+            }
+            checks.iter().try_for_each(check_run)?;
+        }
     }
     Ok(Applied::Fresh)
 }
@@ -410,6 +444,27 @@ pub(crate) fn fenced_target(
             return Ok(sibling);
         }
         (at, epoch) = (sibling, 1);
+    }
+}
+
+/// A run's status and exit code agree: `passed` exited 0, `failed` exited otherwise or
+/// by a signal, and a check that timed out or never started has no exit code.
+fn check_run(run: &CheckRun) -> Result<()> {
+    let ok = match run.status {
+        CheckStatus::Passed => run.exit_code == Some(0),
+        CheckStatus::Failed => run.exit_code != Some(0),
+        CheckStatus::TimedOut | CheckStatus::NotRun => run.exit_code.is_none(),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(CoreError::BadCheckRun {
+            name: run.check.name.clone(),
+            reason: format!(
+                "status {:?} does not go with exit code {:?}",
+                run.status, run.exit_code
+            ),
+        })
     }
 }
 

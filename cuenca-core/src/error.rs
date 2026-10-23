@@ -77,6 +77,20 @@ pub enum CoreError {
     },
     #[error("remote {0:?} is not a plausible git remote")]
     BadRemote(String),
+    #[error(
+        "the main of location {location:?} is at tree {main}, not {base}, the base the checks were read from"
+    )]
+    BaseMoved {
+        location: String,
+        main: GitOid,
+        base: GitOid,
+    },
+    #[error(transparent)]
+    BadManifest(#[from] crate::checks::ManifestError),
+    #[error("the checks reported are not the base's .cuenca/checks.toml: {0}")]
+    ManifestMismatch(String),
+    #[error("check {name:?}: {reason}")]
+    BadCheckRun { name: String, reason: String },
     #[error("log record {offset} is unreadable: {reason}")]
     CorruptLog { offset: u64, reason: String },
     #[error("the tables disagree with a replay of the log: {0}")]

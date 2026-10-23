@@ -47,6 +47,7 @@
 //! same engine, redb, directly.
 
 mod blobs;
+pub mod checks;
 mod error;
 mod event;
 mod names;

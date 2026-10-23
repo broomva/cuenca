@@ -77,7 +77,13 @@ mutate src/http.rs '        visible_location(a, &c, &location)?;
 ' '' --test api
 mutate src/http.rs 'if !snapshot.fork(&name)?.is_some_and(|f| c.sees_fork(&f)) {' 'if false {' --test api
 mutate src/http.rs '        writable_fork(a, &c, &name)?;
-        let writer' '        let writer' --test api
+        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let offset' '        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let offset' --test api
+mutate src/http.rs '        writable_fork(a, &c, &name)?;
+        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let (offset, manifest)' '        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let (offset, manifest)' --test api a_verify_is_recorded
 # A draft names only blobs the caller reads or has sent: no laundering, no oracle.
 mutate src/authority.rs 'if !known {' 'if false {' --test api
 mutate src/authority.rs 'let head = if caller.sees_fork(fork) {' 'let head = if true {' --test api
@@ -139,5 +145,15 @@ mutate src/http.rs 'for oid in oids {' 'for oid in oids.into_iter().take(1) {' -
 mutate src/http.rs '        a.guarded(&c.key.principal, || {
             batch.commit()?;' '        a.guarded(&cuenca_core::PrincipalName::new("unrevoked").unwrap(), || {
             batch.commit()?;' --test api a_write_in_flight
+
+
+# Verify records (BRO-3254): the holder's only, the request pinned, a moved base answered
+# with the main to rerun against.
+mutate src/http.rs '#[serde(deny_unknown_fields)]
+struct Verdict {' 'struct Verdict {' --test api a_verify_is_recorded
+mutate src/http.rs '                        "main": main.to_hex(),' '' --test api a_verify_is_recorded
+mutate src/http.rs '        let (offset, manifest) = a.guarded(&c.key.principal, || {
+            a.store.record_verify(&name, &writer, id, base, req.checks)' '        let (offset, manifest) = a.guarded(&c.key.principal, || {
+            a.store.record_verify(&name, &Writer::new(a.store.fork(&name)?.and_then(|f| f.holder().cloned()).unwrap(), req.epoch), id, base, req.checks)' --test api a_verify_is_recorded
 
 exit $survived

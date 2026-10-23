@@ -114,8 +114,28 @@ struct ForkArgs {' 'struct ForkArgs {' --test mcp owner_acts
 mutate src/mcp.rs '    if dir.is_absolute() {' '    if true {' --test mcp owner_acts
 mutate src/mcp.rs '(Some(_), Some(_), None) | (None, None, Some(_)) => {}' '_ if true => {}' --test mcp owner_acts
 mutate src/mcp.rs '            let mut r = if report.exit == 0 {' '            let mut r = if report.exit < 2 {' --test mcp
-mutate src/mcp.rs '                        error["status"] = json!(status);' '' --test mcp owner_acts
+mutate src/verbs.rs '            v["status"] = json!(status);' '' --test mcp owner_acts
 mutate src/mcp.rs '                .with_raw_output_schema(object(output))' '' --test mcp an_mcp_client
-mutate src/mcp.rs '                    ClientError::Offline { .. } => error["offline"] = json!(true),' '                    ClientError::Offline { .. } => {}' --test mcp an_unreachable
+mutate src/verbs.rs '        ClientError::Offline { .. } => v["offline"] = json!(true),' '        ClientError::Offline { .. } => {}' --test mcp an_unreachable
+
+
+# `cuenca verify` (BRO-3254): the list run is the base's, from the location's main, never
+# the candidate's; a checkout behind its fork verifies nothing; a check past its limit
+# is killed with everything it started; the exit says whether every check passed.
+mutate src/verbs.rs '    let (base, main) = client.location_tree(&f.location)?;' '    let (base, _) = client.location_tree(&f.location)?;
+    let (_, main) = client.fork_tree(&f.name)?;' --test cli rewrites
+mutate src/verbs.rs '    if f.head != ours {
+        bail!(
+            "the fork'"'"'s head is {}, not this checkout'"'"'s last snapshot {ours}; nothing was verified",' '    if false {
+        bail!(
+            "the fork'"'"'s head is {}, not this checkout'"'"'s last snapshot {ours}; nothing was verified",' --test cli verify_refuses
+mutate src/verbs.rs '            (Some(_), all) => i32::from(!all),' '            (Some(_), _) => 0,' --test cli rewrites
+# A refused record keeps the run: it is reported, unrecorded, with its own exit status.
+mutate src/verbs.rs '            (None, _) => 3,' '            (None, _) => 1,' --test cli a_refused_record
+mutate src/verbs.rs '    let recorded = client.verdict(&f.name, local.state.epoch, id, base, &runs);' '    let recorded = Ok::<_, ClientError>(client.verdict(&f.name, local.state.epoch, id, base, &runs)?);' --test cli a_refused_record
+mutate src/verbs.rs '                oid: GitOid::for_blob(b),' '                oid: GitOid::for_blob(b"x"),' --test cli a_refused_record
+mutate src/run.rs '    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);' '' --lib run::
+mutate src/run.rs '            Ok(None) if Instant::now() >= deadline => break None,' '' --lib run::
+mutate src/run.rs '            Some(0) => ended(CheckStatus::Passed, Some(0), output),' '            Some(_) => ended(CheckStatus::Passed, Some(0), output),' --lib run::
 
 exit $survived
