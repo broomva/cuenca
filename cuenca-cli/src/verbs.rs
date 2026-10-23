@@ -516,8 +516,13 @@ pub fn watch(
         // The probe publishes nothing; base paths `.forkignore` names show as a change
         // here, and the snapshot that follows refuses them unless --drop-ignored, which
         // `failed` then reports.
-        let target = match look(&root, &base, &mut cache) {
-            Ok(seen) => seen.target,
+        let (target, clean) = match look(&root, &base, &mut cache) {
+            // Base paths `.forkignore` names are no change unless --drop-ignored is set:
+            // `status` calls such a checkout clean, and so does the watch.
+            Ok(seen) => (
+                seen.target,
+                seen.changes.is_empty() && (seen.ignored.is_empty() || !flags.drop_ignored),
+            ),
             Err(e) => {
                 failed(
                     &mut stuck,
@@ -529,7 +534,7 @@ pub fn watch(
                 continue;
             }
         };
-        if target == base.git_tree_id() {
+        if clean {
             stuck = None;
             first_change = None;
             last_seen = Some(target);

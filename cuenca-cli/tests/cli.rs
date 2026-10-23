@@ -821,6 +821,29 @@ fn a_git_location_with_ignored_paths_is_reported_not_broken() {
     let v = a1.ok(&["status", "--dir", s(&co)]);
     assert_eq!(v["changes"].as_array().unwrap().len(), 0, "{v}");
     assert_eq!(v["ignored"].as_array().unwrap().len(), 2, "{v}");
+    // Watch agrees the checkout is clean: no snapshot attempt, no overdue failure.
+    let watcher = a1
+        .cmd(&[
+            "--json",
+            "snapshot",
+            "--watch",
+            "--max-wait",
+            "1",
+            "--dir",
+            s(&co),
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(4));
+    let mut watcher = watcher;
+    watcher.kill().unwrap();
+    let out = watcher.wait_with_output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        text.trim().is_empty(),
+        "a clean checkout's watch printed: {text}"
+    );
     std::fs::write(co.join("main.js"), "edited\n").unwrap();
     let v = a1.ok(&["diff", "--dir", s(&co)]);
     assert_eq!(v["changes"].as_array().unwrap().len(), 1, "{v}");

@@ -38,9 +38,9 @@ pub struct State {
     pub format: u32,
     /// The checkout's canonical path.
     pub root: PathBuf,
-    /// The root directory's device and inode when it was checked out: a directory
-    /// removed and made again at the same path is not this checkout.
-    pub root_id: (u64, u64),
+    /// The root directory's identity when it was checked out ([`identity`]): a
+    /// directory removed and made again at the same path is not this checkout.
+    pub root_id: Identity,
     /// The authority this checkout was made from.
     pub url: String,
     /// The fork its drafts go to: the one checked out, or the sibling the authority put
@@ -77,11 +77,31 @@ fn dir_for(root: &Path) -> anyhow::Result<PathBuf> {
         .join(hex::encode(&digest[..16])))
 }
 
-/// A directory's device and inode.
-pub fn identity(path: &Path) -> std::io::Result<(u64, u64)> {
+/// Which directory a path names: its device, inode and birth time. The birth time is
+/// what tells a directory made again at the same path apart on Linux, where ext4 hands
+/// a freed inode number straight back out (APFS does not reuse them). On a filesystem
+/// that records no birth time, the inode alone has to do.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Identity {
+    pub dev: u64,
+    pub ino: u64,
+    /// Nanoseconds since the Unix epoch, when the filesystem records it.
+    pub born_ns: Option<u128>,
+}
+
+pub fn identity(path: &Path) -> std::io::Result<Identity> {
     use std::os::unix::fs::MetadataExt as _;
     let m = std::fs::symlink_metadata(path)?;
-    Ok((m.dev(), m.ino()))
+    let born_ns = m
+        .created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos());
+    Ok(Identity {
+        dev: m.dev(),
+        ino: m.ino(),
+        born_ns,
+    })
 }
 
 /// The canonical form of `path`, which may not exist yet (its parent must).
@@ -555,7 +575,11 @@ mod tests {
             state: State {
                 format: FORMAT,
                 root: dir.to_path_buf(),
-                root_id: (0, 0),
+                root_id: Identity {
+                    dev: 0,
+                    ino: 0,
+                    born_ns: None,
+                },
                 url: "http://127.0.0.1:1".into(),
                 fork: ForkName::new("f1").unwrap(),
                 location: LocationName::new("l1").unwrap(),

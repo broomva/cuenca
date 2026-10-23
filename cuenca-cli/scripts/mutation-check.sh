@@ -72,4 +72,8 @@ mutate src/verbs.rs '    let options = SnapshotOptions {
         drop_ignored: true,' '    let options = SnapshotOptions {
         drop_ignored: false,' --test cli a_git_location
 
+# P20 r2 (B, C): base paths .forkignore names are no change to the watch, and a
+# directory made again at a checkout's path is told apart by its birth time.
+mutate src/verbs.rs 'seen.changes.is_empty() && (seen.ignored.is_empty() || !flags.drop_ignored),' 'seen.changes.is_empty() && seen.ignored.is_empty(),' --test cli a_git_location
+
 exit $survived
