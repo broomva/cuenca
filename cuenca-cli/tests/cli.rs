@@ -12,6 +12,14 @@ use serde_json::Value;
 
 const NODE: &str = "nMac11CNTRL";
 
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port()
+}
+
 fn bin() -> &'static str {
     env!("CARGO_BIN_EXE_cuenca")
 }
@@ -36,18 +44,24 @@ impl Authority {
         )
         .unwrap();
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let port = std::net::TcpListener::bind("127.0.0.1:0")
-            .unwrap()
-            .local_addr()
-            .unwrap()
-            .port();
         let mut a = Self {
             dir,
-            port,
+            port: 0,
             child: None,
         };
-        a.up();
-        a
+        // A port found free can be taken by a parallel test before the server binds it:
+        // then the server exits, and another port is tried.
+        for _ in 0..5 {
+            a.port = free_port();
+            if a.try_up().is_ok() {
+                return a;
+            }
+        }
+        panic!("cuenca serve did not come up: {}", a.log());
+    }
+
+    fn log(&self) -> String {
+        std::fs::read_to_string(self.dir.path().join("serve.log")).unwrap_or_default()
     }
 
     fn url(&self) -> String {
@@ -59,7 +73,19 @@ impl Authority {
     }
 
     fn up(&mut self) {
-        let child = Command::new(bin())
+        if let Err(e) = self.try_up() {
+            panic!("cuenca serve did not come up: {e}: {}", self.log());
+        }
+    }
+
+    fn try_up(&mut self) -> Result<(), String> {
+        let _ = std::fs::remove_file(self.socket());
+        let log = std::fs::File::options()
+            .create(true)
+            .append(true)
+            .open(self.dir.path().join("serve.log"))
+            .unwrap();
+        let mut child = Command::new(bin())
             .args(["serve", "--unsafe-bind", "--bind"])
             .arg(format!("127.0.0.1:{}", self.port))
             .arg("--state")
@@ -69,17 +95,25 @@ impl Authority {
             .arg("--tailscale")
             .arg(self.dir.path().join("tailscale"))
             .stdout(Stdio::null())
-            .stderr(Stdio::null())
+            .stderr(log)
             .spawn()
             .unwrap();
-        self.child = Some(child);
         let deadline = Instant::now() + Duration::from_secs(60);
         while std::net::TcpStream::connect(("127.0.0.1", self.port)).is_err()
             || !self.socket().exists()
         {
-            assert!(Instant::now() < deadline, "cuenca serve did not come up");
+            if let Some(status) = child.try_wait().unwrap() {
+                return Err(format!("it exited ({status})"));
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("not up after 60 s".into());
+            }
             std::thread::sleep(Duration::from_millis(50));
         }
+        self.child = Some(child);
+        Ok(())
     }
 
     /// Kill the authority without warning.
@@ -726,8 +760,8 @@ fn a_crash_around_acknowledgement_loses_and_duplicates_nothing() {
     );
 }
 
-/// A file that never holds still fails every scan; watch mode says a snapshot is
-/// overdue, as a failure, rather than staying quiet.
+/// A file no scan can read fails every scan; watch mode says a snapshot is overdue, as
+/// a failure, rather than staying quiet.
 #[test]
 fn watch_mode_reports_a_snapshot_it_cannot_take() {
     let a = Authority::start();
@@ -738,19 +772,9 @@ fn watch_mode_reports_a_snapshot_it_cannot_take() {
     let co = work.path().join("f1");
     a1.ok(&["checkout", "f1", s(&co)]);
 
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let writer = {
-        let stop = stop.clone();
-        let log = co.join("dev.log");
-        std::thread::spawn(move || {
-            use std::io::Write as _;
-            let mut f = std::fs::File::create(log).unwrap();
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                f.write_all(b"a log line\n").unwrap();
-                std::thread::sleep(Duration::from_millis(1));
-            }
-        })
-    };
+    let secret = co.join("unreadable.txt");
+    std::fs::write(&secret, "x").unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
     let out = a1
         .cmd(&[
             "--json",
@@ -768,8 +792,7 @@ fn watch_mode_reports_a_snapshot_it_cannot_take() {
     let mut out = out;
     out.kill().unwrap();
     let output = out.wait_with_output().unwrap();
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    writer.join().unwrap();
+    std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o644)).unwrap();
     let text = String::from_utf8_lossy(&output.stdout);
     assert!(
         text.lines().any(|l| l.contains("\"overdue\":true")),

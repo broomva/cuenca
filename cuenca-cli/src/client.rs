@@ -116,8 +116,14 @@ impl Client {
         })
     }
 
+    /// A request that got no HTTP answer: the authority is unreachable, and whether it
+    /// acted is unknown. Every write the CLI sends is idempotent (a draft by its
+    /// changeset id, an upload by its blob), so the caller keeps it queued and sends it
+    /// again. A refused connection, a timeout, and a connection reset mid-request (what
+    /// Linux gives for an authority killed under a request) all land here; only a
+    /// malformed answer to a successful request is not this.
     fn transport(&self, e: reqwest::Error) -> ClientError {
-        if e.is_connect() || e.is_timeout() || e.is_request() {
+        if !(e.is_decode() || e.is_builder() || e.is_redirect()) {
             ClientError::Offline {
                 url: self.url.clone(),
                 reason: e.to_string(),
