@@ -843,8 +843,7 @@ pub fn verify(client: &Client, dir: &Path) -> anyhow::Result<Report> {
     };
 
     let mut text = format!(
-        "verify of {id} on {}: {passed} of {} check(s) passed, judged by {}
-",
+        "verify of {id} on {}: {passed} of {} check(s) passed, judged by {}\n",
         f.name,
         runs.len(),
         match &manifest_id {
@@ -865,16 +864,12 @@ pub fn verify(client: &Client, dir: &Path) -> anyhow::Result<Report> {
             CheckStatus::NotRun => "FAIL (not run)".to_string(),
         };
         text.push_str(&format!(
-            "  {verdict}  {}  {} ms
-",
+            "  {verdict}  {}  {} ms\n",
             c.check.name, c.duration_ms
         ));
         if c.status != CheckStatus::Passed {
             for line in r.output.lines() {
-                text.push_str(&format!(
-                    "      {line}
-"
-                ));
+                text.push_str(&format!("      {line}\n"));
             }
         }
         let mut v = serde_json::to_value(c)?;
