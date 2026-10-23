@@ -252,4 +252,7 @@ mutate src/gates/policy.rs '        "auto_merge.gates",
     )
     .ok();' --lib
 
+# P20 r6 (A, B): a rule's keys are pinned, so a misspelt action is an error.
+mutate src/gates/policy.rs '                only_keys(rule, &["action", "branch_pattern", "path_touched"], &key)?;' '' --lib
+
 exit $survived

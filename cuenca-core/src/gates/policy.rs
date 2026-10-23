@@ -35,8 +35,9 @@
 //! `auto_merge: ~` is an error here, where p9 reads it as auto-merge switched off:
 //! here it would switch the gates off. Every `auto_merge.rules` item is checked as p9
 //! checks it (an action p9 knows, and exactly one of `branch_pattern` and
-//! `path_touched`), so a misspelt rule is an error rather than a rule that protects
-//! nothing. A policy that cannot be compiled is
+//! `path_touched`), and its keys are pinned to those three, which p9 does not do: a
+//! misspelt `action` would read as `notify`, which protects nothing here. So a
+//! misspelt rule is an error rather than a rule that protects nothing. A policy that cannot be compiled is
 //! reported as a failing `policy` result and the built-in defaults run instead; it
 //! never makes the gates pass.
 //!
@@ -212,6 +213,9 @@ impl Policy {
             for (i, rule) in rules.iter().enumerate() {
                 let key = format!("auto_merge.rules[{i}]");
                 let rule = mapping(Some(rule), &key)?;
+                // A misspelt `action` would read as `notify` and protect nothing (r6, A
+                // and B), so a rule's keys are pinned too.
+                only_keys(rule, &["action", "branch_pattern", "path_touched"], &key)?;
                 let action = string(field(rule, "action"), &format!("{key}.action"))?;
                 let action = action.as_deref().unwrap_or("notify");
                 if !RULE_ACTIONS.contains(&action) {
@@ -715,6 +719,9 @@ cuenca:
             b"auto_merge:\n  gate:\n    governance: {}\n",
             b"auto_merge:\n  gates:\n    governanse: {}\n",
             b"cuenca:\n  gate: {max_file_bytes: 1}\n",
+            // ... and inside a rule (r6, A and B): `actoin` would read as `notify`.
+            b"auto_merge:\n  rules:\n    - {path_touched: .control/policy.yaml, actoin: require_human}\n",
+            b"auto_merge:\n  rules:\n    - path_touched: /CLAUDE.md\n      Action: require_human\n",
             b"cuenca:\n  gates:\n",
             b"auto_merge:\n  rules:\n",
             b"auto_merge: !!int nope\n",
