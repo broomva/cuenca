@@ -325,6 +325,18 @@ fn publishes_and_landing_intents_are_idempotent() {
     assert_eq!(again["offset"], first["offset"]);
     let id = first["id"].as_str().unwrap();
     let body = json!({ "epoch": 1, "changeset": id });
+    // Not before a verify of the head against main.
+    let r = s.post(&c.a1, "/v1/forks/f1/landing", body.clone());
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.json::<Value>().unwrap()["error"], "not_verified");
+    let l1 = cuenca_core::LocationName::new("l1").unwrap();
+    let main = s.authority.store().location(&l1).unwrap().unwrap().main;
+    let verdict = json!({ "epoch": 1, "changeset": id, "base": main.to_hex(), "checks": [] });
+    assert!(
+        s.post(&c.a1, "/v1/forks/f1/verdicts", verdict)
+            .status()
+            .is_success()
+    );
     let one: Value = s
         .post(&c.a1, "/v1/forks/f1/landing", body.clone())
         .json()
@@ -333,6 +345,7 @@ fn publishes_and_landing_intents_are_idempotent() {
         .post(&c.a1, "/v1/forks/f1/landing", body.clone())
         .json()
         .unwrap();
+    assert!(one["offset"].is_u64(), "{one}");
     assert_eq!(one["offset"], two["offset"]);
     // A reader that does not hold the fork cannot ask to land it.
     s.whois.node(NB);
@@ -544,6 +557,7 @@ fn the_authority_refuses_a_non_tailnet_bind() {
             admin_socket: dir.path().join("admin.sock"),
             unsafe_bind: false,
             tailscale: "tailscale".into(),
+            gh: "gh".into(),
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt.block_on(cuenca_server::run(config)).unwrap_err();

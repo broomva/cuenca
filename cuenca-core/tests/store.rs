@@ -311,11 +311,20 @@ fn main_advances_by_compare_and_swap() {
     let g1 = write(&store, &main, &[("a", b"g")]);
     let pf = store.publish_draft(&fork("f"), &w1(), &f1).unwrap();
     let pg = store.publish_draft(&fork("g"), &w1(), &g1).unwrap();
+    // Main moves only by a landing request.
+    assert!(matches!(
+        store.advance_main(&fork("f"), pf.id),
+        Err(CoreError::NoLanding { .. })
+    ));
+    for (f, id) in [("f", pf.id), ("g", pg.id)] {
+        verify(&store, &fork(f), &w1(), id);
+        store.record_landing_intent(&fork(f), &w1(), id).unwrap();
+    }
 
-    // Only the fork's head can move main.
+    // Only the fork's own request can move main.
     assert!(matches!(
         store.advance_main(&fork("g"), pf.id),
-        Err(CoreError::NotHead { .. })
+        Err(CoreError::NoLanding { .. })
     ));
     let at = store.advance_main(&fork("f"), pf.id).unwrap();
     assert_eq!(store.main_tree(&loc("l")).unwrap().git_tree_id(), f1.target);
@@ -331,7 +340,7 @@ fn main_advances_by_compare_and_swap() {
     // Another fork asking for the move f made is not a retry of it.
     assert!(matches!(
         store.advance_main(&fork("g"), pf.id),
-        Err(CoreError::NotHead { .. })
+        Err(CoreError::NoLanding { .. })
     ));
     // Something else is appended; a retry still answers with the move's own offset.
     store.create_fork(&fork("h"), &loc("l"), &agent()).unwrap();
@@ -364,6 +373,12 @@ fn a_landing_intent_names_the_head_and_a_retry_appends_nothing() {
         store.record_landing_intent(&fork("f"), &w1(), unknown),
         Err(CoreError::NotHead { .. })
     ));
+    // The head must be verified against main first.
+    assert!(matches!(
+        store.record_landing_intent(&fork("f"), &w1(), p.id),
+        Err(CoreError::NotVerified { .. })
+    ));
+    verify(&store, &fork("f"), &w1(), p.id);
     let at = store
         .record_landing_intent(&fork("f"), &w1(), p.id)
         .unwrap();
@@ -376,9 +391,10 @@ fn a_landing_intent_names_the_head_and_a_retry_appends_nothing() {
         at
     );
     assert_eq!(store.len().unwrap(), len);
+    let landing = store.fork(&fork("f")).unwrap().unwrap().landing.unwrap();
     assert_eq!(
-        store.fork(&fork("f")).unwrap().unwrap().landing_intent,
-        Some((p.id, at))
+        (landing.changeset, landing.offset, landing.step),
+        (p.id, at, cuenca_core::LandingStep::Requested)
     );
 }
 
@@ -420,10 +436,7 @@ fn state_survives_reopen_and_matches_a_replay_of_the_log() {
         )
         .unwrap();
         let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
-        store
-            .record_landing_intent(&fork("f"), &w1(), p.id)
-            .unwrap();
-        store.advance_main(&fork("f"), p.id).unwrap();
+        land(&store, &fork("f"), &w1(), p.id);
         (cs, p.id)
     };
     let store = Store::open(dir.path()).unwrap();
@@ -437,10 +450,10 @@ fn state_survives_reopen_and_matches_a_replay_of_the_log() {
             summary.forks,
             summary.changesets
         ),
-        (5, 1, 1, 1)
+        (6, 1, 1, 1)
     );
     let records = store.records(0, 100).unwrap();
-    assert_eq!(records.len(), 5);
+    assert_eq!(records.len(), 6);
     assert!(
         records
             .iter()
@@ -544,11 +557,11 @@ fn main_follows_a_fork_draft_by_draft() {
         let head = store.fork_head(&fork("f")).unwrap();
         let cs = write(&store, &head, &[("a", &[b'0' + n])]);
         let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
-        let at = store.advance_main(&fork("f"), p.id).unwrap();
-        assert_eq!(at, p.offset + 1, "draft {n} moved main");
+        let at = land(&store, &fork("f"), &w1(), p.id);
+        assert_eq!(at, p.offset + 3, "draft {n} moved main");
         assert_eq!(store.main_tree(&loc("l")).unwrap().git_tree_id(), cs.target);
     }
-    assert_eq!(store.replay_check().unwrap().records, 8);
+    assert_eq!(store.replay_check().unwrap().records, 14);
 }
 
 /// A snapshot keeps seeing the store as it was when it was taken, across later writes.

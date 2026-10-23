@@ -91,6 +91,25 @@ pub enum CoreError {
     ManifestMismatch(String),
     #[error("check {name:?}: {reason}")]
     BadCheckRun { name: String, reason: String },
+    #[error(
+        "changeset {changeset} of fork {fork:?} has no verify against its location's main; run `cuenca verify` first"
+    )]
+    NotVerified { fork: String, changeset: String },
+    #[error("fork {fork:?} has no landing request for {changeset}")]
+    NoLanding { fork: String, changeset: String },
+    #[error("the landing of {changeset} from fork {fork:?} is {step}, not {want}")]
+    LandingStep {
+        fork: String,
+        changeset: String,
+        step: String,
+        want: String,
+    },
+    #[error(
+        "location {0:?} has a git remote: it lands through a pull request, never by moving main"
+    )]
+    HasRemote(String),
+    #[error("location {0:?} has no git remote: the owner lands it with `cuenca admin land`")]
+    NoRemote(String),
     #[error("log record {offset} is unreadable: {reason}")]
     CorruptLog { offset: u64, reason: String },
     #[error("the tables disagree with a replay of the log: {0}")]

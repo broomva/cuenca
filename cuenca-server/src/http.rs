@@ -11,8 +11,9 @@
 //! the fork. A draft may only name blobs the caller could read or has uploaded
 //! ([`Authority::check_puts`]).
 //!
-//! Minting and revoking keys, registering a location and taking a fork over have no
-//! route here: they are owner acts, on the admin socket only.
+//! Minting and revoking keys, registering a location, taking a fork over and landing
+//! on a location without a git remote have no route here: they are owner acts, on the
+//! admin socket only.
 //!
 //! | Method | Path | Does |
 //! |---|---|---|
@@ -28,6 +29,7 @@
 //! | GET | `/v1/forks/{fork}/history` | the log records naming the fork (and only forks the caller reads) |
 //! | POST | `/v1/forks/{fork}/drafts` | `{epoch, changeset}`: publish a draft |
 //! | POST | `/v1/forks/{fork}/landing` | `{epoch, changeset}` (an id): ask to land |
+//! | GET | `/v1/forks/{fork}/landing` | the fork's landing request, its step, and the error it is being retried for |
 //! | POST | `/v1/forks/{fork}/verdicts` | `{epoch, changeset, base, checks}`: record a verify ([`cuenca_core::checks`]) |
 //! | PUT | `/v1/blobs/{oid}` | upload a blob; `Content-Length` is its size |
 //! | POST | `/v1/blobs` | upload a batch of blobs ([`batch_header`]), all or none |
@@ -90,7 +92,7 @@ pub fn router(authority: Arc<Authority>) -> Router {
         .route("/v1/forks/{fork}/blobs/{oid}", get(fork_blob))
         .route("/v1/forks/{fork}/history", get(history))
         .route("/v1/forks/{fork}/drafts", post(publish))
-        .route("/v1/forks/{fork}/landing", post(landing))
+        .route("/v1/forks/{fork}/landing", post(landing).get(landing_state))
         .route("/v1/forks/{fork}/verdicts", post(verdict))
         .route(
             "/v1/blobs/{oid}",
@@ -220,6 +222,11 @@ impl From<CoreError> for ApiError {
             | CoreError::UnknownChangeset(_) => return Self::not_found(),
             CoreError::LocationExists(_) | CoreError::ForkExists(_) => (S::CONFLICT, "exists"),
             CoreError::NotHead { .. } => (S::CONFLICT, "not_head"),
+            CoreError::NotVerified { .. } => (S::CONFLICT, "not_verified"),
+            CoreError::NoLanding { .. } | CoreError::LandingStep { .. } => {
+                (S::CONFLICT, "landing_step")
+            }
+            CoreError::HasRemote(_) | CoreError::NoRemote(_) => (S::CONFLICT, "remote"),
             CoreError::StaleEpoch { .. } => (S::CONFLICT, "stale_epoch"),
             CoreError::EpochMismatch { .. } => (S::CONFLICT, "epoch_mismatch"),
             CoreError::NotHolder { .. } => (S::FORBIDDEN, "not_holder"),
@@ -499,7 +506,27 @@ async fn landing(
         let offset = a.guarded(&c.key.principal, || {
             a.store.record_landing_intent(&name, &writer, id)
         })?;
+        a.wake_lander();
         Ok(Json(json!({ "offset": offset })))
+    })
+    .await
+}
+
+/// The fork's latest landing request, where it is, and the error the lander last hit
+/// on it while it retries (`null` if none).
+async fn landing_state(State(a): Shared, Extension(c): Me, Path(fork): Path<String>) -> ApiResult {
+    let name = parse(&fork, ForkName::new)?;
+    blocking(&a, move |a| {
+        let f = visible_fork(a, &c, &name)?;
+        let remote = a
+            .store
+            .location(&f.location)?
+            .is_some_and(|l| l.remote.is_some());
+        Ok(Json(json!({
+            "landing": f.landing,
+            "remote": remote,
+            "error": a.landing_errors.get(&name),
+        })))
     })
     .await
 }

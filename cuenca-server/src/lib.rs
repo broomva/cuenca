@@ -11,8 +11,10 @@
 //!   principal, that `tailscale whois` names the request's source as the key's node, and
 //!   that the node serves no subnet route. Reads are scoped to what the key may read.
 //! - **owner acts** ([`admin`]): a local Unix socket, mode 0600, answering only its own
-//!   OS user. Minting and revoking keys, registering locations and taking forks over
-//!   live only there.
+//!   OS user. Minting and revoking keys, registering locations, taking forks over and
+//!   landing on a location without a git remote live only there.
+//! - **landing** ([`land`]): a thread that exports each landing request on a location
+//!   with a git remote as a branch and a GitHub pull request.
 //!
 //! The authority binds only a tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48)
 //! unless told `unsafe_bind`.
@@ -40,6 +42,7 @@ mod authority;
 pub mod http;
 mod identity;
 mod keys;
+pub mod land;
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;
@@ -62,6 +65,8 @@ pub struct Config {
     pub unsafe_bind: bool,
     /// The `tailscale` binary.
     pub tailscale: PathBuf,
+    /// The `gh` binary landing opens pull requests with ([`land`]).
+    pub gh: PathBuf,
 }
 
 /// Whether `ip` is in Tailscale's address ranges: 100.64.0.0/10 and
@@ -113,6 +118,10 @@ pub async fn run(config: Config) -> anyhow::Result<()> {
         Arc::new(tokio::task::spawn_blocking(move || Authority::open(&state, whois)).await??);
     let listener = tokio::net::TcpListener::bind(config.bind).await?;
     let admin = admin::bind(&config.admin_socket)?;
+    let _lander = land::Lander::spawn(
+        authority.clone(),
+        land::LandConfig::new(config.state.join("git"), config.gh.clone()),
+    )?;
     tracing::info!(bind = %config.bind, admin = %config.admin_socket.display(), "cuenca authority up");
     tokio::select! {
         r = serve_http(listener, authority.clone()) => r?,

@@ -2,15 +2,15 @@
 //! (`cuenca_server::admin`). Only the binary has this module: the agent verbs the MCP
 //! server reuses live in the library and cannot reach it.
 //!
-//! Landing a location without a remote and bypassing a gate are owner acts too; they
-//! arrive with landing (BRO-3255) and the blocking gates (BRO-3307).
+//! Landing on a location without a remote is one (`cuenca admin land`); bypassing a
+//! gate is another, and arrives with the blocking gates (BRO-3307).
 
 use std::path::PathBuf;
 
 use anyhow::bail;
 use clap::{Args, Subcommand, ValueEnum};
 use cuenca_cli::Report;
-use cuenca_core::{ForkName, LocationName, NodeId, PrincipalName};
+use cuenca_core::{ChangesetId, ForkName, LocationName, NodeId, PrincipalName};
 use cuenca_server::admin::{AdminRequest, GitSource, call};
 use cuenca_server::{Grant, PrincipalKind};
 
@@ -31,6 +31,15 @@ enum Act {
     /// Register locations.
     #[command(subcommand)]
     Location(LocationAct),
+    /// Land a fork's landing request on a location without a git remote: main moves by
+    /// its changeset, and the earlier main stays in the log. Read its `cuenca diff` and
+    /// `cuenca log` (the verify record) first.
+    Land {
+        fork: String,
+        /// The changeset you read; refused if the request is for another.
+        #[arg(long)]
+        changeset: Option<String>,
+    },
     /// Move a fork to a new holder, by compare-and-swap on its epoch.
     TakeOver {
         fork: String,
@@ -144,6 +153,12 @@ pub fn run(a: Admin) -> anyhow::Result<Report> {
             remote,
             git: git.map(|repo| GitSource { repo, rev }),
             dir: dir.map(std::fs::canonicalize).transpose()?,
+        },
+        Act::Land { fork, changeset } => AdminRequest::Land {
+            fork: named(fork, ForkName::new)?,
+            changeset: changeset
+                .map(|c| named(c, |c| ChangesetId::from_hex(&c)))
+                .transpose()?,
         },
         Act::TakeOver {
             fork,

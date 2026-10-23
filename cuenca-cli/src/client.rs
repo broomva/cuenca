@@ -307,6 +307,12 @@ impl Client {
         Ok(o.offset)
     }
 
+    /// The fork's landing request and where it is (`GET /v1/forks/{fork}/landing`):
+    /// `{landing, remote, error}`.
+    pub fn landing_state(&self, fork: &ForkName) -> Result<serde_json::Value> {
+        self.get(&format!("/v1/forks/{fork}/landing"))
+    }
+
     /// Record a verify of `id`, the fork's head, run against `base` (the location's
     /// main): the record's offset, and the manifest the authority judged it by.
     pub fn verdict(

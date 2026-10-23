@@ -122,6 +122,22 @@ fn every_agent_verb_works_on_a_plain_directory() {
 
     let v = a1.ok(&[&["land"][..], &dir].concat());
     assert_eq!(v["status"], "requested", "{v}");
+    assert_eq!(v["waiting_for"], "owner", "{v}");
+    // The location has no git remote: main moves only when the owner lands it.
+    let before = a1.head_of_location("site");
+    assert_ne!(before, a1.head("f1"));
+    let out = a.admin(&[
+        "land",
+        "f1",
+        "--changeset",
+        v["changeset"].as_str().unwrap(),
+    ]);
+    let landed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(landed["main"], a1.head("f1").as_str(), "{landed}");
+    assert_eq!(a1.head_of_location("site"), a1.head("f1"));
+    let v = a1.ok(&[&["status"][..], &dir].concat());
+    assert_eq!(v["authority"]["landing"]["step"]["step"], "landed", "{v}");
+    assert_eq!(a1.records("f1").last().unwrap(), "main_advanced");
 
     // The human output works too.
     let out = a1.cmd(&["status", "--dir", s(&co)]).output().unwrap();
@@ -916,13 +932,24 @@ fn gated_site(a: &Authority, name: &str, manifest: &str) -> tempfile::TempDir {
     site
 }
 
-/// Spec rev 2.2 row "a candidate that edits its own .cuenca/checks.toml to pass while
-/// breaking the base tree's check": verify runs the base's list, 10 of 10 variants, and
-/// the record names the base manifest's hash.
+/// Spec rev 2.2 row "`cuenca land` on a fork whose candidate edits its own
+/// .cuenca/checks.toml to pass while breaking the base tree's check": verify runs the
+/// base's list, 10 of 10 variants, and the record names the base manifest's hash; on a
+/// location with a git remote, land then opens a pull request (GitHub's required checks
+/// gate its merge), whose body carries the base's failing result.
 #[test]
 fn a_candidate_that_rewrites_its_checks_is_judged_by_the_bases_10_of_10() {
-    let a = Authority::start();
-    let _site = gated_site(&a, "gated", GATED);
+    let up = Upstream::new(&[(".cuenca/checks.toml", GATED), ("README", "gated\n")]);
+    let a = Authority::start_landing(&up);
+    a.admin(&[
+        "location",
+        "add",
+        "gated",
+        "--git",
+        s(&up.work),
+        "--remote",
+        UPSTREAM_URL,
+    ]);
     let a1 = Agent::login(&a, &a.mint("a1", &["--location", "gated"]));
     let base_manifest = cuenca_tree::GitOid::for_blob(GATED.as_bytes()).to_hex();
     let passing = "[[check]]\nname = \"gate\"\nargv = [\"true\"]\n\n[[check]]\nname = \"ok\"\nargv = [\"true\"]\n";
@@ -1024,7 +1051,24 @@ fn a_candidate_that_rewrites_its_checks_is_judged_by_the_bases_10_of_10() {
             "verify_recorded",
             "{what}: {records:?}"
         );
+
+        // The verify failed, and land opens a pull request all the same.
+        let v = a1.ok(&[&["land"][..], &dir].concat());
+        assert_eq!(v["status"], "in_review", "{what}: {v}");
+        assert_eq!(v["pr"], i + 1, "{what}: {v}");
+        let branch = format!("cp/{}", v["changeset"].as_str().unwrap());
+        assert_eq!(
+            git(&up.remote, &["rev-parse", &format!("{branch}^{{tree}}")]),
+            a1.head(&fork),
+            "{what}: the PR's tree is the draft's"
+        );
+        let body = up.body(&branch);
+        assert!(
+            body.contains("`gate` failed, `ok` passed"),
+            "{what}: {body}"
+        );
     }
+    assert_eq!(up.creates().len(), 10, "one pull request per fork");
 }
 
 fn write(root: &Path, path: &str, content: &str) {
@@ -1161,4 +1205,44 @@ fn verify_refuses_a_checkout_behind_its_fork_and_a_fork_with_no_draft() {
         "{v}"
     );
     assert_eq!(a1.records("f").last().unwrap(), "draft_published");
+}
+
+/// A landing the authority cannot carry out (the location's main is a directory whose
+/// tree no commit of the remote has) is reported as failed, with its reason, and exits 1.
+#[test]
+fn land_reports_a_failed_landing_and_exits_1() {
+    let up = Upstream::new(&[("README", "upstream\n")]);
+    let a = Authority::start_landing(&up);
+    let site = tempfile::tempdir().unwrap();
+    std::fs::write(site.path().join("README"), "not upstream\n").unwrap();
+    a.admin(&[
+        "location",
+        "add",
+        "elsewhere",
+        "--dir",
+        s(site.path()),
+        "--remote",
+        UPSTREAM_URL,
+    ]);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "elsewhere"]));
+    a1.ok(&["fork", "elsewhere", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    std::fs::write(co.join("README"), "edited\n").unwrap();
+    let dir = ["--dir", s(&co)];
+    a1.ok(&[&["snapshot"][..], &dir].concat());
+    // Not before a verify.
+    let (code, v) = a1.run(&[&["land"][..], &dir].concat());
+    assert_ne!(code, 0, "{v}");
+    assert!(v.to_string().contains("verify"), "{v}");
+    a1.ok(&[&["verify"][..], &dir].concat());
+    let (code, v) = a1.run(&[&["land"][..], &dir].concat());
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["status"], "failed", "{v}");
+    assert!(
+        v["reason"].as_str().unwrap().contains("not on the remote"),
+        "{v}"
+    );
+    assert!(up.creates().is_empty());
 }

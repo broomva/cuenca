@@ -506,14 +506,12 @@ fn a_takeover_drops_the_old_holders_landing_intent() {
     let (_d, store, main) = forked();
     let cs = write(&store, &main, &[("a", b"2")]);
     let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
+    verify(&store, &fork("f"), &w1(), p.id);
     store
         .record_landing_intent(&fork("f"), &w1(), p.id)
         .unwrap();
     store.take_over(&fork("f"), 1, &owner()).unwrap();
-    assert_eq!(
-        store.fork(&fork("f")).unwrap().unwrap().landing_intent,
-        None
-    );
+    assert_eq!(store.fork(&fork("f")).unwrap().unwrap().landing, None);
     // The new holder asking for the same landing is a new intent, not a retry.
     let len = store.len().unwrap();
     let at = store
