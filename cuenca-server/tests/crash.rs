@@ -149,6 +149,7 @@ fn kill_during_publish() {
         name: cuenca_core::LocationName::new("l").unwrap(),
         remote: None,
         git: None,
+        dir: None,
     });
     let v = call(cuenca_server::admin::AdminRequest::KeyMint {
         principal: "agent".parse_name(),

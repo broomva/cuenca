@@ -48,15 +48,17 @@ pub enum AdminRequest {
     },
     KeyList,
     /// Register a location. Its main is the tree of `git` (a repository on the
-    /// authority's host, read through the git bridge, every blob checked), or empty.
-    /// A directory that is not a git repository is registered through cuenca-fs
-    /// (BRO-3252).
+    /// authority's host, read through the git bridge, every blob checked), or a snapshot
+    /// of `dir` (any directory on the authority's host, read by cuenca-fs under its
+    /// `.forkignore`), or empty. At most one of the two.
     LocationAdd {
         name: LocationName,
         #[serde(default)]
         remote: Option<String>,
         #[serde(default)]
         git: Option<GitSource>,
+        #[serde(default)]
+        dir: Option<PathBuf>,
     },
     /// Move a fork to `holder` by compare-and-swap on its epoch.
     TakeOver {
@@ -199,10 +201,17 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
         }
         AdminRequest::KeyRevoke { principal } => revoke(a, &principal, |p| a.store.revoke(p)),
         AdminRequest::KeyList => Ok(json!({ "keys": a.keys.list() })),
-        AdminRequest::LocationAdd { name, remote, git } => {
-            let tree = match git {
-                None => Tree::new(),
-                Some(GitSource { repo, rev }) => {
+        AdminRequest::LocationAdd {
+            name,
+            remote,
+            git,
+            dir,
+        } => {
+            let tree = match (git, dir) {
+                (Some(_), Some(_)) => return Err("give git or dir, not both".into()),
+                (None, None) => Tree::new(),
+                (None, Some(dir)) => snapshot_dir(a, &dir)?,
+                (Some(GitSource { repo, rev }), None) => {
                     let repo = cuenca_tree::git::Repo::open(repo);
                     let tree = repo.read_tree(&rev).map_err(|e| s(&e))?;
                     for (oid, content) in repo.read_tree_blobs(&tree).map_err(|e| s(&e))? {
@@ -233,6 +242,28 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             Ok(json!({ "epoch": epoch }))
         }
     }
+}
+
+/// Snapshot `dir` against an empty tree and ingest every blob it names. The store
+/// hashes each file as it ingests it, so a file that changed since the scan is refused
+/// (`OidMismatch`) and nothing is registered: run it again.
+fn snapshot_dir(a: &Authority, dir: &Path) -> Result<Tree, String> {
+    let snap = cuenca_fs::snapshot(dir, &Tree::new(), &mut cuenca_fs::StatCache::new())
+        .map_err(|e| e.to_string())?;
+    for blob in &snap.new_blobs {
+        let ingested = match &blob.content {
+            cuenca_fs::Content::File(path) => {
+                let file =
+                    std::fs::File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
+                a.store.ingest_blob(blob.oid, blob.size, file)
+            }
+            cuenca_fs::Content::Inline(bytes) => {
+                a.store.ingest_blob(blob.oid, blob.size, bytes.as_slice())
+            }
+        };
+        ingested.map_err(|e| e.to_string())?;
+    }
+    Ok(snap.tree)
 }
 
 /// Revoke `principal`: in memory first, so the key is refused from its next request
