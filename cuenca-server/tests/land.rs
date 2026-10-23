@@ -84,6 +84,10 @@ fn requested(s: &Server, up: &Upstream, remote: Option<&str>) -> (String, Change
 }
 
 fn verify_and_ask(s: &Server, token: &str, fork: &str, id: ChangesetId) {
+    verify_and_ask_at(s, token, fork, 1, id)
+}
+
+fn verify_and_ask_at(s: &Server, token: &str, fork: &str, epoch: u64, id: ChangesetId) {
     let state: Value = s.get(token, &format!("/v1/forks/{fork}")).json().unwrap();
     let location = LocationName::new(state["location"].as_str().unwrap()).unwrap();
     let main = s
@@ -96,13 +100,13 @@ fn verify_and_ask(s: &Server, token: &str, fork: &str, id: ChangesetId) {
     let r = s.post(
         token,
         &format!("/v1/forks/{fork}/verdicts"),
-        json!({ "epoch": 1, "changeset": id.to_hex(), "base": main.to_hex(), "checks": [] }),
+        json!({ "epoch": epoch, "changeset": id.to_hex(), "base": main.to_hex(), "checks": [] }),
     );
     assert_eq!(r.status(), 200, "{}", r.text().unwrap());
     let r = s.post(
         token,
         &format!("/v1/forks/{fork}/landing"),
-        json!({ "epoch": 1, "changeset": id.to_hex() }),
+        json!({ "epoch": epoch, "changeset": id.to_hex() }),
     );
     assert_eq!(r.status(), 200, "{}", r.text().unwrap());
 }
@@ -254,14 +258,17 @@ fn a_branch_that_is_someone_elses_fails_the_landing() {
     let tmp = tempfile::tempdir().unwrap();
     let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
     let (_a1, id) = requested(&s, &up, Some(&up.url));
-    // Someone pushed cp/<id> first, at main.
+    // Someone pushed cp/<id> first: a commit onto main (so its parent's tree is the
+    // base), but not the draft's tree.
+    std::fs::write(up.work.join("README"), "someone else\n").unwrap();
+    git(&up.work, &["commit", "-q", "-am", "theirs"]);
     git(
         &up.work,
         &[
             "push",
             "-q",
             up.remote.to_str().unwrap(),
-            &format!("main:refs/heads/cp/{id}"),
+            &format!("HEAD:refs/heads/cp/{id}"),
         ],
     );
     let lander = Lander::spawn(
@@ -277,7 +284,8 @@ fn a_branch_that_is_someone_elses_fails_the_landing() {
     };
     assert!(reason.contains("someone else's branch"), "{reason}");
     assert!(up.creates().is_empty());
-    assert_eq!(steps(s.authority.store()), [1, 0, 0, 0, 1]);
+    // Judged before any export intent: nothing was pushed, nothing intended.
+    assert_eq!(steps(s.authority.store()), [0, 0, 0, 0, 1]);
     drop(lander);
 }
 
@@ -370,6 +378,126 @@ fn without_a_remote_the_request_waits_for_the_owner_10_of_10() {
     assert!(up.creates().is_empty());
     store.replay_check().unwrap();
     drop(lander);
+}
+
+const NB: &str = "nLandB22CNTRL";
+
+/// A changeset exported once is the same export for every later landing of it: after a
+/// takeover drops the first request, and from another fork with the same edit. Each
+/// reaches review on the one branch and pull request; none fails.
+#[test]
+fn a_changeset_landed_again_reuses_its_export_and_pull_request() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (a1, id) = requested(&s, &up, Some(&up.url));
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
+    wait_for(s.authority.store(), &f1(), in_review);
+    // The owner moves f1 to a2, who asks to land the same head.
+    let a2 = s.mint("a2", PrincipalKind::Agent, NB, grant(&["l1"], &[]));
+    let v = s.admin(AdminRequest::TakeOver {
+        fork: f1(),
+        expected_epoch: 1,
+        principal: PrincipalName::new("a2").unwrap(),
+        node: NodeId::new(NB).unwrap(),
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    s.whois.node(NB);
+    verify_and_ask_at(&s, &a2, "f1", 2, id);
+    let step = wait_for(s.authority.store(), &f1(), |st| {
+        in_review(st) || matches!(st, LandingStep::Failed { .. })
+    });
+    assert!(
+        matches!(step, LandingStep::InReview { pr: 1, .. }),
+        "{step:?}"
+    );
+    // Another fork with the same edit: the same changeset, the same export.
+    s.whois.node(NA);
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f2", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let head = s.fork_head(&a1, "f2");
+    let cs = s.write(
+        &a1,
+        &head,
+        &[("README", b"landed\n"), ("new/file.txt", b"new\n")],
+    );
+    let r: Value = s.publish(&a1, "f2", 1, &cs).json().unwrap();
+    assert_eq!(r["id"], id.to_hex(), "the same edit is the same changeset");
+    verify_and_ask(&s, &a1, "f2", id);
+    let f2 = ForkName::new("f2").unwrap();
+    let step = wait_for(s.authority.store(), &f2, |st| {
+        in_review(st) || matches!(st, LandingStep::Failed { .. })
+    });
+    assert!(
+        matches!(step, LandingStep::InReview { pr: 1, .. }),
+        "{step:?}"
+    );
+    assert_eq!(up.creates().len(), 1, "one pull request");
+    assert_eq!(steps(s.authority.store())[4], 0, "nothing failed");
+    s.authority.store().replay_check().unwrap();
+}
+
+/// A git or gh call that hangs is killed after the timeout and retried, with the
+/// error shown to the agent, and the landing goes on once the call answers.
+#[test]
+fn a_hung_call_is_killed_and_retried() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (a1, _id) = requested(&s, &up, Some(&up.url));
+    let hang = tmp.path().join("gh-hangs");
+    let flag = tmp.path().join("hang");
+    std::fs::write(&flag, "").unwrap();
+    std::fs::write(
+        &hang,
+        format!(
+            // Hangs while the flag is there, 30 s at most, so a failing test still ends.
+            "#!/bin/sh\ni=0\nwhile [ -f '{}' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done\nexec '{}' \"$@\"\n",
+            flag.display(),
+            up.gh.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&hang, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.gh = hang;
+    // Long enough for the local git calls on a loaded machine; the hang is gh's.
+    config.timeout = Duration::from_secs(5);
+    let _lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    let start = Instant::now();
+    let error = loop {
+        let v: Value = s.get(&a1, "/v1/forks/f1/landing").json().unwrap();
+        if let Some(e) = v["error"].as_str() {
+            break e.to_string();
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "{v}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(
+        error.starts_with("gh pr list did not end within 5 s"),
+        "{error}"
+    );
+    assert_eq!(
+        s.authority
+            .store()
+            .fork(&f1())
+            .unwrap()
+            .unwrap()
+            .landing
+            .unwrap()
+            .step
+            .name(),
+        "reviewing"
+    );
+    std::fs::remove_file(&flag).unwrap();
+    wait_for(s.authority.store(), &f1(), in_review);
+    let v: Value = s.get(&a1, "/v1/forks/f1/landing").json().unwrap();
+    assert_eq!(v["error"], Value::Null, "{v}");
+    assert_eq!(up.creates().len(), 1);
 }
 
 // ---- kill the authority at each landing step -----------------------------------------

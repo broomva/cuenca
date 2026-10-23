@@ -173,4 +173,11 @@ mutate src/land.rs '            let Some(remote) = location.remote.clone() else 
 mutate src/admin.rs '                && expected != requested' '                && false' --test land without_a_remote
 mutate src/http.rs '            CoreError::NotVerified { .. } => (S::CONFLICT, "not_verified"),' '' --test api publishes_and
 
+mutate src/land.rs '            && tree_of(ids[0])? == changeset.target.to_hex()' '' --test land a_branch_that
+mutate src/land.rs '                    let export = match git.remote_branch(&remote, &export_branch(id))? {
+                        Some(at) => git.adopt(&remote, &self.a.store, id, at)?,
+                        None => self.build(&git, &remote, &fork, &landing, None)?,
+                    };' '                    let export = self.build(&git, &remote, &fork, &landing, None)?;' --test land a_changeset_landed_again
+mutate src/land.rs '            Ok(None) if std::time::Instant::now() >= deadline => {' '            Ok(None) if false => {' --test land a_hung_call
+
 exit $survived

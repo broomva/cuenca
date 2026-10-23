@@ -55,10 +55,10 @@ Verify is advisory for now. The results are the caller's own, and a check reads 
 
 1. The authority keeps a bare repository per location in `<state>/git/`. It fetches the remote's default branch and finds the newest first-parent commit (of the last 1000) whose tree is the fork's base.
 2. It writes the draft's tree and commits it onto that commit. The author is the fork's holder. The date comes from the log, so rebuilding the commit gives the same id.
-3. It pushes the commit to `cp/<changeset id>`, but only if that branch does not exist yet. A branch already at the commit counts as pushed; a branch at any other commit fails the landing.
+3. It pushes the commit to `cp/<changeset id>`, but only if that branch does not exist yet. A branch already at the commit counts as pushed. A changeset landed before is reused: after a takeover dropped the first request, or from another fork with the same edit, the branch already holds one commit with the changeset's target tree onto a parent with its base tree, and that export and its pull request become this landing's. A branch holding anything else fails the landing.
 4. It opens a pull request with `gh`, the login on the authority host, or finds the one already open from that branch.
 
-Each step is written to the log as an intent before the call to GitHub and confirmed after it. An authority killed between the two finishes the step on restart, with no duplicate commit, branch or pull request. The authority is not a ruleset bypass actor, so GitHub's required checks gate the merge. A step that fails for a reason that may pass (the network, GitHub) is retried every 30 s. A step that fails for good (the remote has no commit with the base's tree, the branch belongs to someone else, the holder was revoked) is recorded as `failed`; landing it again needs a new draft.
+Each step is written to the log as an intent before the call to GitHub and confirmed after it. An authority killed between the two finishes the step on restart, with no duplicate commit, branch or pull request. The authority is not a ruleset bypass actor, so GitHub's required checks gate the merge. A step that fails for a reason that may pass (the network, GitHub, a call that ran past 10 minutes and was killed) is retried every 30 s, and the error is shown at `GET /v1/forks/{fork}/landing`. A rejection that will never pass, such as push protection or a file over GitHub's size limit, is retried too; it shows there until the owner acts. A step that fails for good (the remote has no commit with the base's tree, the branch belongs to someone else, the holder was revoked) is recorded as `failed`; landing it again needs a new draft.
 
 `cuenca land` waits up to `--wait` seconds (60 by default; the MCP tool always waits 60) and reports the step it reached: `requested`, `exporting`, `exported`, `reviewing`, `in_review` (with `pr` and `url`) or `failed` (with `reason`, and exit 1). `cuenca status` shows the same step later.
 
@@ -69,6 +69,8 @@ cuenca admin --socket <admin.sock> land <fork> --changeset <id>   # main moves; 
 ```
 
 Taking a fork over drops its holder's landing request, including one in flight. A branch or pull request already made for it stays on GitHub.
+
+The branch is pushed to the location's own repository, so workflows that run on `push` or `pull_request` there run on the agent's tree before anyone reviews it, with whatever secrets those workflows get. Agents that push branches today have the same reach. Keep secrets out of workflows that run on unreviewed branches.
 
 Run the authority with `--gh <path>` if `gh` is not on its `PATH`. The authority runs git with no system or global config. It also sets git's credential helper for `https://github.com` to `gh auth git-credential`.
 

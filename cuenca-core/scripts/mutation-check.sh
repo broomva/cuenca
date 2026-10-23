@@ -106,7 +106,7 @@ mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(*id) 
                 return Err(CoreError::NotHead {
                     fork: from.to_string(),' 'if false {
                 return Err(CoreError::NotHead {
-                    fork: from.to_string(),' --test store
+                    fork: from.to_string(),' --test land
 mutate src/state.rs 'if changeset.base != loc.main {' 'if false {' --test store
 mutate src/state.rs 'if let Some(l) = &state.landing
                 && l.changeset == *id' 'if let Some(l) = &state.landing
@@ -138,7 +138,17 @@ mutate src/state.rs '                _ => return Err(step_error(&state, &landing
             holder_not_revoked(view, &state)?;' '                _ => return Err(step_error(&state, &landing, "requested")),
             }' --test land
 mutate src/state.rs '            holder_not_revoked(view, &state)?;
-            set_step(view, state, landing, offset, LandingStep::Reviewing { export })?;' '            set_step(view, state, landing, offset, LandingStep::Reviewing { export })?;' --test land
+            set_step(
+                view,
+                state,
+                landing,
+                offset,
+                LandingStep::Reviewing { export },' '            set_step(
+                view,
+                state,
+                landing,
+                offset,
+                LandingStep::Reviewing { export },' --test land
 mutate src/state.rs 'LandingStep::Exported { .. } => return Ok(Applied::Repeat(landing.moved)),' '' --test land
 mutate src/state.rs 'if *pr == 0 || url.is_empty() || url.len() > MAX_LANDING_TEXT {' 'if url.is_empty() {' --test land
 mutate src/state.rs '                | LandingStep::Reviewing { .. } => {}
@@ -175,7 +185,9 @@ mutate src/state.rs 'check_writer(view, &state, writer)?;
 mutate src/state.rs 'check_writer(view, &state, writer)?;
             return draft(view, offset, state, id, changeset);' 'return draft(view, offset, state, id, changeset);' --test forks
 mutate src/state.rs 'let mut state = fork(view, name)?;
-            check_writer(view, &state, writer)?;' 'let mut state = fork(view, name)?;' --test forks
+            check_writer(view, &state, writer)?;
+            if let Some(l) = &state.landing' 'let mut state = fork(view, name)?;
+            if let Some(l) = &state.landing' --test forks
 mutate src/state.rs 'Ok(()) => {
                     return Err(CoreError::Inconsistent(format!(
                         "draft {id} is fenced from {name:?}, but its writer holds it"

@@ -42,7 +42,8 @@ use std::time::Duration;
 
 use cuenca_core::checks::CheckStatus;
 use cuenca_core::{
-    ChangesetId, CoreError, Event, Export, Fork, ForkName, Landing, LandingStep, Location,
+    ChangesetId, CoreError, Event, Export, Fork, ForkName, Landing, LandingStep, Location, Store,
+    export_branch,
 };
 use cuenca_tree::git::{Blobs, REDIRECTING_ENV, Repo};
 use cuenca_tree::{GitOid, Op};
@@ -69,6 +70,9 @@ pub struct LandConfig {
     pub git_config: Vec<String>,
     /// How long the lander sleeps when nothing wakes it.
     pub poll: Duration,
+    /// The longest one git or gh call may take; past it the call is killed and the
+    /// step retried on the next round.
+    pub timeout: Duration,
     /// Called at each point a crash test kills the authority: `export_intent`,
     /// `pushed`, `review_intent`, `pr_opened`.
     pub fault: Option<Fault>,
@@ -82,6 +86,7 @@ impl LandConfig {
             git: PathBuf::from("git"),
             git_config: Vec::new(),
             poll: Duration::from_secs(30),
+            timeout: Duration::from_secs(600),
             fault: None,
         }
     }
@@ -235,7 +240,13 @@ impl Worker {
             let git = Git::new(&self.config, &location)?;
             match &landing.step {
                 LandingStep::Requested => {
-                    let export = self.build(&git, &remote, &fork, &landing, None)?;
+                    // An earlier landing of the same changeset (dropped by a takeover,
+                    // or from another fork with the same edit) may have exported it
+                    // already: that export is this one's.
+                    let export = match git.remote_branch(&remote, &export_branch(id))? {
+                        Some(at) => git.adopt(&remote, &self.a.store, id, at)?,
+                        None => self.build(&git, &remote, &fork, &landing, None)?,
+                    };
                     self.a.store.record_export_intent(name, id, &export)?;
                     self.fault("export_intent");
                 }
@@ -360,6 +371,7 @@ impl Worker {
         let gh = Gh {
             bin: &self.config.gh,
             slug,
+            timeout: self.config.timeout,
         };
         if let Some(found) = gh.find(export)? {
             return Ok(found);
@@ -485,7 +497,8 @@ impl<'c> Git<'c> {
             cmd.args(["-c", setting]);
         }
         // `gh` answers for github.com, and nothing else does.
-        let helper = format!("!{} auth git-credential", self.config.gh.display());
+        let gh = self.config.gh.display().to_string().replace('\'', "'\\''");
+        let helper = format!("!'{gh}' auth git-credential");
         cmd.args(["-c", "credential.helper="]).args([
             "-c",
             &format!("credential.https://github.com.helper={helper}"),
@@ -498,19 +511,8 @@ impl<'c> Git<'c> {
     }
 
     fn run_in(&self, dir: Option<&Path>, args: &[&str], input: &[u8]) -> Step<String> {
-        let mut child = self
-            .command(dir, args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| LandError::Retry(format!("running git: {e}")))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input);
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| LandError::Retry(format!("running git: {e}")))?;
+        let what = format!("git {}", args.first().copied().unwrap_or(""));
+        let out = output_within(self.command(dir, args), input, self.config.timeout, &what)?;
         if !out.status.success() {
             return Err(LandError::Retry(format!(
                 "git {} failed: {}",
@@ -572,6 +574,35 @@ impl<'c> Git<'c> {
             }
         }
         Ok(None)
+    }
+
+    /// Take the export already at `at` on the remote's branch for `id` as this
+    /// landing's: one commit whose tree is the changeset's target, onto one parent whose
+    /// tree is its base. Anything else at that branch is someone else's.
+    fn adopt(&self, remote: &str, store: &Store, id: ChangesetId, at: GitOid) -> Step<Export> {
+        let changeset = store
+            .changeset(id)?
+            .ok_or_else(|| LandError::Fail(format!("no changeset {id}")))?;
+        let branch = export_branch(id);
+        self.fetch(remote, &format!("refs/heads/{branch}"))?;
+        let line = self.run(&["rev-list", "--parents", "-n", "1", &at.to_hex()])?;
+        let ids: Vec<&str> = line.split_whitespace().collect();
+        let tree_of = |rev: &str| {
+            self.run(&["rev-parse", &format!("{rev}^{{tree}}")])
+                .map(|t| t.trim().to_string())
+        };
+        let ours = ids.len() == 2
+            && ids[0] == at.to_hex()
+            && tree_of(ids[0])? == changeset.target.to_hex()
+            && tree_of(ids[1])? == changeset.base.to_hex();
+        if !ours {
+            return Err(LandError::Fail(format!(
+                "{branch} on the remote is at {at}, which is not an export of {id}: someone else's branch"
+            )));
+        }
+        let parent = GitOid::from_hex(ids[1]).map_err(|e| LandError::Retry(e.to_string()))?;
+        let base_ref = self.default_branch(remote)?;
+        Ok(Export::new(id, at, parent, &base_ref))
     }
 
     fn has_commit(&self, commit: GitOid) -> Step<bool> {
@@ -681,25 +712,20 @@ impl<'c> Git<'c> {
 struct Gh<'a> {
     bin: &'a Path,
     slug: &'a str,
+    timeout: Duration,
 }
 
 impl Gh<'_> {
     fn run(&self, args: &[&str], input: &[u8]) -> Step<String> {
-        let mut child = Command::new(self.bin)
-            .args(args)
+        let mut cmd = Command::new(self.bin);
+        cmd.args(args)
             .env("GH_PROMPT_DISABLED", "1")
-            .env("NO_COLOR", "1")
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .map_err(|e| LandError::Retry(format!("running gh: {e}")))?;
-        if let Some(mut stdin) = child.stdin.take() {
-            let _ = stdin.write_all(input);
-        }
-        let out = child
-            .wait_with_output()
-            .map_err(|e| LandError::Retry(format!("running gh: {e}")))?;
+            .env("NO_COLOR", "1");
+        let what = format!(
+            "gh {}",
+            args.iter().take(2).copied().collect::<Vec<_>>().join(" ")
+        );
+        let out = output_within(cmd, input, self.timeout, &what)?;
         if !out.status.success() {
             return Err(LandError::Retry(format!(
                 "gh {} failed: {}",
@@ -771,6 +797,62 @@ impl Gh<'_> {
         )?;
         Ok(())
     }
+}
+
+/// Run `cmd` with `input` on its stdin, killing it if it has not ended within
+/// `timeout` (a hung network call must not stall every landing behind it).
+fn output_within(
+    mut cmd: Command,
+    input: &[u8],
+    timeout: Duration,
+    what: &str,
+) -> Step<std::process::Output> {
+    let mut child = cmd
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| LandError::Retry(format!("running {what}: {e}")))?;
+    let mut stdin = child.stdin.take();
+    let input = input.to_vec();
+    let writer = std::thread::spawn(move || {
+        if let Some(s) = stdin.as_mut() {
+            let _ = s.write_all(&input);
+        }
+    });
+    let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut buf = Vec::new();
+            if let Some(mut p) = pipe {
+                let _ = p.read_to_end(&mut buf);
+            }
+            buf
+        })
+    };
+    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
+    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
+    let deadline = std::time::Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if std::time::Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(LandError::Retry(format!(
+                    "{what} did not end within {} s and was killed",
+                    timeout.as_secs()
+                )));
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(e) => return Err(LandError::Retry(format!("waiting for {what}: {e}"))),
+        }
+    };
+    let _ = writer.join();
+    Ok(std::process::Output {
+        status,
+        stdout: stdout.join().unwrap_or_default(),
+        stderr: stderr.join().unwrap_or_default(),
+    })
 }
 
 /// The last error each fork's landing hit, for `GET /v1/forks/{fork}/landing`.
