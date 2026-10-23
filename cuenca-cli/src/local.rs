@@ -60,6 +60,10 @@ pub struct Entry {
     pub tree: Tree,
     /// The blobs it adds, each with its size, copied into `objects/`.
     pub blobs: Vec<(GitOid, u64)>,
+    /// The blobs it puts that were already in its base (a rename, a mode change, a
+    /// copy), also copied into `objects/`, since the checkout may not hold their bytes
+    /// by the time the authority asks for them ([`Local::flush`]).
+    pub base_blobs: Vec<(GitOid, u64)>,
 }
 
 /// An open checkout's state, locked for as long as this lives.
@@ -364,16 +368,39 @@ impl Local {
     }
 
     /// Queue a snapshot from `base` (the current [`Local::local_tree`]) to `tree`: copy
-    /// each new blob into `objects/`, checking it still hashes to the id the scan gave it,
-    /// then write the entry.
+    /// into `objects/` each new blob and each blob it puts that its base already had,
+    /// checking it still hashes to the id the scan gave it, then write the entry.
+    ///
+    /// Base blobs are kept too because a later snapshot may edit or delete the file
+    /// before this one is published, and a former holder must send them again
+    /// ([`Local::flush`]). That costs a copy per renamed, re-moded or copied file.
     ///
     /// The objects and their directories are handed to the disk with a plain `fsync`; the
     /// entry is then written with a full sync (`F_FULLFSYNC` on macOS, which flushes the
     /// drive's cache, the objects' writes included), so the entry is never durable before
     /// the objects it names. A full sync per object would cost ~5 ms each on a Mac.
     pub fn queue(&self, changeset: Changeset, tree: Tree, new: &[NewBlob]) -> anyhow::Result<u64> {
+        let added: std::collections::BTreeSet<GitOid> = new.iter().map(|b| b.oid).collect();
+        let mut base_blobs = Vec::new();
+        for op in &changeset.ops {
+            let cuenca_tree::Op::Put { path, entry } = op else {
+                continue;
+            };
+            let oid = entry.oid();
+            if added.contains(&oid) || base_blobs.iter().any(|b: &NewBlob| b.oid == oid) {
+                continue;
+            }
+            let file = self.root().join(path.as_str());
+            let blob = base_blob(&file, oid, entry.mode()).with_context(|| {
+                format!(
+                    "{} changed while it was snapshotted; snapshot again",
+                    file.display()
+                )
+            })?;
+            base_blobs.push(blob);
+        }
         let mut dirs = std::collections::BTreeSet::new();
-        for blob in new {
+        for blob in new.iter().chain(&base_blobs) {
             if self.store_object(blob)? {
                 dirs.insert(self.object_path(blob.oid).with_file_name(""));
             }
@@ -390,6 +417,7 @@ impl Local {
             changeset,
             tree,
             blobs: new.iter().map(|b| (b.oid, b.size)).collect(),
+            base_blobs: base_blobs.iter().map(|b| (b.oid, b.size)).collect(),
         };
         write_atomic(
             &self.dir.join("outbox").join(format!("{seq:020}.json")),
@@ -502,7 +530,9 @@ impl Local {
         self.upload(client, &entry.blobs)?;
         let mut answer = client.publish(&self.state.fork, self.state.epoch, &entry.changeset);
         if matches!(&answer, Err(ClientError::Api { code, .. }) if code == "missing_blob") {
-            self.resend_base_blobs(client, entry)?;
+            // A former holder reads the fork no more, so the authority asks it for the
+            // bytes of the blobs the draft keeps from its base as well.
+            self.upload(client, &entry.base_blobs)?;
             answer = client.publish(&self.state.fork, self.state.epoch, &entry.changeset);
         }
         let sent = match answer {
@@ -534,45 +564,6 @@ impl Local {
         self.save_state()?;
         std::fs::remove_file(&path)?;
         Ok(Some(sent))
-    }
-
-    /// Send the bytes of every blob `entry` puts that was already in its base (a
-    /// rename, a mode change, a copy), read from the checkout.
-    ///
-    /// The queue keeps only the blobs a snapshot adds, since the authority lets a
-    /// caller name a blob of a fork it reads. A former holder, whose draft goes to a
-    /// sibling, reads the fork no more, so the authority asks for those bytes too
-    /// (`missing_blob`). If the file has changed since the snapshot, its old bytes are
-    /// gone from here, and the error says so: the draft stays queued.
-    fn resend_base_blobs(&self, client: &Client, entry: &Entry) -> anyhow::Result<()> {
-        let added: std::collections::BTreeSet<GitOid> =
-            entry.blobs.iter().map(|(oid, _)| *oid).collect();
-        let mut sent = std::collections::BTreeSet::new();
-        for op in &entry.changeset.ops {
-            let cuenca_tree::Op::Put { path, entry: e } = op else {
-                continue;
-            };
-            let oid = e.oid();
-            if added.contains(&oid) || !sent.insert(oid) {
-                continue;
-            }
-            let file = self.root().join(path.as_str());
-            let blob = base_blob(&file, oid, e.mode()).with_context(|| {
-                format!(
-                    "the authority needs blob {oid} again (this checkout no longer reads its \
-                     fork), and {} no longer holds it",
-                    file.display()
-                )
-            })?;
-            self.store_object(&blob).with_context(|| {
-                format!(
-                    "the authority needs blob {oid} again, and {} has changed since",
-                    file.display()
-                )
-            })?;
-            client.put_blob(oid, &self.object_path(oid), blob.size)?;
-        }
-        Ok(())
     }
 
     fn upload(&self, client: &Client, blobs: &[(GitOid, u64)]) -> anyhow::Result<()> {

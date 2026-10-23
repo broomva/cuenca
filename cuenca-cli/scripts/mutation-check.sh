@@ -81,6 +81,10 @@ mutate src/verbs.rs 'seen.changes.is_empty() && (seen.ignored.is_empty() || !fla
 # time, which setting an old mtime moves, is no part of a checkout's identity (that
 # mutant is only caught on macOS).
 mutate src/local.rs 'if code == "missing_blob")' 'if false)' --test cli after_a_takeover_a_rename
+
+# P20 r4 (B, C): the queue keeps the bytes of the base blobs a draft puts, so a former
+# holder can send them after the checkout has edited or deleted those files.
+mutate src/local.rs 'for blob in new.iter().chain(&base_blobs) {' 'for blob in new.iter() {' --test cli queued_renames_edited
 mutate src/client.rs '        match self.whoami() {' '        match Err::<Whoami, _>(ClientError::Offline { url: url.clone(), reason: String::new() }) {' --test cli a_refused_large_upload
 mutate src/local.rs 'fn born_ns(_: &std::fs::Metadata) -> Option<u128> {
     None

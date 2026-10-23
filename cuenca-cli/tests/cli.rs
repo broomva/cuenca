@@ -487,6 +487,70 @@ fn after_a_takeover_a_rename_a_mode_change_and_a_copy_go_to_the_sibling() {
     }
 }
 
+/// A holder that went dark keeps snapshotting: a rename, a mode change and a copy, then
+/// an edit or a delete of each of those files. Taken over meanwhile, it comes back and
+/// both queued drafts reach the sibling, though the checkout no longer holds the bytes
+/// the first one keeps from its base.
+#[test]
+fn queued_renames_edited_before_a_takeover_still_reach_the_sibling() {
+    let mut a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    let _a2 = a.mint("a2", &["--location", "site"]);
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+
+    a.down();
+    std::fs::rename(co.join("docs/index.md"), co.join("docs/about.md")).unwrap();
+    std::fs::set_permissions(co.join("run.sh"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::copy(co.join("run.sh"), co.join("run-copy.sh")).unwrap();
+    let (code, v) = a1.run(&["snapshot", "--dir", s(&co)]);
+    assert_eq!((code, &v["flush"]["pending"]), (0, &1.into()), "{v}");
+    std::fs::write(co.join("docs/about.md"), "# edited\n").unwrap();
+    std::fs::write(co.join("run.sh"), "#!/bin/sh\necho bye\n").unwrap();
+    std::fs::remove_file(co.join("run-copy.sh")).unwrap();
+    let (code, v) = a1.run(&["snapshot", "--dir", s(&co)]);
+    assert_eq!((code, &v["flush"]["pending"]), (0, &2.into()), "{v}");
+
+    a.up();
+    a.admin(&[
+        "take-over",
+        "f1",
+        "--expected-epoch",
+        "1",
+        "--principal",
+        "a2",
+        "--node",
+        NODE,
+    ]);
+    let v = a1.ok(&["snapshot", "--dir", s(&co)]);
+    let sent = v["flush"]["published"].as_array().unwrap();
+    assert_eq!(sent.len(), 2, "{v}");
+    assert_eq!(v["flush"]["pending"], 0, "{v}");
+    // The first is fenced into the sibling; the second follows it there.
+    assert_eq!(sent[0]["fenced"], true, "{v}");
+    let sibling = sent[0]["fork"].as_str().unwrap().to_string();
+    assert_ne!(sibling, "f1");
+    assert_eq!(sent[1]["fork"], sibling.as_str(), "{v}");
+
+    let again = work.path().join("sibling");
+    a1.ok(&["checkout", &sibling, s(&again)]);
+    assert!(!again.join("docs/index.md").exists());
+    assert!(!again.join("run-copy.sh").exists());
+    assert_eq!(
+        std::fs::read(again.join("docs/about.md")).unwrap(),
+        b"# edited\n"
+    );
+    assert_eq!(
+        std::fs::read(again.join("run.sh")).unwrap(),
+        b"#!/bin/sh\necho bye\n"
+    );
+    let log = a1.ok(&["log", &sibling]);
+    assert_eq!(log["records"].as_array().unwrap().len(), 2, "{log}");
+}
+
 /// A revoked key's large upload: the authority refuses it before reading the body, and
 /// the reset that brings must not pass for an unreachable authority.
 #[test]
