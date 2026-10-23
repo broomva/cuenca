@@ -1,0 +1,37 @@
+[package]
+name = "cuenca-cli"
+description = "The cuenca CLI: agent verbs over the authority's HTTP API, owner verbs over its local socket"
+edition.workspace = true
+version.workspace = true
+license.workspace = true
+repository.workspace = true
+authors.workspace = true
+keywords.workspace = true
+categories.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "cuenca"
+path = "src/main.rs"
+
+[dependencies]
+anyhow.workspace = true
+clap.workspace = true
+cuenca-core = { path = "../cuenca-core" }
+cuenca-fs = { path = "../cuenca-fs" }
+cuenca-server = { path = "../cuenca-server" }
+cuenca-tree = { path = "../cuenca-tree" }
+hex.workspace = true
+rand.workspace = true
+rustix = { version = "1", features = ["fs"] }
+reqwest = { workspace = true, features = ["blocking", "json"] }
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+tempfile.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true

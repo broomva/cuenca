@@ -19,6 +19,7 @@ anyhow.workspace = true
 axum.workspace = true
 clap.workspace = true
 cuenca-core = { path = "../cuenca-core" }
+cuenca-fs = { path = "../cuenca-fs" }
 cuenca-tree = { path = "../cuenca-tree" }
 futures-util.workspace = true
 hex.workspace = true
