@@ -1348,6 +1348,30 @@ mod tests {
         assert!(corrupt(&store).contains("kept for sibling forks"));
     }
 
+    /// A verify record names the head it judged and the main it read the checks from;
+    /// one that names any other tree does not replay.
+    #[test]
+    fn replay_refuses_a_verify_of_another_tree() {
+        let (_d, store, cs) = setup();
+        let (l, f) = ids();
+        let main = store.location(&l).unwrap().unwrap().main;
+        let verify = |candidate, base| Event::VerifyRecorded {
+            fork: f.clone(),
+            writer: w1(),
+            changeset: ChangesetId::of(&cs),
+            candidate,
+            base,
+            manifest: None,
+            checks: vec![],
+        };
+        inject_event(&store, 4, verify(main, main));
+        assert!(corrupt(&store).contains("names candidate"));
+        inject_event(&store, 4, verify(cs.target, cs.target));
+        assert!(corrupt(&store).contains("the base the checks were read from"));
+        inject_event(&store, 4, verify(cs.target, main));
+        store.replay_check().unwrap();
+    }
+
     #[test]
     fn replay_refuses_a_takeover_from_the_wrong_epoch() {
         let (_d, store, _) = setup();

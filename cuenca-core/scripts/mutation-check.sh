@@ -111,11 +111,11 @@ mutate src/state.rs 'if changeset.base != loc.main {' 'if false {' --test store
 mutate src/state.rs 'state.landing_intent
                 && last == *id' 'state.landing_intent
                 && false' --test store
-mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(*id) {
-                return Err(CoreError::NotHead {
-                    fork: name.to_string(),' 'if false {
-                return Err(CoreError::NotHead {
-                    fork: name.to_string(),' --test store
+mutate src/state.rs 'return Ok(Applied::Repeat(at));
+            }
+            if state.head_changeset.map(|(head, _)| head) != Some(*id) {' 'return Ok(Applied::Repeat(at));
+            }
+            if false {' --test store
 # One writer per fork: holders, fencing epochs, takeover, sibling forks, revocation.
 mutate src/state.rs 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {
     not_revoked(view, &writer.holder.principal)?;' 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {' --test forks
@@ -221,16 +221,33 @@ mutate src/store.rs 'txn.set_durability(Durability::Immediate);' 'txn.set_durabi
 # Verify records (BRO-3254): the checks run are the base's list, read by the store from
 # the location's main, exactly and in order; only the holder, on the head, against the
 # main of the moment; a run's status and exit code agree; the manifest parses strictly.
-# Not mutated alone: the base check in `record_verify` and the same check in the rules,
-# each of which catches what the other would let by (the rules hold it under a race; the
-# early check keeps a non-main tree, and the check names it holds, out of reach).
+# The rules' candidate and base checks hold the log at replay (the store builds the
+# candidate from the head, and checks the base early too). Not mutated: that early base
+# check alone, which the rules then catch; it keeps a non-main tree, and the check
+# names it holds, out of reach.
 mutate src/store.rs '        if reported != expected {' '        if false && reported != expected {' --test verify
 mutate src/store.rs '        let Some(entry) = tree.get(MANIFEST_PATH) else {' '        let Some(entry) = tree.get(MANIFEST_PATH).filter(|_| false) else {' --test verify
 mutate src/store.rs '            _ => return Err(ManifestError("is not a regular file".to_string()).into()),' '            other => other.oid(),' --test verify
 mutate src/store.rs '                sha256: info.sha256,' '                sha256: cuenca_tree::ContentHash::of(oid.as_bytes()),' --test verify
 mutate src/state.rs '            checks.iter().try_for_each(check_run)?;' '' --test verify
 mutate src/state.rs '        CheckStatus::Failed => run.exit_code != Some(0),' '        CheckStatus::Failed => true,' --test verify
-mutate src/state.rs '            if state.head != *candidate {' '            if false && state.head != *candidate {' --test verify
+mutate src/state.rs '            if state.head != *candidate {' '            if false && state.head != *candidate {' --lib replay_refuses_a_verify
+mutate src/state.rs '            let loc = location(view, &state.location)?;
+            if loc.main != *base {' '            let loc = location(view, &state.location)?;
+            if false {' --lib replay_refuses_a_verify
+mutate src/state.rs '            if state.head_changeset.map(|(head, _)| head) != Some(*id) {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {' '            if false {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {' --test verify
 mutate src/state.rs '            check_writer(view, &state, writer)?;
             if state.head_changeset.map(|(head, _)| head) != Some(*id) {
                 return Err(CoreError::NotHead {
