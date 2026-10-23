@@ -105,4 +105,16 @@ mutate src/client.rs '                0 if !buf.is_empty() => {
 mutate src/client.rs '                    file: None,' '                    file: Some(std::fs::File::open(path).map_err(|e| ClientError::Other(e.to_string()))?.take(size)),' --test cli a_thousand
 mutate src/client.rs '            Err(e) => return Err(e),' '            Err(_) => return Ok(()),' --test cli a_refused_upload_batch
 
+# `cuenca mcp` (BRO-3253): the tools are the agent verbs only; arguments are pinned and
+# directories absolute; a refusal is an error result carrying the authority's answer;
+# every tool declares its output schema.
+mutate src/mcp.rs '            "forks" => {' '            "admin" | "forks" => {' --test mcp owner_acts
+mutate src/mcp.rs '#[serde(deny_unknown_fields)]
+struct ForkArgs {' 'struct ForkArgs {' --test mcp owner_acts
+mutate src/mcp.rs '    if dir.is_absolute() {' '    if true {' --test mcp owner_acts
+mutate src/mcp.rs '(Some(_), Some(_), None) | (None, None, Some(_)) => {}' '_ if true => {}' --test mcp owner_acts
+mutate src/mcp.rs '            let mut r = if report.exit == 0 {' '            let mut r = if report.exit < 2 {' --test mcp
+mutate src/mcp.rs '                        error["status"] = json!(status);' '' --test mcp owner_acts
+mutate src/mcp.rs '                .with_raw_output_schema(object(output))' '' --test mcp an_mcp_client
+
 exit $survived
