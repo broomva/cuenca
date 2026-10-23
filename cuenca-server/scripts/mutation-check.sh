@@ -77,7 +77,13 @@ mutate src/http.rs '        visible_location(a, &c, &location)?;
 ' '' --test api
 mutate src/http.rs 'if !snapshot.fork(&name)?.is_some_and(|f| c.sees_fork(&f)) {' 'if false {' --test api
 mutate src/http.rs '        writable_fork(a, &c, &name)?;
-        let writer' '        let writer' --test api
+        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let offset' '        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let offset' --test api
+mutate src/http.rs '        writable_fork(a, &c, &name)?;
+        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let (offset, manifest)' '        let writer = Writer::new(c.holder.clone(), req.epoch);
+        let (offset, manifest)' --test api a_verify_is_recorded
 # A draft names only blobs the caller reads or has sent: no laundering, no oracle.
 mutate src/authority.rs 'if !known {' 'if false {' --test api
 mutate src/authority.rs 'let head = if caller.sees_fork(fork) {' 'let head = if true {' --test api

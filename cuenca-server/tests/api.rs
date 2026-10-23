@@ -1335,4 +1335,14 @@ fn a_verify_is_recorded_for_the_holder_against_the_bases_list() {
     let r = s.post(&c.a2, "/v1/forks/f1/verdicts", body(json!([]), &base));
     assert_eq!(r.status(), 403);
     assert_eq!(r.json::<Value>().unwrap()["error"], "not_holder");
+    // A fork the caller does not read is not there.
+    s.whois.node(ND);
+    let r = s.post(&c.d1, "/v1/forks", json!({ "fork": "d", "location": "l2" }));
+    assert_eq!(r.status(), 200);
+    s.whois.node(NA);
+    assert_eq!(
+        s.post(&c.a1, "/v1/forks/d/verdicts", body(json!([]), &base))
+            .status(),
+        404
+    );
 }
