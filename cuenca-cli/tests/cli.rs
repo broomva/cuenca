@@ -439,6 +439,97 @@ fn after_a_takeover_the_old_holders_snapshots_go_to_a_sibling() {
     }
 }
 
+/// After a takeover the old holder reads the fork no more, so a draft that puts a blob
+/// its base already had (a rename, a mode change, a copy) needs those bytes sent again.
+/// It still goes to the sibling, with every byte and mode.
+#[test]
+fn after_a_takeover_a_rename_a_mode_change_and_a_copy_go_to_the_sibling() {
+    let a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    let _a2 = a.mint("a2", &["--location", "site"]);
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    a.admin(&[
+        "take-over",
+        "f1",
+        "--expected-epoch",
+        "1",
+        "--principal",
+        "a2",
+        "--node",
+        NODE,
+    ]);
+
+    std::fs::rename(co.join("docs/index.md"), co.join("docs/about.md")).unwrap();
+    std::fs::set_permissions(co.join("run.sh"), std::fs::Permissions::from_mode(0o644)).unwrap();
+    std::fs::copy(co.join("run.sh"), co.join("run-copy.sh")).unwrap();
+    let v = a1.ok(&["snapshot", "--dir", s(&co)]);
+    let sent = &v["flush"]["published"][0];
+    assert_eq!(sent["fenced"], true, "{v}");
+    assert_eq!(v["flush"]["pending"], 0, "{v}");
+    let sibling = sent["fork"].as_str().unwrap().to_string();
+    assert_ne!(sibling, "f1");
+
+    let again = work.path().join("sibling");
+    a1.ok(&["checkout", &sibling, s(&again)]);
+    assert!(!again.join("docs/index.md").exists());
+    for f in ["docs/about.md", "run.sh", "run-copy.sh"] {
+        assert_eq!(
+            std::fs::read(again.join(f)).unwrap(),
+            std::fs::read(co.join(f)).unwrap(),
+            "{f}"
+        );
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o111;
+        assert_eq!(mode(&again.join(f)), 0, "{f}");
+    }
+}
+
+/// A revoked key's large upload: the authority refuses it before reading the body, and
+/// the reset that brings must not pass for an unreachable authority.
+#[test]
+fn a_refused_large_upload_is_a_refusal_not_offline() {
+    let a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    a.admin(&["key", "revoke", "a1"]);
+
+    let big: Vec<u8> = (0..16_000_000u32).map(|i| (i % 251) as u8).collect();
+    std::fs::write(co.join("big.bin"), big).unwrap();
+    let (code, v) = a1.run(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["flush"]["offline"], false, "{v}");
+    assert_eq!(v["flush"]["pending"], 1, "{v}");
+}
+
+/// Setting an old modification time on the checkout's root (as `tar x`, `rsync -a` and
+/// `cp -p` do) leaves it the same checkout, although macOS moves its birth time back.
+#[test]
+fn an_old_mtime_on_the_root_keeps_the_checkout() {
+    let a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+
+    let old = std::time::UNIX_EPOCH + Duration::from_secs(946_684_800);
+    std::fs::File::open(&co)
+        .unwrap()
+        .set_times(std::fs::FileTimes::new().set_modified(old))
+        .unwrap();
+    std::fs::write(co.join("after.txt"), "after\n").unwrap();
+    let v = a1.ok(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(v["flush"]["published"].as_array().unwrap().len(), 1, "{v}");
+}
+
 /// The authority is unreachable while the agent keeps working: every snapshot queues,
 /// and all of them publish, in order, once it is back. No file is lost.
 #[test]

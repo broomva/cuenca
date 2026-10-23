@@ -200,7 +200,30 @@ impl Client {
 
     /// Upload the blob stored at `path`, `size` bytes, as `oid`. The authority hashes
     /// what it receives and refuses bytes that are not `oid`.
+    ///
+    /// The authority refuses a request it will not serve (a revoked or unknown key)
+    /// before reading its body, and closing the connection on an upload larger than the
+    /// socket's buffers resets it: the refusal arrives as no answer at all. So an upload
+    /// that got none asks a small question to tell the two apart. If that is refused,
+    /// the refusal is the answer. If that is answered too, the upload is tried once more,
+    /// and a second cut-off is reported as an error, not as offline.
     pub fn put_blob(&self, oid: GitOid, path: &Path, size: u64) -> Result<()> {
+        let Err(ClientError::Offline { url, reason }) = self.put_blob_once(oid, path, size) else {
+            return Ok(());
+        };
+        match self.whoami() {
+            Ok(_) => self.put_blob_once(oid, path, size).map_err(|e| match e {
+                ClientError::Offline { reason, .. } => ClientError::Other(format!(
+                    "the authority answers, but cut off the upload of blob {oid} twice: {reason}"
+                )),
+                e => e,
+            }),
+            Err(ClientError::Offline { .. }) => Err(ClientError::Offline { url, reason }),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn put_blob_once(&self, oid: GitOid, path: &Path, size: u64) -> Result<()> {
         let file = std::fs::File::open(path)
             .map_err(|e| ClientError::Other(format!("{}: {e}", path.display())))?;
         let url = format!("{}/v1/blobs/{}", self.url, oid.to_hex());

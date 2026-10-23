@@ -69,6 +69,28 @@ pub struct Local {
     _lock: File,
 }
 
+/// The blob of mode `mode` at `file` in the checkout, as a [`NewBlob`] to store: a
+/// symlink's target, or a regular file's bytes. Not checked against `oid` here; storing
+/// it hashes it.
+fn base_blob(file: &Path, oid: GitOid, mode: cuenca_tree::Mode) -> anyhow::Result<NewBlob> {
+    let meta = std::fs::symlink_metadata(file)?;
+    let (size, content) = if mode == cuenca_tree::Mode::Symlink {
+        if !meta.file_type().is_symlink() {
+            bail!("it is not a symlink any more");
+        }
+        let target = std::fs::read_link(file)?
+            .into_os_string()
+            .into_encoded_bytes();
+        (target.len() as u64, Content::Inline(target))
+    } else {
+        if !meta.is_file() {
+            bail!("it is not a regular file any more");
+        }
+        (meta.len(), Content::File(file.to_path_buf()))
+    };
+    Ok(NewBlob { oid, size, content })
+}
+
 /// The state directory of the checkout rooted at `root` (canonical).
 fn dir_for(root: &Path) -> anyhow::Result<PathBuf> {
     let digest = Sha256::digest(root.as_os_str().as_encoded_bytes());
@@ -77,10 +99,13 @@ fn dir_for(root: &Path) -> anyhow::Result<PathBuf> {
         .join(hex::encode(&digest[..16])))
 }
 
-/// Which directory a path names: its device, inode and birth time. The birth time is
-/// what tells a directory made again at the same path apart on Linux, where ext4 hands
-/// a freed inode number straight back out (APFS does not reuse them). On a filesystem
-/// that records no birth time, the inode alone has to do.
+/// Which directory a path names: its device, inode and, on Linux, its birth time. The
+/// birth time is what tells a directory made again at the same path apart on Linux,
+/// where ext4 hands a freed inode number straight back out; there `statx` reports it
+/// and nothing in userspace can set it. Elsewhere it is left out: macOS moves a
+/// directory's birth time back whenever its modification time is set earlier (`tar x`,
+/// `rsync -a`, `cp -p`, `touch -t` on the root), and APFS does not reuse inode numbers.
+/// On a filesystem that records no birth time, the inode alone has to do.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Identity {
     pub dev: u64,
@@ -92,16 +117,25 @@ pub struct Identity {
 pub fn identity(path: &Path) -> std::io::Result<Identity> {
     use std::os::unix::fs::MetadataExt as _;
     let m = std::fs::symlink_metadata(path)?;
-    let born_ns = m
-        .created()
-        .ok()
-        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
-        .map(|d| d.as_nanos());
+    let born_ns = born_ns(&m);
     Ok(Identity {
         dev: m.dev(),
         ino: m.ino(),
         born_ns,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn born_ns(m: &std::fs::Metadata) -> Option<u128> {
+    m.created()
+        .ok()
+        .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos())
+}
+
+#[cfg(not(target_os = "linux"))]
+fn born_ns(_: &std::fs::Metadata) -> Option<u128> {
+    None
 }
 
 /// The canonical form of `path`, which may not exist yet (its parent must).
@@ -466,7 +500,12 @@ impl Local {
             );
         }
         self.upload(client, &entry.blobs)?;
-        let sent = match client.publish(&self.state.fork, self.state.epoch, &entry.changeset) {
+        let mut answer = client.publish(&self.state.fork, self.state.epoch, &entry.changeset);
+        if matches!(&answer, Err(ClientError::Api { code, .. }) if code == "missing_blob") {
+            self.resend_base_blobs(client, entry)?;
+            answer = client.publish(&self.state.fork, self.state.epoch, &entry.changeset);
+        }
+        let sent = match answer {
             Ok(p) => {
                 let sent = Sent {
                     id: p.id,
@@ -495,6 +534,45 @@ impl Local {
         self.save_state()?;
         std::fs::remove_file(&path)?;
         Ok(Some(sent))
+    }
+
+    /// Send the bytes of every blob `entry` puts that was already in its base (a
+    /// rename, a mode change, a copy), read from the checkout.
+    ///
+    /// The queue keeps only the blobs a snapshot adds, since the authority lets a
+    /// caller name a blob of a fork it reads. A former holder, whose draft goes to a
+    /// sibling, reads the fork no more, so the authority asks for those bytes too
+    /// (`missing_blob`). If the file has changed since the snapshot, its old bytes are
+    /// gone from here, and the error says so: the draft stays queued.
+    fn resend_base_blobs(&self, client: &Client, entry: &Entry) -> anyhow::Result<()> {
+        let added: std::collections::BTreeSet<GitOid> =
+            entry.blobs.iter().map(|(oid, _)| *oid).collect();
+        let mut sent = std::collections::BTreeSet::new();
+        for op in &entry.changeset.ops {
+            let cuenca_tree::Op::Put { path, entry: e } = op else {
+                continue;
+            };
+            let oid = e.oid();
+            if added.contains(&oid) || !sent.insert(oid) {
+                continue;
+            }
+            let file = self.root().join(path.as_str());
+            let blob = base_blob(&file, oid, e.mode()).with_context(|| {
+                format!(
+                    "the authority needs blob {oid} again (this checkout no longer reads its \
+                     fork), and {} no longer holds it",
+                    file.display()
+                )
+            })?;
+            self.store_object(&blob).with_context(|| {
+                format!(
+                    "the authority needs blob {oid} again, and {} has changed since",
+                    file.display()
+                )
+            })?;
+            client.put_blob(oid, &self.object_path(oid), blob.size)?;
+        }
+        Ok(())
     }
 
     fn upload(&self, client: &Client, blobs: &[(GitOid, u64)]) -> anyhow::Result<()> {

@@ -76,4 +76,16 @@ mutate src/verbs.rs '    let options = SnapshotOptions {
 # directory made again at a checkout's path is told apart by its birth time.
 mutate src/verbs.rs 'seen.changes.is_empty() && (seen.ignored.is_empty() || !flags.drop_ignored),' 'seen.changes.is_empty() && seen.ignored.is_empty(),' --test cli a_git_location
 
+# P20 r3 (A, B, C): a former holder sends again the base blobs its draft puts; an
+# upload cut off by a refusal is a refusal, not offline; and on macOS the root's birth
+# time, which setting an old mtime moves, is no part of a checkout's identity (that
+# mutant is only caught on macOS).
+mutate src/local.rs 'if code == "missing_blob")' 'if false)' --test cli after_a_takeover_a_rename
+mutate src/client.rs '        match self.whoami() {' '        match Err::<Whoami, _>(ClientError::Offline { url: url.clone(), reason: String::new() }) {' --test cli a_refused_large_upload
+mutate src/local.rs 'fn born_ns(_: &std::fs::Metadata) -> Option<u128> {
+    None
+}' 'fn born_ns(m: &std::fs::Metadata) -> Option<u128> {
+    m.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos())
+}' --test cli an_old_mtime
+
 exit $survived
