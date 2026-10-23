@@ -10,7 +10,25 @@ The design is the spec, rev 2.2: [`docs/specs/2026-10-19-agent-native-change-pla
 | `cuenca-core` | The authority's durable log, locations, forks with fencing epochs, and the blob store |
 | `cuenca-fs` | Snapshot any directory into a tree under its `.forkignore`, and check a tree out with copy-on-write clones |
 | `cuenca-server` | The authority: the agent API on the tailnet, per-principal keys, node identity, and the local admin socket |
-| `cuenca-cli` | The `cuenca` binary: agent verbs (`forks`, `fork`, `checkout`, `status`, `snapshot`, `diff`, `log`, `verify`, `land`) with `--json`, a per-checkout outbox, watch mode, `cuenca admin` owner verbs, and `cuenca serve` |
+| `cuenca-cli` | The `cuenca` binary: agent verbs (`forks`, `fork`, `checkout`, `status`, `snapshot`, `diff`, `log`, `verify`, `land`) with `--json`, a per-checkout outbox, watch mode, `cuenca mcp` (the same verbs as MCP tools), `cuenca admin` owner verbs, and `cuenca serve` |
+
+## Agents over MCP
+
+`cuenca mcp` serves the agent verbs as MCP tools on standard input and output: one tool per verb, each with JSON input and output schemas. It acts as the principal whose key `cuenca login` stored (or `CUENCA_URL` and `CUENCA_TOKEN`). No owner verb is a tool, so an agent cannot mint a key, register a location or take a fork over through it. Paths given to tools are absolute.
+
+```bash
+cuenca login --url http://<authority>:7419 --token-stdin < key   # once per machine
+claude mcp add cuenca -- cuenca mcp                              # Claude Code
+codex mcp add cuenca -- cuenca mcp                               # Codex
+```
+
+For Codex the same entry can go in `~/.codex/config.toml`:
+
+```toml
+[mcp_servers.cuenca]
+command = "cuenca"
+args = ["mcp"]
+```
 
 More crates land as the plan's nodes do. Install, operate and recover sections arrive with the close-out node (BRO-3260).
 

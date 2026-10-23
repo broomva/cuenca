@@ -98,6 +98,10 @@ enum Verb {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
+    /// Serve the agent verbs as MCP tools on standard input and output, as the principal
+    /// whose key the config holds (`claude mcp add cuenca -- cuenca mcp`). No owner verb is
+    /// a tool.
+    Mcp,
     /// Owner acts, on the authority's local admin socket. No agent verb, HTTP route or MCP
     /// tool reaches these.
     Admin(admin::Admin),
@@ -199,6 +203,19 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         Verb::Log { fork, dir } => verbs::log(&client()?, &dir, fork.as_deref())?,
         Verb::Verify { dir } => verbs::verify(&client()?, &dir)?,
         Verb::Land { dir } => verbs::land(&client()?, &dir)?,
+        Verb::Mcp => {
+            // Standard output is the MCP channel: a startup failure goes to stderr even
+            // under --json.
+            let config = match Config::load() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("cuenca mcp: {e:#}");
+                    return Ok(1);
+                }
+            };
+            tokio::runtime::Runtime::new()?.block_on(cuenca_cli::mcp::serve(config))?;
+            return Ok(0);
+        }
         Verb::Admin(a) => admin::run(a)?,
         Verb::Serve {
             state,
