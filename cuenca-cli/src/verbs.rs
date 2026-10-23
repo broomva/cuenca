@@ -9,7 +9,7 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
-use cuenca_core::{ChangesetId, Event, ForkName, LocationName};
+use cuenca_core::{Event, ForkName, LocationName};
 use cuenca_fs::{BlobSource, Fetched, SnapshotOptions};
 use cuenca_tree::{Changeset, Entry, GitOid, Op, Tree};
 use serde::Serialize;
@@ -124,6 +124,66 @@ fn open(client: &Client, dir: &Path) -> anyhow::Result<Local> {
     Ok(local)
 }
 
+/// What a scan that publishes nothing (checkout, status, diff, the watch probe) found:
+/// the changes a snapshot would publish, and the base paths `.forkignore` names, which a
+/// snapshot refuses to delete unless told `--drop-ignored`. Such a scan never fails on
+/// those paths: it reports them.
+struct Look {
+    changes: Vec<Change>,
+    ignored: Vec<String>,
+    /// Entries that are not content (sockets, FIFOs, devices).
+    skipped: Vec<Value>,
+    target: GitOid,
+}
+
+fn look(root: &Path, base: &Tree, cache: &mut cuenca_fs::StatCache) -> anyhow::Result<Look> {
+    let options = SnapshotOptions {
+        drop_ignored: true,
+        ..Default::default()
+    };
+    let snap = cuenca_fs::snapshot_with(root, base, cache, &options)?;
+    let ignored = snap.dropped;
+    let changes = changes(base, &snap.changeset)
+        .into_iter()
+        .filter(|c| !ignored.contains(&c.path))
+        .collect();
+    Ok(Look {
+        changes,
+        ignored,
+        skipped: snap
+            .skipped
+            .iter()
+            .map(|k| json!({ "path": k.path, "reason": k.reason }))
+            .collect(),
+        target: snap.tree.git_tree_id(),
+    })
+}
+
+fn ignored_note(ignored: &[String]) -> String {
+    match ignored.first() {
+        None => String::new(),
+        Some(first) => format!(
+            "{} path(s) of the fork are named by .forkignore (first: {first}); a snapshot \
+             refuses to delete them unless run with --drop-ignored\n",
+            ignored.len()
+        ),
+    }
+}
+
+/// A snapshot's scan error, in the CLI's terms.
+fn scan_error(e: cuenca_fs::FsError) -> anyhow::Error {
+    match e {
+        cuenca_fs::FsError::Ignored(paths) => anyhow::anyhow!(
+            "the fork holds {} path(s) .forkignore names (first: {}); nothing was \
+             snapshotted. `cuenca snapshot --drop-ignored` deletes them from the fork \
+             (they stay on disk)",
+            paths.len(),
+            paths.first().map_or("", String::as_str)
+        ),
+        e => e.into(),
+    }
+}
+
 /// `cuenca forks`: the locations and forks the caller's key may read.
 pub fn forks(client: &Client) -> anyhow::Result<Report> {
     let locations = client.locations()?;
@@ -204,17 +264,18 @@ impl BlobSource for Remote<'_> {
 /// empty) and register it as a checkout of that fork.
 pub fn checkout(client: &Client, fork: &str, dir: &Path) -> anyhow::Result<Report> {
     let name = fork_name(fork)?;
+    let root = Local::prepare(dir)?;
     let f = client.fork(&name)?;
     let (oid, tree) = client.fork_tree(&name)?;
     let source = Remote {
         client,
         fork: &name,
     };
-    let done = cuenca_fs::checkout(&tree, dir, &source)?;
-    let root = std::fs::canonicalize(dir)?;
+    let done = cuenca_fs::checkout(&tree, &root, &source)?;
     let local = Local::create(State {
         format: 1,
         root: root.clone(),
+        root_id: crate::local::identity(&root)?,
         url: client.url().to_string(),
         fork: name.clone(),
         location: f.location.clone(),
@@ -224,12 +285,13 @@ pub fn checkout(client: &Client, fork: &str, dir: &Path) -> anyhow::Result<Repor
     // The checkout's first snapshot reads every file; doing it now builds the stat cache
     // while nothing has changed yet.
     let mut cache = local.load_cache()?;
-    let snap = cuenca_fs::snapshot(&root, &tree, &mut cache)?;
+    let seen = look(&root, &tree, &mut cache)?;
     local.save_cache(&cache)?;
     let text = format!(
-        "checked out {name} ({} files, head {oid}) into {}\n",
+        "checked out {name} ({} files, head {oid}) into {}\n{}",
         tree.len(),
-        root.display()
+        root.display(),
+        ignored_note(&seen.ignored)
     );
     Ok(Report::ok(
         json!({
@@ -241,7 +303,8 @@ pub fn checkout(client: &Client, fork: &str, dir: &Path) -> anyhow::Result<Repor
             "files": tree.len(),
             "cloned": done.cloned,
             "copied": done.copied,
-            "clean": snap.is_clean(),
+            "clean": seen.changes.is_empty(),
+            "ignored": seen.ignored,
         }),
         text,
     ))
@@ -251,14 +314,15 @@ pub fn checkout(client: &Client, fork: &str, dir: &Path) -> anyhow::Result<Repor
 /// queued, and the fork as the authority has it (when it answers).
 pub fn status(client: Option<&Client>, dir: &Path) -> anyhow::Result<Report> {
     let local = Local::find(dir)?;
+    let client = client.filter(|c| c.url() == local.state.url);
     let base = local.local_tree()?;
     let mut cache = local.load_cache()?;
-    let snap = cuenca_fs::snapshot(local.root(), &base, &mut cache)?;
+    let seen = look(local.root(), &base, &mut cache)?;
     local.save_cache(&cache)?;
-    let changed = changes(&base, &snap.changeset);
+    let changed = seen.changes;
     let queued = local.outbox()?.len();
     let remote = match client {
-        None => json!({ "error": "not logged in" }),
+        None => json!({ "error": format!("not logged in to {}", local.state.url) }),
         Some(c) => match c.fork(&local.state.fork) {
             Ok(f) => json!({
                 "head": f.head,
@@ -297,6 +361,7 @@ pub fn status(client: Option<&Client>, dir: &Path) -> anyhow::Result<Report> {
         text.push_str("changes since the last snapshot:\n");
         text.push_str(&change_lines(&changed));
     }
+    text.push_str(&ignored_note(&seen.ignored));
     Ok(Report::ok(
         json!({
             "root": s.root,
@@ -306,7 +371,8 @@ pub fn status(client: Option<&Client>, dir: &Path) -> anyhow::Result<Report> {
             "acknowledged": s.published.git_tree_id(),
             "queued": queued,
             "changes": changed,
-            "skipped": snap.skipped.iter().map(|k| json!({"path": k.path, "reason": k.reason})).collect::<Vec<_>>(),
+            "ignored": seen.ignored,
+            "skipped": seen.skipped,
             "authority": remote,
         }),
         text,
@@ -333,7 +399,8 @@ fn take_snapshot(
         drop_ignored: flags.drop_ignored,
         ..Default::default()
     };
-    let snap = cuenca_fs::snapshot_with(local.root(), &base, &mut cache, &options)?;
+    let snap =
+        cuenca_fs::snapshot_with(local.root(), &base, &mut cache, &options).map_err(scan_error)?;
     let changed = changes(&base, &snap.changeset);
     if !snap.is_clean() {
         local.queue(snap.changeset, snap.tree, &snap.new_blobs)?;
@@ -431,26 +498,39 @@ pub fn watch(
     let mut first_change: Option<Instant> = None;
     let mut last_change = Instant::now();
     let mut last_flush = Instant::now();
+    // Since when the checkout has had changes no snapshot could take (a scan or a
+    // snapshot failed: a file that keeps changing while it is read), and when that was
+    // last reported as a failure. Cleared by a clean scan or a snapshot taken.
+    let mut stuck: Option<(Instant, Instant)> = None;
+    // A scan or snapshot failed: look again next poll. Once that has lasted `max_wait`, a
+    // snapshot is overdue: say so, as a failure, every `max_wait` until one is taken
+    // (spec section 2a's "at least every 10 s" cannot hold while a file never holds
+    // still; ignore it in `.forkignore`).
     loop {
         std::thread::sleep(pace.poll);
         // The lock is taken per scan, so other verbs run between scans.
         let mut local = open(client, &root)?;
         let base = local.local_tree()?;
         let mut cache = local.load_cache()?;
-        let options = SnapshotOptions {
-            drop_ignored: flags.drop_ignored,
-            ..Default::default()
-        };
         let now = Instant::now();
-        let target = match cuenca_fs::snapshot_with(&root, &base, &mut cache, &options) {
-            Ok(snap) => snap.tree.git_tree_id(),
+        // The probe publishes nothing; base paths `.forkignore` names show as a change
+        // here, and the snapshot that follows refuses them unless --drop-ignored, which
+        // `failed` then reports.
+        let target = match look(&root, &base, &mut cache) {
+            Ok(seen) => seen.target,
             Err(e) => {
-                // A file mid-write fails the scan as unstable: look again next poll.
-                tracing_note(&mut on, &format!("scan: {e}"));
+                failed(
+                    &mut stuck,
+                    now,
+                    pace.max_wait,
+                    format!("scan: {e}"),
+                    &mut on,
+                );
                 continue;
             }
         };
         if target == base.git_tree_id() {
+            stuck = None;
             first_change = None;
             last_seen = Some(target);
             if !local.outbox()?.is_empty() && now - last_flush >= pace.max_wait {
@@ -471,10 +551,44 @@ pub fn watch(
             first_change = None;
             last_flush = now;
             match take_snapshot(client, &mut local, flags) {
-                Ok((changed, flush)) => on(snapshot_report(&changed, &flush)),
-                Err(e) => tracing_note(&mut on, &format!("snapshot: {e:#}")),
+                Ok((changed, flush)) => {
+                    stuck = None;
+                    on(snapshot_report(&changed, &flush));
+                }
+                Err(e) => failed(
+                    &mut stuck,
+                    now,
+                    pace.max_wait,
+                    format!("snapshot: {e:#}"),
+                    &mut on,
+                ),
             }
         }
+    }
+}
+
+/// A watch scan or snapshot failed: look again next poll. Once that has lasted
+/// `max_wait`, a snapshot is overdue: say so, as a failure, every `max_wait` until one is
+/// taken (spec section 2a's "at least every 10 s" cannot hold while a file never holds
+/// still; ignore it in `.forkignore`).
+fn failed(
+    stuck: &mut Option<(Instant, Instant)>,
+    now: Instant,
+    max_wait: Duration,
+    e: String,
+    on: &mut impl FnMut(Report),
+) {
+    let (since, reported) = *stuck.get_or_insert((now, now));
+    if now - since >= max_wait && now - reported >= max_wait {
+        *stuck = Some((since, now));
+        let message = format!("no snapshot for {:.0} s: {e}", (now - since).as_secs_f64());
+        on(Report {
+            json: json!({ "error": message, "overdue": true }),
+            text: format!("{message}\n"),
+            exit: 1,
+        });
+    } else {
+        tracing_note(on, &e);
     }
 }
 
@@ -498,35 +612,40 @@ fn named_tree(client: &Client, name: &str) -> anyhow::Result<(GitOid, Tree)> {
 /// last snapshot; otherwise what turns tree `a` into tree `b`, each a fork or
 /// `location:<name>`. Paths only: content is compared by blob id.
 pub fn diff(client: &Client, dir: &Path, between: Option<(&str, &str)>) -> anyhow::Result<Report> {
-    let (from, to, changeset, base) = match between {
+    let (from, to, changed, ignored) = match between {
         Some((a, b)) => {
             let (a_oid, a_tree) = named_tree(client, a)?;
             let (b_oid, b_tree) = named_tree(client, b)?;
             let cs = Changeset::between(&a_tree, &b_tree);
-            (a_oid.to_hex(), b_oid.to_hex(), cs, a_tree)
+            (
+                a_oid.to_hex(),
+                b_oid.to_hex(),
+                changes(&a_tree, &cs),
+                vec![],
+            )
         }
         None => {
             let local = open(client, dir)?;
             let base = local.local_tree()?;
             let mut cache = local.load_cache()?;
-            let snap = cuenca_fs::snapshot(local.root(), &base, &mut cache)?;
+            let seen = look(local.root(), &base, &mut cache)?;
             local.save_cache(&cache)?;
             (
                 base.git_tree_id().to_hex(),
                 "working directory".to_string(),
-                snap.changeset,
-                base,
+                seen.changes,
+                seen.ignored,
             )
         }
     };
-    let changed = changes(&base, &changeset);
-    let text = if changed.is_empty() {
+    let mut text = if changed.is_empty() {
         "no differences\n".to_string()
     } else {
         change_lines(&changed)
     };
+    text.push_str(&ignored_note(&ignored));
     Ok(Report::ok(
-        json!({ "from": from, "to": to, "changes": changed }),
+        json!({ "from": from, "to": to, "changes": changed, "ignored": ignored }),
         text,
     ))
 }
@@ -649,9 +768,4 @@ pub fn land(client: &Client, dir: &Path) -> anyhow::Result<Report> {
             f.name
         ),
     ))
-}
-
-/// The id of a changeset, as the authority names it.
-pub fn id_of(changeset: &Changeset) -> ChangesetId {
-    ChangesetId::of(changeset)
 }

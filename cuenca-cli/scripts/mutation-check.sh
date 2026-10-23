@@ -55,4 +55,21 @@ mutate src/verbs.rs 'if settled || overdue {' 'if false {' --test cli watch
 # The key's file is private.
 mutate src/config.rs '.set_permissions(std::fs::Permissions::from_mode(0o600))?;' '.set_permissions(std::fs::Permissions::from_mode(0o644))?;' --test cli every_agent_verb
 
+# P20 r1 (B, C): a crash around acknowledgement neither blocks the outbox nor fences a
+# retry the fork already took.
+mutate src/local.rs 'if entry.changeset.target == published && entry.changeset.base != published {' 'if false {' --test cli crash
+mutate src/local.rs '}) if code == "not_at_base" && head == entry.changeset.target.to_hex() => Sent {' '}) if false => Sent {' --test cli crash
+# A path is its checkout only while it is the same directory; no checkout inside another;
+# a registration with queued snapshots is never dropped.
+mutate src/local.rs 'if identity(root).ok() != Some(state.root_id) {' 'if false {' --test cli reused
+mutate src/local.rs '&& identity(outer).ok() == Some(state.root_id)' '&& false' --test cli inside
+mutate src/local.rs 'if queued > 0 {' 'if false {' --test cli reused
+# Watch mode reports a snapshot it cannot take.
+mutate src/verbs.rs 'if now - since >= max_wait && now - reported >= max_wait {' 'if false {' --test cli watch_mode_reports
+
+# P20 r1 (A): a scan that publishes nothing reports ignored base paths instead of failing.
+mutate src/verbs.rs '    let options = SnapshotOptions {
+        drop_ignored: true,' '    let options = SnapshotOptions {
+        drop_ignored: false,' --test cli a_git_location
+
 exit $survived

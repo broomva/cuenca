@@ -38,6 +38,9 @@ pub struct State {
     pub format: u32,
     /// The checkout's canonical path.
     pub root: PathBuf,
+    /// The root directory's device and inode when it was checked out: a directory
+    /// removed and made again at the same path is not this checkout.
+    pub root_id: (u64, u64),
     /// The authority this checkout was made from.
     pub url: String,
     /// The fork its drafts go to: the one checked out, or the sibling the authority put
@@ -74,6 +77,49 @@ fn dir_for(root: &Path) -> anyhow::Result<PathBuf> {
         .join(hex::encode(&digest[..16])))
 }
 
+/// A directory's device and inode.
+pub fn identity(path: &Path) -> std::io::Result<(u64, u64)> {
+    use std::os::unix::fs::MetadataExt as _;
+    let m = std::fs::symlink_metadata(path)?;
+    Ok((m.dev(), m.ino()))
+}
+
+/// The canonical form of `path`, which may not exist yet (its parent must).
+fn canonical(path: &Path) -> anyhow::Result<PathBuf> {
+    if let Ok(p) = std::fs::canonicalize(path) {
+        return Ok(p);
+    }
+    let (Some(parent), Some(name)) = (path.parent(), path.file_name()) else {
+        bail!("{} has no parent directory", path.display());
+    };
+    let parent = if parent.as_os_str().is_empty() {
+        Path::new(".")
+    } else {
+        parent
+    };
+    Ok(std::fs::canonicalize(parent)
+        .with_context(|| format!("resolving {}", parent.display()))?
+        .join(name))
+}
+
+fn read_state(dir: &Path) -> anyhow::Result<State> {
+    let path = dir.join("state.json");
+    let state: State = serde_json::from_slice(&std::fs::read(&path)?)
+        .with_context(|| format!("{} is damaged", path.display()))?;
+    if state.format != FORMAT {
+        bail!(
+            "{} has format {}, not {FORMAT}",
+            path.display(),
+            state.format
+        );
+    }
+    Ok(state)
+}
+
+fn queued_in(dir: &Path) -> usize {
+    std::fs::read_dir(dir.join("outbox")).map_or(0, |d| d.count())
+}
+
 fn lock(dir: &Path) -> anyhow::Result<File> {
     let file = File::options()
         .create(true)
@@ -97,6 +143,53 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> anyhow::Result<()> {
 }
 
 impl Local {
+    /// Check that a checkout may be made at `dest` before anything is written there, and
+    /// return its canonical path. Refused: `dest` inside another checkout (whose
+    /// snapshots would take it in), and `dest` registered as a live checkout. A
+    /// registration whose directory was removed or replaced is dropped if nothing is
+    /// queued in it, and refused otherwise, naming where its queued snapshots are.
+    pub fn prepare(dest: &Path) -> anyhow::Result<PathBuf> {
+        let root = canonical(dest)?;
+        for outer in root.ancestors().skip(1) {
+            let dir = dir_for(outer)?;
+            if let Ok(state) = read_state(&dir)
+                && identity(outer).ok() == Some(state.root_id)
+            {
+                bail!(
+                    "{} is inside {}, a checkout of fork {}; check out somewhere else",
+                    root.display(),
+                    outer.display(),
+                    state.fork
+                );
+            }
+        }
+        let dir = dir_for(&root)?;
+        if dir.join("state.json").exists() {
+            let _held = lock(&dir)?;
+            let state = read_state(&dir)?;
+            if identity(&root).ok() == Some(state.root_id) {
+                bail!(
+                    "{} is already a checkout of fork {}",
+                    root.display(),
+                    state.fork
+                );
+            }
+            let queued = queued_in(&dir);
+            if queued > 0 {
+                bail!(
+                    "{} was a checkout of fork {} with {queued} snapshot(s) still queued; \
+                     they are in {}. Publish or remove them before checking out here",
+                    root.display(),
+                    state.fork,
+                    dir.display()
+                );
+            }
+            std::fs::remove_dir_all(&dir)
+                .with_context(|| format!("dropping the stale registration {}", dir.display()))?;
+        }
+        Ok(root)
+    }
+
     /// Register a new checkout at `root`, which must already hold `state.published`.
     pub fn create(state: State) -> anyhow::Result<Self> {
         let dir = dir_for(&state.root)?;
@@ -111,6 +204,7 @@ impl Local {
             std::fs::create_dir_all(dir.join(d))
                 .with_context(|| format!("creating {}", dir.display()))?;
         }
+        std::fs::set_permissions(&dir, std::os::unix::fs::PermissionsExt::from_mode(0o700))?;
         let lock = lock(&dir)?;
         let local = Self {
             dir,
@@ -131,11 +225,19 @@ impl Local {
                 continue;
             }
             let lock = lock(&dir)?;
-            let bytes = std::fs::read(dir.join("state.json"))?;
-            let state: State = serde_json::from_slice(&bytes)
-                .with_context(|| format!("{} is damaged", dir.join("state.json").display()))?;
-            if state.format != FORMAT || state.root != root {
+            let state = read_state(&dir)?;
+            if state.root != root {
                 bail!("{} does not belong to {}", dir.display(), root.display());
+            }
+            if identity(root).ok() != Some(state.root_id) {
+                bail!(
+                    "{} is not the directory checked out there as fork {} (it was removed or \
+                     replaced); that checkout's state, with {} snapshot(s) queued, is in {}",
+                    root.display(),
+                    state.fork,
+                    queued_in(&dir),
+                    dir.display()
+                );
             }
             return Ok(Self {
                 dir,
@@ -453,6 +555,7 @@ mod tests {
             state: State {
                 format: FORMAT,
                 root: dir.to_path_buf(),
+                root_id: (0, 0),
                 url: "http://127.0.0.1:1".into(),
                 fork: ForkName::new("f1").unwrap(),
                 location: LocationName::new("l1").unwrap(),

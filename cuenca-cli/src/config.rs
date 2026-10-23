@@ -68,8 +68,13 @@ impl Config {
         let path = config_path()?;
         let file = match std::fs::read(&path) {
             Ok(bytes) => Some(
-                serde_json::from_slice::<Self>(&bytes)
-                    .with_context(|| format!("{} is not a cuenca config", path.display()))?,
+                // The parser's message could quote the token: name the file only.
+                serde_json::from_slice::<Self>(&bytes).map_err(|_| {
+                    anyhow::anyhow!(
+                        "{} is not a cuenca config (a JSON object with url and token)",
+                        path.display()
+                    )
+                })?,
             ),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),

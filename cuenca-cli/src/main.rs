@@ -176,6 +176,12 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             let flags = SnapshotFlags { drop_ignored };
             let client = client()?;
             if watch {
+                for (flag, v) in [("--settle", settle), ("--max-wait", max_wait)] {
+                    anyhow::ensure!(
+                        v.is_finite() && (0.0..=86_400.0).contains(&v),
+                        "{flag} is {v}: give seconds between 0 and 86400"
+                    );
+                }
                 let pace = Watch {
                     settle: Duration::from_secs_f64(settle),
                     max_wait: Duration::from_secs_f64(max_wait),

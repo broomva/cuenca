@@ -73,7 +73,7 @@ impl Authority {
             .spawn()
             .unwrap();
         self.child = Some(child);
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + Duration::from_secs(60);
         while std::net::TcpStream::connect(("127.0.0.1", self.port)).is_err()
             || !self.socket().exists()
         {
@@ -546,4 +546,315 @@ fn a_thousand_file_snapshot_publishes_within_5_s() {
     assert_eq!(v["flush"]["published"].as_array().unwrap().len(), 1, "{v}");
     eprintln!("R07: 1,000-file snapshot published in {took:?}");
     assert!(took < Duration::from_secs(5), "took {took:?}");
+}
+
+/// `dir`'s files, recursively, copied into `to`.
+fn copy_dir(dir: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for e in std::fs::read_dir(dir).unwrap() {
+        let e = e.unwrap();
+        let dest = to.join(e.file_name());
+        if e.file_type().unwrap().is_dir() {
+            copy_dir(&e.path(), &dest);
+        } else {
+            std::fs::copy(e.path(), dest).unwrap();
+        }
+    }
+}
+
+impl Agent {
+    /// The state directory of this agent's only checkout.
+    fn checkout_state(&self) -> PathBuf {
+        let all: Vec<_> = std::fs::read_dir(self.home.path().join("state/checkouts"))
+            .unwrap()
+            .map(|e| e.unwrap().path())
+            .collect();
+        assert_eq!(all.len(), 1, "{all:?}");
+        all[0].clone()
+    }
+
+    fn records(&self, fork: &str) -> Vec<String> {
+        self.ok(&["log", fork])["records"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|r| r["event"]["event"].as_str().unwrap().to_string())
+            .collect()
+    }
+}
+
+/// A path whose checkout was removed is not that checkout any more: checking another
+/// fork out there replaces an empty registration, refuses one with queued snapshots
+/// before writing a file, and no snapshot ever reaches the old fork from it.
+#[test]
+fn a_reused_checkout_path_never_publishes_to_the_old_fork() {
+    let mut a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    a1.ok(&["fork", "site", "--name", "f2"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("w");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    std::fs::write(co.join("f1-only.txt"), "mine\n").unwrap();
+    a1.ok(&["snapshot", "--dir", s(&co)]);
+    let f1 = a1.head("f1");
+
+    // Removed and made again by hand: not the checkout.
+    std::fs::remove_dir_all(&co).unwrap();
+    std::fs::create_dir(&co).unwrap();
+    std::fs::write(co.join("other.txt"), "x").unwrap();
+    let (code, v) = a1.run(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(code, 1, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("removed or"), "{v}");
+    std::fs::remove_dir_all(&co).unwrap();
+
+    // Nothing queued: a new checkout replaces the stale registration.
+    let v = a1.ok(&["checkout", "f2", s(&co)]);
+    assert_eq!(v["fork"], "f2");
+    std::fs::write(co.join("f2-only.txt"), "f2\n").unwrap();
+    let v = a1.ok(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(v["flush"]["published"][0]["fork"], "f2", "{v}");
+    assert_eq!(a1.head("f1"), f1);
+
+    // Something queued: refused before a file is written, and the queue is kept.
+    a.down();
+    std::fs::write(co.join("queued.txt"), "q\n").unwrap();
+    a1.ok(&["snapshot", "--dir", s(&co)]);
+    a.up();
+    std::fs::remove_dir_all(&co).unwrap();
+    let (code, v) = a1.run(&["checkout", "f1", s(&co)]);
+    assert_eq!(code, 1, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("still queued"), "{v}");
+    assert!(!co.exists(), "nothing was written");
+    assert_eq!(a1.head("f1"), f1);
+}
+
+/// A checkout inside another would be taken into the outer fork's snapshots: refused.
+#[test]
+fn a_checkout_inside_a_checkout_is_refused() {
+    let a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    a1.ok(&["fork", "site", "--name", "f2"]);
+    let work = tempfile::tempdir().unwrap();
+    let outer = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&outer)]);
+    let inner = outer.join("docs/f2");
+    let (code, v) = a1.run(&["checkout", "f2", s(&inner)]);
+    assert_eq!(code, 1, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("is inside"), "{v}");
+    assert!(!inner.exists());
+}
+
+/// The three windows a crash can open around acknowledging a draft, each simulated by
+/// putting back the checkout's state as it was: the next snapshot publishes nothing
+/// twice and loses nothing.
+#[test]
+fn a_crash_around_acknowledgement_loses_and_duplicates_nothing() {
+    let mut a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    let _a2 = a.mint("a2", &["--location", "site"]);
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    let state = a1.checkout_state();
+    let saved = work.path().join("saved");
+    let queue = |name: &str, a: &mut Authority| {
+        std::fs::write(co.join(name), format!("{name}\n")).unwrap();
+        a.down();
+        a1.ok(&["snapshot", "--dir", s(&co)]);
+        a.up();
+    };
+    let put_back = |what: &Path, to: &Path| {
+        std::fs::remove_dir_all(to).unwrap();
+        copy_dir(what, to);
+    };
+
+    // 1. The authority took the draft; the client never recorded it.
+    queue("one.txt", &mut a);
+    copy_dir(&state, &saved.join("1"));
+    a1.ok(&["snapshot", "--dir", s(&co)]);
+    put_back(&saved.join("1"), &state);
+    let v = a1.ok(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(v["flush"]["pending"], 0, "{v}");
+    assert_eq!(a1.records("f1"), ["fork_created", "draft_published"]);
+
+    // 2. The client recorded it, but its outbox entry was left behind.
+    queue("two.txt", &mut a);
+    copy_dir(&state.join("outbox"), &saved.join("2"));
+    a1.ok(&["snapshot", "--dir", s(&co)]);
+    copy_dir(&saved.join("2"), &state.join("outbox"));
+    let v = a1.ok(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(v["flush"]["published"].as_array().unwrap().len(), 0, "{v}");
+    assert_eq!(a1.ok(&["status", "--dir", s(&co)])["queued"], 0);
+    assert_eq!(a1.records("f1").len(), 3);
+
+    // 3. The authority took it, the client never recorded it, and the fork was taken
+    // over before the retry: the retry is recognised as already in, not fenced.
+    queue("three.txt", &mut a);
+    copy_dir(&state, &saved.join("3"));
+    a1.ok(&["snapshot", "--dir", s(&co)]);
+    put_back(&saved.join("3"), &state);
+    a.admin(&[
+        "take-over",
+        "f1",
+        "--expected-epoch",
+        "1",
+        "--principal",
+        "a2",
+        "--node",
+        NODE,
+    ]);
+    let v = a1.ok(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(v["flush"]["pending"], 0, "{v}");
+    assert_eq!(v["flush"]["published"][0]["fenced"], false, "{v}");
+    let st = a1.ok(&["status", "--dir", s(&co)]);
+    assert_eq!(st["queued"], 0);
+    assert_eq!(st["fork"], "f1");
+    let all = a1.ok(&["forks"]);
+    assert!(
+        all["forks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|f| f["parent"].is_null()),
+        "no sibling: {all}"
+    );
+}
+
+/// A file that never holds still fails every scan; watch mode says a snapshot is
+/// overdue, as a failure, rather than staying quiet.
+#[test]
+fn watch_mode_reports_a_snapshot_it_cannot_take() {
+    let a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let writer = {
+        let stop = stop.clone();
+        let log = co.join("dev.log");
+        std::thread::spawn(move || {
+            use std::io::Write as _;
+            let mut f = std::fs::File::create(log).unwrap();
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                f.write_all(b"a log line\n").unwrap();
+                std::thread::sleep(Duration::from_millis(1));
+            }
+        })
+    };
+    let out = a1
+        .cmd(&[
+            "--json",
+            "snapshot",
+            "--watch",
+            "--max-wait",
+            "2",
+            "--dir",
+            s(&co),
+        ])
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::thread::sleep(Duration::from_secs(6));
+    let mut out = out;
+    out.kill().unwrap();
+    let output = out.wait_with_output().unwrap();
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    writer.join().unwrap();
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.lines().any(|l| l.contains("\"overdue\":true")),
+        "{text}"
+    );
+}
+
+/// A git location that commits paths the default `.forkignore` names: checkout, status
+/// and diff succeed and name them; a snapshot refuses to delete them from the fork until
+/// told `--drop-ignored`, and its message names that flag.
+#[test]
+fn a_git_location_with_ignored_paths_is_reported_not_broken() {
+    let a = Authority::start();
+    let repo = tempfile::tempdir().unwrap();
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args([
+                "-c",
+                "user.name=t",
+                "-c",
+                "user.email=t@t",
+                "-c",
+                "commit.gpgsign=false",
+            ])
+            .args(args)
+            .current_dir(repo.path())
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "{args:?}: {out:?}");
+    };
+    git(&["init", "-q"]);
+    std::fs::create_dir_all(repo.path().join("node_modules")).unwrap();
+    std::fs::write(repo.path().join("node_modules/dep.js"), "x\n").unwrap();
+    std::fs::write(repo.path().join(".DS_Store"), "finder").unwrap();
+    std::fs::write(repo.path().join("main.js"), "main\n").unwrap();
+    // Forced: a global gitignore may name these too.
+    git(&["add", "-f", "-A", "."]);
+    git(&["add", "-f", ".DS_Store", "node_modules/dep.js"]);
+    git(&["commit", "-qm", "one"]);
+    a.admin(&["location", "add", "app", "--git", s(repo.path())]);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "app"]));
+    a1.ok(&["fork", "app", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+
+    let v = a1.ok(&["checkout", "f1", s(&co)]);
+    assert_eq!(v["clean"], true, "{v}");
+    assert_eq!(v["ignored"].as_array().unwrap().len(), 2, "{v}");
+    let v = a1.ok(&["status", "--dir", s(&co)]);
+    assert_eq!(v["changes"].as_array().unwrap().len(), 0, "{v}");
+    assert_eq!(v["ignored"].as_array().unwrap().len(), 2, "{v}");
+    std::fs::write(co.join("main.js"), "edited\n").unwrap();
+    let v = a1.ok(&["diff", "--dir", s(&co)]);
+    assert_eq!(v["changes"].as_array().unwrap().len(), 1, "{v}");
+    assert_eq!(v["changes"][0]["path"], "main.js");
+
+    let (code, v) = a1.run(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(code, 1, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("--drop-ignored"),
+        "{v}"
+    );
+    let v = a1.ok(&["snapshot", "--drop-ignored", "--dir", s(&co)]);
+    assert_eq!(v["flush"]["published"].as_array().unwrap().len(), 1, "{v}");
+    let v = a1.ok(&["diff", "location:app", "f1"]);
+    let mut paths: Vec<_> = v["changes"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            format!(
+                "{} {}",
+                c["change"].as_str().unwrap(),
+                c["path"].as_str().unwrap()
+            )
+        })
+        .collect();
+    paths.sort();
+    assert_eq!(
+        paths,
+        [
+            "deleted .DS_Store",
+            "deleted node_modules/dep.js",
+            "modified main.js"
+        ]
+    );
+    assert!(co.join("node_modules/dep.js").exists(), "left on disk");
 }

@@ -40,13 +40,6 @@ pub enum ClientError {
 }
 
 impl ClientError {
-    pub fn code(&self) -> Option<&str> {
-        match self {
-            Self::Api { code, .. } => Some(code),
-            _ => None,
-        }
-    }
-
     pub fn is_offline(&self) -> bool {
         matches!(self, Self::Offline { .. })
     }
