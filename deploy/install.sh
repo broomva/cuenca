@@ -6,7 +6,7 @@
 #   sudo bash deploy/install.sh --binary ./cuenca --allow 100.82.213.74 --allow 100.71.190.125
 #
 # --binary PATH   the `cuenca` binary to install as /usr/local/bin/cuenca (optional on a re-run)
-# --allow IP      an enrolled owner device's tailnet address (repeat; at least one)
+# --allow IP      an enrolled owner device's tailnet address, IPv4 or IPv6 (repeat; give both of each device's)
 # --bind ADDR     the agent API's address (default: `tailscale ip -4`, port 7419)
 # --volume DIR    the volume Samba serves (default /srv/cuenca/volume)
 # --retire-spike  remove the spike C container `cuenca-spike` (BRO-3234) before smbd binds :445
@@ -40,11 +40,18 @@ done
 
 [ "$(id -u)" -eq 0 ] || die "run as root"
 [ ${#allow[@]} -gt 0 ] || die "name at least one enrolled owner device with --allow <tailnet address>"
+# A device reaches smbd over either of its tailnet addresses (MagicDNS names resolve to both),
+# so each must be named: 100.64.0.0/10 or fd7a:115c:a1e0::/48, one address, never a range.
 for ip in "${allow[@]}"; do
-    [[ $ip =~ ^100\.([0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}$ ]] && [ "${BASH_REMATCH[1]}" -ge 64 ] \
-        && [ "${BASH_REMATCH[1]}" -le 127 ] || die "--allow $ip is not a tailnet IPv4 address (100.64.0.0/10)"
+    if [[ $ip =~ ^100\.([0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
+        [ "${BASH_REMATCH[1]}" -ge 64 ] && [ "${BASH_REMATCH[1]}" -le 127 ] \
+            || die "--allow $ip is not a tailnet IPv4 address (100.64.0.0/10)"
+    elif ! [[ ${ip,,} =~ ^fd7a:115c:a1e0:[0-9a-f:]*[0-9a-f]$ ]]; then
+        die "--allow $ip is not a single tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48)"
+    fi
 done
-case "$volume" in /*) ;; *) die "--volume must be an absolute path" ;; esac
+# Plain characters only: the path is written into smb.conf and the unit by sed.
+[[ $volume =~ ^/[A-Za-z0-9._/-]+$ ]] || die "--volume must be an absolute path of letters, digits, '.', '_', '-' and '/'"
 if [ -n "$binary" ]; then
     [ -f "$binary" ] && [ -x "$binary" ] || die "--binary $binary is not an executable file"
 elif [ ! -x /usr/local/bin/cuenca ]; then
@@ -59,12 +66,22 @@ fi
 
 # Packages: Ubuntu's own. No community images, no third-party repositories.
 missing=()
-# samba-vfs-modules holds fruit and streams_xattr; it is only a Recommends of samba.
-for p in samba samba-vfs-modules git; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
+# samba-vfs-modules holds fruit and streams_xattr; it is only a Recommends of samba. gh is
+# what landing opens pull requests with (the unit passes --gh /usr/bin/gh).
+for p in samba samba-vfs-modules git gh curl; do dpkg -s "$p" >/dev/null 2>&1 || missing+=("$p"); done
 if [ ${#missing[@]} -gt 0 ]; then
     say "installing ${missing[*]} from Ubuntu's archive"
+    # Hold the packages' own service starts: stock smbd and nmbd would otherwise listen on every
+    # interface, with Ubuntu's smb.conf, until this script restarts them on the tailnet only.
+    # A policy-rc.d already there (containers ship one) is left alone; ours goes even if apt fails.
+    if [ ! -e /usr/sbin/policy-rc.d ]; then
+        trap 'rm -f /usr/sbin/policy-rc.d' EXIT
+        printf '#!/bin/sh\nexit 101\n' >/usr/sbin/policy-rc.d
+        chmod 755 /usr/sbin/policy-rc.d
+    fi
     DEBIAN_FRONTEND=noninteractive apt-get update -q
     DEBIAN_FRONTEND=noninteractive apt-get install -y -q --no-install-recommends "${missing[@]}"
+    if trap -p EXIT | grep -q policy-rc.d; then rm -f /usr/sbin/policy-rc.d; trap - EXIT; fi
 fi
 
 # Accounts. cuenca runs the authority; cuenca-owner is Samba's one account. Neither has a
@@ -87,7 +104,8 @@ primary=$(getent passwd | awk -F: -v g="$gid" '$4 == g {print $1}' | grep -vxE '
 # authority itself on start (main/ and forks/ 2750, owner forks 2770).
 install -d -o cuenca -g cuenca -m 0750 "$home"
 install -d -o cuenca -g cuenca -m 0700 "$state"
-install -d -o root -g root -m 0755 "$(dirname "$volume")"
+# The volume's parent is created if missing, never re-owned (it may be the authority's home).
+[ -d "$(dirname "$volume")" ] || install -d -o root -g root -m 0755 "$(dirname "$volume")"
 install -d -o cuenca -g cuenca -m 2750 "$volume"
 fstype=$(stat -f -c %T "$volume")
 case "$fstype" in

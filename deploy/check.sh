@@ -33,6 +33,7 @@ expect_mode "$CUENCA_STATE" "700 cuenca:cuenca"
 expect_mode "$CUENCA_VOLUME" "2750 cuenca:cuenca"
 expect_mode /etc/cuenca/cuenca.env "640 root:cuenca"
 expect_mode /usr/local/bin/cuenca "755 root:root"
+[ -x /usr/bin/gh ] && ok "gh is installed (landing)" || bad "/usr/bin/gh is missing (landing opens pull requests with it)"
 [ "$(cat /proc/sys/fs/protected_hardlinks)" = 1 ] && ok "fs.protected_hardlinks = 1" || bad "fs.protected_hardlinks != 1"
 if [ -f /root/cuenca-owner.smbpass ]; then
     echo "note /root/cuenca-owner.smbpass still exists: hand the password over, then delete it"
@@ -68,7 +69,8 @@ expect_param path "$CUENCA_VOLUME" cuenca
 allow=$(param "hosts allow")
 [ -n "$allow" ] && ok "hosts allow names the enrolled devices: $allow" || bad "hosts allow is empty"
 for a in ${allow//,/ }; do
-    [[ $a =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+$ ]] || bad "hosts allow entry $a is not a single tailnet address"
+    [[ $a =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+$ || ${a,,} =~ ^fd7a:115c:a1e0:[0-9a-f:]*[0-9a-f]$ ]] \
+        || bad "hosts allow entry $a is not a single tailnet address"
 done
 
 if [ "$services" = 0 ]; then
@@ -81,14 +83,20 @@ for u in cuenca smbd; do
     check "$u is enabled" systemctl is-enabled --quiet "$u"
     check "$u is active" systemctl is-active --quiet "$u"
 done
+check "smbd restarts on failure" test "$(systemctl show -p Restart --value smbd)" = on-failure
 for u in nmbd samba-ad-dc; do
     systemctl is-active --quiet "$u" && bad "$u is running" || ok "$u is not running"
 done
 
 # Listeners: the agent API and :445 on the tailnet address only, nothing on :139.
+# smbd binds both of tailscale0's addresses; nothing else may be bound.
+command -v ss >/dev/null || { bad "ss is missing; listeners not checked"; echo "check.sh: $fails failed"; exit 1; }
 ts=$(tailscale ip -4 | head -n1)
+ts6=$(tailscale ip -6 2>/dev/null | head -n1)
 listen_on() { ss -Hltn "sport = :$1" | awk '{print $4}' | sort -u | tr '\n' ' '; }
-[ "$(listen_on 445)" = "$ts:445 " ] && ok ":445 listens on $ts only" || bad ":445 listens on '$(listen_on 445)', want $ts:445"
+want="$ts:445 "
+[ -n "$ts6" ] && want=$(printf '%s\n' "$ts:445" "[$ts6]:445" | sort -u | tr '\n' ' ')
+[ "$(listen_on 445)" = "$want" ] && ok ":445 listens on the tailnet addresses only: $want" || bad ":445 listens on '$(listen_on 445)', want $want"
 [ -z "$(listen_on 139)" ] && ok "nothing listens on :139" || bad ":139 listens on $(listen_on 139)"
 port=${CUENCA_BIND##*:}
 [ "$(listen_on "$port")" = "$CUENCA_BIND " ] && ok "the agent API listens on $CUENCA_BIND only" || bad "the agent API listens on '$(listen_on "$port")', want $CUENCA_BIND"

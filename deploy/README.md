@@ -28,17 +28,18 @@ There are two accounts, and neither has a shell. `cuenca` runs the authority. `c
 
 ## Install
 
-1. Put the host on the tailnet (`tailscale up`), and note the tailnet addresses of the owner's enrolled devices (`tailscale status`): the Mac, the iPhone.
-2. Build the binary for the host's architecture, from a checkout at the commit to deploy:
+1. Put the host on the tailnet (`tailscale up`), and note both tailnet addresses (IPv4 and IPv6) of each of the owner's enrolled devices, the Mac and the iPhone: `tailscale ip <device>` prints them. A device can reach Samba over either one (a MagicDNS name resolves to both), so name both.
+2. Build the binary for the host's architecture (`linux/amd64` for the NUC; a Mac with Apple silicon builds `arm64` unless told), from a checkout at the commit to deploy:
    ```bash
-   docker run --rm -v "$PWD":/src:ro -v "$PWD/target-linux":/target -w /src -e CARGO_TARGET_DIR=/target \
+   docker run --rm --platform linux/amd64 -v "$PWD":/src:ro -v "$PWD/target-linux":/target -w /src -e CARGO_TARGET_DIR=/target \
      rust:1 cargo build --release --locked -p cuenca-cli        # → target-linux/release/cuenca
+   file target-linux/release/cuenca                             # x86-64 for the NUC
    ```
 3. Install, naming each enrolled device:
    ```bash
-   sudo bash deploy/install.sh --binary ./cuenca --allow <mac tailnet ip> --allow <iphone tailnet ip>
+   sudo bash deploy/install.sh --binary ./cuenca --allow <mac ipv4> --allow <mac ipv6> --allow <iphone ipv4> --allow <iphone ipv6>
    ```
-   The script installs `samba`, `samba-vfs-modules` (which holds `fruit` and `streams_xattr`) and `git` from Ubuntu's archive, creates the accounts and directories, renders the unit and `smb.conf` (it checks `smb.conf` with `testparm` first, and keeps Ubuntu's own file once as `smb.conf.pre-cuenca`), masks `nmbd`, and starts `smbd` and `cuenca`. On a host that still runs spike C, add `--retire-spike` to remove the `cuenca-spike` container, which holds `:445`.
+   The script installs `samba`, `samba-vfs-modules` (which holds `fruit` and `streams_xattr`), `git`, `gh` and `curl` from Ubuntu's archive, holding their services until Cuenca's `smb.conf` is in place, creates the accounts and directories, renders the unit and `smb.conf` (it checks `smb.conf` with `testparm` first, and keeps Ubuntu's own file once as `smb.conf.pre-cuenca`). The host's `smb.conf` becomes Cuenca's alone: any other share on it is dropped, so use a host that serves nothing else over SMB, masks `nmbd`, and starts `smbd` and `cuenca`. On a host that still runs spike C, add `--retire-spike` to remove the `cuenca-spike` container, which holds `:445`.
 4. Hand the owner the Samba password, out of band. The script generates it once and never prints it. It is in `/root/cuenca-owner.smbpass` (root only). Read it on the host, store it in the owner's password manager, then `sudo rm /root/cuenca-owner.smbpass`.
 5. Log the authority's `gh` in for landing (the shared login, for now; spec rev 2.2 §6):
    ```bash
@@ -61,13 +62,13 @@ Re-running `install.sh` with the same arguments changes nothing except restartin
   sudo -u cuenca cuenca admin --socket /run/cuenca/admin.sock location add <name> --git <url>   # or --dir <path>
   ```
 - **Logs:** `journalctl -u cuenca -f`, `journalctl -u smbd`, and `/var/log/samba/`.
-- **Enroll a device:** re-run `install.sh` with one more `--allow`.
-- **Remove a device:** re-run `install.sh` without its `--allow`, which restarts `smbd` and so ends every live session. A session from an address no longer allowed cannot reconnect. Revoke the device's agent keys too, if it had any (`key revoke`).
+- **Enroll a device:** re-run `install.sh` with its two addresses added as `--allow`.
+- **Remove a device:** re-run `install.sh` without its two `--allow`, which restarts `smbd` and so ends every live session. A session from an address no longer allowed cannot reconnect. Revoke the device's agent keys too, if it had any (`key revoke`).
 - **Upgrade:** build the new binary, then `install.sh --binary ./cuenca <same --allow list>`.
 
 ## Recover
 
-- **A service is down:** `systemctl status cuenca smbd`. Both wait up to 120 s for `tailscale0` at start. If Tailscale is down, `tailscale up` brings them back on the next restart (`Restart=on-failure`).
+- **A service is down:** `systemctl status cuenca smbd`. Both wait up to 120 s for `tailscale0` at start, and both are `Restart=on-failure`, so once `tailscale up` gives `tailscale0` its address they come back within one restart interval.
 - **After a reboot:** both units are enabled and come back on their own. `check.sh` confirms it.
 - **The volume looks wrong:** the volume is derived from the log. Stop `cuenca`, move the volume aside, and start `cuenca`. It rebuilds `main/` and every agent fork. Owner forks are written from Finder, so move them back from the old volume before deleting it, and the next snapshot picks them up.
 - **Lost state:** restore the log and blobs from backup (BRO-3258).

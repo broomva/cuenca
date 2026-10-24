@@ -21,19 +21,25 @@ docker run -d --name "$name" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys
     -v "$here":/deploy:ro -v "$binary":/cuenca-bin:ro "$img" >/dev/null
 on_host() { docker exec "$name" bash -euo pipefail -c "$1"; }
 for _ in $(seq 1 30); do on_host 'systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"' && break; sleep 1; done
-on_host 'ip link add tailscale0 type dummy && ip addr add 100.64.0.1/32 dev tailscale0 && ip link set tailscale0 up
-    printf "#!/bin/sh\n[ \"\$1 \$2\" = \"ip -4\" ] && echo 100.64.0.1 && exit 0\necho stub >&2; exit 1\n" >/usr/local/bin/tailscale
+on_host 'sysctl -qw net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0
+    ip link add tailscale0 type dummy && ip addr add 100.64.0.1/32 dev tailscale0
+    ip -6 addr add fd7a:115c:a1e0::1/128 dev tailscale0 nodad && ip link set tailscale0 up
+    printf "#!/bin/sh\ncase \"\$1 \$2\" in \"ip -4\") echo 100.64.0.1;; \"ip -6\") echo fd7a:115c:a1e0::1;; *) echo stub >&2; exit 1;; esac\n" >/usr/local/bin/tailscale
     chmod 755 /usr/local/bin/tailscale'
-on_host 'bash /deploy/install.sh --binary /cuenca-bin --allow 100.82.213.74 --allow 100.71.190.125' \
+allow="--allow 100.82.213.74 --allow fd7a:115c:a1e0::2 --allow 100.71.190.125"
+on_host "bash /deploy/install.sh --binary /cuenca-bin $allow" \
     | grep -v -E '^(Get|Selecting|Preparing|Unpacking|Setting up|Processing|Fetched|debconf|Created symlink|\(Reading)' || true
 on_host 'bash /deploy/check.sh'
 echo "--- the volume, as the authority made it"
 on_host 'sleep 3; stat -c "%a %U:%G %n" /srv/cuenca/volume /srv/cuenca/volume/main /srv/cuenca/volume/forks /srv/cuenca/volume/.cuenca'
-echo "--- the authority's own host is refused by Samba (hosts allow names only enrolled devices)"
-on_host 'if smbclient -N -L //100.64.0.1 -m SMB3 >/tmp/smb 2>&1; then cat /tmp/smb; exit 1; fi
-    grep -m1 "Denied connection from 100.64.0.1" /var/log/samba/log.smbd'
+echo "--- the authority's own host is refused by Samba over both addresses (hosts allow names only enrolled devices)"
+on_host 'for a in 100.64.0.1 fd7a:115c:a1e0::1; do
+        if smbclient -N -L "//$a" -m SMB3 >/tmp/smb 2>&1; then cat /tmp/smb; exit 1; fi
+        grep -m1 "Denied connection from $a" /var/log/samba/log.smbd
+    done'
 echo "--- control: with the host's own address allowed, cuenca-owner logs in; main/ and the root are read-only, .cuenca/ cannot be entered"
-on_host 'bash /deploy/install.sh --allow 100.64.0.1 >/dev/null
+on_host 'bash /deploy/install.sh --allow 100.64.0.1 --allow fd7a:115c:a1e0::1 >/dev/null
+    smbclient //fd7a:115c:a1e0::1/cuenca -m SMB3 -U "cuenca-owner%$(cat /root/cuenca-owner.smbpass)" -c ls 2>&1 | grep -E "^  main "
     smb() { smbclient //100.64.0.1/cuenca -m SMB3 -U "cuenca-owner%$(cat /root/cuenca-owner.smbpass)" -c "$1" 2>&1 || true; }
     smb "ls" | grep -E "^  (main|forks) "
     smb "mkdir x" | grep NT_STATUS_ACCESS_DENIED
@@ -41,12 +47,15 @@ on_host 'bash /deploy/install.sh --allow 100.64.0.1 >/dev/null
     smb "ls .cuenca/*" | grep NT_STATUS_ACCESS_DENIED
     if smbclient -N -L //100.64.0.1 -m SMB3 >/tmp/smb 2>&1; then echo "a guest listed shares"; exit 1; fi
     grep -E "NT_STATUS_(ACCESS_DENIED|LOGON_FAILURE)" /tmp/smb | head -n1
-    bash /deploy/install.sh --allow 100.82.213.74 --allow 100.71.190.125 >/dev/null'
+    bash /deploy/install.sh --allow 100.82.213.74 --allow fd7a:115c:a1e0::2 --allow 100.71.190.125 >/dev/null'
+echo "--- smbd comes back after being killed (Restart=on-failure)"
+on_host 'pid=$(systemctl show -p MainPID --value smbd); kill -9 "$pid"; sleep 14; systemctl is-active smbd
+    [ "$(systemctl show -p MainPID --value smbd)" != "$pid" ]'
 echo "--- the authority comes back after being killed (Restart=on-failure)"
 on_host 'pid=$(systemctl show -p MainPID --value cuenca); kill -9 "$pid"; sleep 8; systemctl is-active cuenca
     [ "$(systemctl show -p MainPID --value cuenca)" != "$pid" ]'
 echo "--- a second install keeps everything working"
-on_host 'bash /deploy/install.sh --allow 100.82.213.74 --allow 100.71.190.125 >/dev/null && bash /deploy/check.sh | tail -n1'
+on_host "bash /deploy/install.sh $allow >/dev/null && bash /deploy/check.sh | tail -n1"
 echo "--- without tailscale0, smbd does not start (it waits, then fails)"
 on_host 'ip link del tailscale0; systemctl set-environment CUENCA_WAIT_SECS=3
     if systemctl restart smbd 2>/dev/null; then echo "smbd started without tailscale0"; exit 1; fi

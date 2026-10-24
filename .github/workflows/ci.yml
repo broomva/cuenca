@@ -83,5 +83,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: bash -n deploy/install.sh deploy/check.sh deploy/test-container.sh deploy/wait-tailnet
+      - run: bash -n deploy/install.sh deploy/check.sh deploy/test-container.sh deploy/test-systemd.sh deploy/wait-tailnet
       - run: bash deploy/test-container.sh
