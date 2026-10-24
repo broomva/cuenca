@@ -806,7 +806,9 @@ fn prepare(dir: &Path, up: &Upstream) -> ChangesetId {
     store
         .record_verify(&f1(), &writer, id, main.git_tree_id(), Vec::new())
         .unwrap();
-    store.record_landing_intent(&f1(), &writer, id).unwrap();
+    store
+        .record_landing_intent(&f1(), &writer, id, &agent_request())
+        .unwrap();
     id
 }
 
@@ -925,7 +927,9 @@ fn a_landing_killed_mid_export_finishes_on_the_branch_another_landing_pushed() {
     store
         .record_verify(&e2, &writer, id, main, Vec::new())
         .unwrap();
-    store.record_landing_intent(&e2, &writer, id).unwrap();
+    store
+        .record_landing_intent(&e2, &writer, id, &agent_request())
+        .unwrap();
     let lander = Lander::spawn(authority.clone(), up.land_config(dir.join("repos"))).unwrap();
     for fork in [&e2, &f1()] {
         let step = wait_for(store, fork, |st| {
@@ -960,4 +964,9 @@ impl Upstream {
             remote,
         }
     }
+}
+
+/// A landing request as an agent, with no declarations.
+fn agent_request() -> cuenca_core::gates::LandingRequest {
+    cuenca_core::gates::LandingRequest::new(cuenca_core::gates::AuthorKind::Agent)
 }

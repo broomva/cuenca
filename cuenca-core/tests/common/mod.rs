@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 
-use cuenca_core::{ForkName, Holder, LocationName, NodeId, PrincipalName, Store, Writer};
+use cuenca_core::gates::{AuthorKind, LandingRequest};
+use cuenca_core::{
+    ChangesetId, ForkName, Holder, LocationName, NodeId, PrincipalName, Store, Writer,
+};
 use cuenca_tree::{Blob, Changeset, Entry, GitOid, Op, RepoPath, Tree};
 
 pub fn loc(s: &str) -> LocationName {
@@ -68,7 +71,7 @@ pub fn verify(store: &Store, fork: &ForkName, writer: &Writer, id: cuenca_core::
 /// the offset of the move of main.
 pub fn land(store: &Store, fork: &ForkName, writer: &Writer, id: cuenca_core::ChangesetId) -> u64 {
     verify(store, fork, writer, id);
-    store.record_landing_intent(fork, writer, id).unwrap();
+    ask_landing(store, fork, writer, id).unwrap();
     store.advance_main(fork, id).unwrap()
 }
 
@@ -80,4 +83,16 @@ pub fn agent() -> Holder {
 /// [`agent`] under epoch 1, a new fork's.
 pub fn w1() -> Writer {
     Writer::new(agent(), 1)
+}
+
+/// Record an agent's landing request with no declarations; the offset of its record.
+pub fn ask_landing(
+    store: &Store,
+    fork: &ForkName,
+    writer: &Writer,
+    id: ChangesetId,
+) -> cuenca_core::Result<u64> {
+    store
+        .record_landing_intent(fork, writer, id, &LandingRequest::new(AuthorKind::Agent))
+        .map(|l| l.offset)
 }

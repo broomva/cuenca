@@ -58,6 +58,26 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo test --workspace --locked
 
+  policy-differential:
+    # The gate engine reads .control/policy.yaml as p9 (PyYAML) does: generated policies
+    # go to both, and any disagreement fails (owner ask A15, BRO-3313).
+    name: Policy differential
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.99.0"
+      - uses: Swatinem/rust-cache@v2
+      - name: PyYAML from Ubuntu's archive
+        run: |
+          sudo apt-get update -q
+          sudo apt-get install -y --no-install-recommends python3-yaml
+          /usr/bin/python3 -c 'import yaml; print("PyYAML", yaml.__version__)'
+      - run: cargo build -p cuenca-core --example policy_projection --locked
+      # Without --p9 the script downloads p9 at its pinned commit and checks the hash.
+      - run: /usr/bin/python3 cuenca-core/scripts/policy-differential.py --engine target/debug/examples/policy_projection --cases 20000
+
   msrv:
     name: MSRV Check
     runs-on: ubuntu-latest

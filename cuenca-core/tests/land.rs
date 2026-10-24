@@ -48,7 +48,7 @@ fn a_remote_landing_moves_one_step_at_a_time_and_each_retry_appends_nothing() {
         store.record_export_intent(&f(), id, &e),
         Err(CoreError::NoLanding { .. })
     ));
-    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    ask_landing(&store, &f(), &w1(), id).unwrap();
     assert_eq!(step(&store, &f()), LandingStep::Requested);
     // Out of order: each step needs the one before it.
     for out_of_order in [
@@ -113,17 +113,14 @@ fn a_remote_landing_moves_one_step_at_a_time_and_each_retry_appends_nothing() {
     ));
     // Asking again for the same changeset is a retry of the request.
     let request = store.fork(&f()).unwrap().unwrap().landing.unwrap().offset;
-    assert_eq!(
-        store.record_landing_intent(&f(), &w1(), id).unwrap(),
-        request
-    );
+    assert_eq!(ask_landing(&store, &f(), &w1(), id).unwrap(), request);
     store.replay_check().unwrap();
 }
 
 #[test]
 fn an_export_names_the_changesets_own_branch() {
     let (_d, store, id) = verified(Some(REMOTE));
-    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    ask_landing(&store, &f(), &w1(), id).unwrap();
     let mut e = export(id);
     e = serde_json::from_value(serde_json::json!({
         "commit": e.commit.to_hex(),
@@ -154,7 +151,7 @@ fn an_export_names_the_changesets_own_branch() {
 fn a_location_without_a_remote_waits_for_the_owner_and_keeps_the_old_main() {
     let (_d, store, id) = verified(None);
     let old = store.location(&loc("l")).unwrap().unwrap().main;
-    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    ask_landing(&store, &f(), &w1(), id).unwrap();
     // The authority's export steps do not apply.
     assert!(matches!(
         store.record_export_intent(&f(), id, &export(id)),
@@ -202,7 +199,7 @@ fn a_request_needs_a_verify_of_the_head_against_main_as_it_is_now() {
     let f2 = write(&store, &store.fork_head(&f()).unwrap(), &[("a", b"f2")]);
     let pf2 = store.publish_draft(&f(), &w1(), &f2).unwrap();
     assert!(matches!(
-        store.record_landing_intent(&f(), &w1(), pf2.id),
+        ask_landing(&store, &f(), &w1(), pf2.id),
         Err(CoreError::NotVerified { .. })
     ));
     // g verifies, then main moves under it: its verify no longer covers it.
@@ -213,7 +210,7 @@ fn a_request_needs_a_verify_of_the_head_against_main_as_it_is_now() {
     let ph = store.publish_draft(&fork("h"), &w1(), &h1).unwrap();
     land(&store, &fork("h"), &w1(), ph.id);
     assert!(matches!(
-        store.record_landing_intent(&fork("g"), &w1(), pg.id),
+        ask_landing(&store, &fork("g"), &w1(), pg.id),
         Err(CoreError::NotVerified { .. })
     ));
 }
@@ -221,7 +218,7 @@ fn a_request_needs_a_verify_of_the_head_against_main_as_it_is_now() {
 #[test]
 fn a_failed_landing_stops_and_asking_again_is_a_retry() {
     let (_d, store, id) = verified(Some(REMOTE));
-    let request = store.record_landing_intent(&f(), &w1(), id).unwrap();
+    let request = ask_landing(&store, &f(), &w1(), id).unwrap();
     store.record_export_intent(&f(), id, &export(id)).unwrap();
     let long = "€".repeat(cuenca_core::MAX_LANDING_TEXT);
     let at = store.record_landing_failed(&f(), id, &long).unwrap();
@@ -237,10 +234,7 @@ fn a_failed_landing_stops_and_asking_again_is_a_retry() {
         store.record_exported(&f(), id),
         Err(CoreError::LandingStep { .. })
     ));
-    assert_eq!(
-        store.record_landing_intent(&f(), &w1(), id).unwrap(),
-        request
-    );
+    assert_eq!(ask_landing(&store, &f(), &w1(), id).unwrap(), request);
     store.replay_check().unwrap();
 }
 
@@ -248,7 +242,7 @@ fn a_failed_landing_stops_and_asking_again_is_a_retry() {
 fn a_revoked_holder_s_request_goes_no_further() {
     for at_step in 0..2 {
         let (_d, store, id) = verified(Some(REMOTE));
-        store.record_landing_intent(&f(), &w1(), id).unwrap();
+        ask_landing(&store, &f(), &w1(), id).unwrap();
         if at_step == 1 {
             store.record_export_intent(&f(), id, &export(id)).unwrap();
             store.record_exported(&f(), id).unwrap();
@@ -264,7 +258,7 @@ fn a_revoked_holder_s_request_goes_no_further() {
         store.record_landing_failed(&f(), id, "revoked").unwrap();
     }
     let (_d, store, id) = verified(None);
-    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    ask_landing(&store, &f(), &w1(), id).unwrap();
     store.revoke(&PrincipalName::new("agent").unwrap()).unwrap();
     assert!(matches!(
         store.advance_main(&f(), id),
@@ -275,7 +269,7 @@ fn a_revoked_holder_s_request_goes_no_further() {
 #[test]
 fn a_takeover_drops_a_landing_in_flight() {
     let (_d, store, id) = verified(Some(REMOTE));
-    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    ask_landing(&store, &f(), &w1(), id).unwrap();
     store.record_export_intent(&f(), id, &export(id)).unwrap();
     store
         .take_over(&f(), 1, &holder("owner", "nOwnerMacCNTRL"))
@@ -292,7 +286,7 @@ fn a_takeover_drops_a_landing_in_flight() {
 fn the_owner_lands_only_a_live_request_for_the_head() {
     // A draft after the request: the request is no longer the head's.
     let (_d, store, id) = verified(None);
-    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    ask_landing(&store, &f(), &w1(), id).unwrap();
     let next = write(&store, &store.fork_head(&f()).unwrap(), &[("a", b"3")]);
     store.publish_draft(&f(), &w1(), &next).unwrap();
     assert!(matches!(
@@ -301,7 +295,7 @@ fn the_owner_lands_only_a_live_request_for_the_head() {
     ));
     // A failed request does not land.
     let (_d, store, id) = verified(None);
-    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    ask_landing(&store, &f(), &w1(), id).unwrap();
     store
         .record_landing_failed(&f(), id, "owner said no")
         .unwrap();
@@ -315,7 +309,7 @@ fn the_owner_lands_only_a_live_request_for_the_head() {
 #[test]
 fn a_pull_request_needs_a_number_and_a_url() {
     let (_d, store, id) = verified(Some(REMOTE));
-    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    ask_landing(&store, &f(), &w1(), id).unwrap();
     store.record_export_intent(&f(), id, &export(id)).unwrap();
     store.record_exported(&f(), id).unwrap();
     store.record_review_intent(&f(), id).unwrap();
@@ -358,7 +352,7 @@ fn a_fork_with_several_drafts_lands_its_head_onto_its_own_base_only() {
     }
     let id = id.unwrap();
     verify(&store, &f(), &w1(), id);
-    store.record_landing_intent(&f(), &w1(), id).unwrap();
+    ask_landing(&store, &f(), &w1(), id).unwrap();
     assert_eq!(
         store.fork(&f()).unwrap().unwrap().landing.unwrap().main,
         main.git_tree_id()

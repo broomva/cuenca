@@ -93,8 +93,12 @@ fn a_write_from_anyone_but_the_holder_is_refused_50_of_50() {
         let n = rng.next().to_string();
         let cs = write(&store, &main, &[("a", n.as_bytes())]);
         let publish = store.publish_draft(&fork("f"), writer, &cs);
-        let intent =
-            store.record_landing_intent(&fork("f"), writer, cuenca_core::ChangesetId::of(&cs));
+        let intent = ask_landing(
+            &store,
+            &fork("f"),
+            writer,
+            cuenca_core::ChangesetId::of(&cs),
+        );
         match (publish, intent) {
             (Err(CoreError::NotHolder { .. }), Err(CoreError::NotHolder { .. })) => refused += 1,
             other => panic!("attempt {attempt} by {writer:?}: {other:?}"),
@@ -579,16 +583,12 @@ fn a_takeover_drops_the_old_holders_landing_intent() {
     let cs = write(&store, &main, &[("a", b"2")]);
     let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
     verify(&store, &fork("f"), &w1(), p.id);
-    store
-        .record_landing_intent(&fork("f"), &w1(), p.id)
-        .unwrap();
+    ask_landing(&store, &fork("f"), &w1(), p.id).unwrap();
     store.take_over(&fork("f"), 1, &owner()).unwrap();
     assert_eq!(store.fork(&fork("f")).unwrap().unwrap().landing, None);
     // The new holder asking for the same landing is a new intent, not a retry.
     let len = store.len().unwrap();
-    let at = store
-        .record_landing_intent(&fork("f"), &Writer::new(owner(), 2), p.id)
-        .unwrap();
+    let at = ask_landing(&store, &fork("f"), &Writer::new(owner(), 2), p.id).unwrap();
     assert_eq!(at, len);
 }
 
@@ -614,11 +614,7 @@ fn a_revoked_principal_is_refused_on_its_next_request() {
     assert!(revoked(store.publish_draft(&fork("f"), &w1(), &next)));
     // Even a retry of what it published before.
     assert!(revoked(store.publish_draft(&fork("f"), &w1(), &cs)));
-    assert!(revoked(store.record_landing_intent(
-        &fork("f"),
-        &w1(),
-        p.id
-    )));
+    assert!(revoked(ask_landing(&store, &fork("f"), &w1(), p.id)));
     assert!(revoked(store.create_fork(&fork("g"), &loc("l"), &agent())));
     // Another principal's key on the same machine is not this one.
     store
@@ -708,7 +704,7 @@ fn a_takeover_fences_every_earlier_holder() {
         assert_eq!(p.fork.as_str(), format!("f-from-{node}-e{}", writer.epoch));
         // A stale holder cannot ask to land either.
         assert!(matches!(
-            store.record_landing_intent(&fork("f"), &writer, p.id),
+            ask_landing(&store, &fork("f"), &writer, p.id),
             Err(CoreError::StaleEpoch { current: 3, .. })
         ));
     }

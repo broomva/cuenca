@@ -13,6 +13,7 @@ rust-version.workspace = true
 [dependencies]
 cuenca-tree = { path = "../cuenca-tree" }
 redb.workspace = true
+regex = "1"
 rustix = { version = "1", features = ["fs"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -20,3 +21,4 @@ sha2.workspace = true
 tempfile.workspace = true
 thiserror.workspace = true
 toml = { version = "1.1.8", default-features = false, features = ["std", "serde", "parse"] }
+yaml-rust2 = "0.13"

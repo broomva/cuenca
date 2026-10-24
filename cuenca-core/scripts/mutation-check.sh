@@ -121,16 +121,12 @@ mutate src/state.rs '            let ours =
                 loc.main == state.base || loc.main_moved.as_ref().is_some_and(|m| m.fork == *from);' '            let ours = loc.main == state.base;' --test land
 mutate src/state.rs '            loc.main = state.head;' '            loc.main = state.base;' --test land
 mutate src/state.rs 'if let Some(l) = &state.landing
-                && l.changeset == *id' 'if let Some(l) = &state.landing
-                && false' --test store
-mutate src/state.rs 'return Ok(Applied::Repeat(l.offset));
-            }
-            if state.head_changeset.map(|(head, _)| head) != Some(*id) {' 'return Ok(Applied::Repeat(l.offset));
-            }
-            if false {' --test store
+        && l.changeset == id' 'if let Some(l) = &state.landing
+        && false' --test store
+mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(id) {' 'if false {' --lib
 # Landing: verified first, each step after its predecessor, a remote decides the path.
-mutate src/state.rs 'Some(v) if v.changeset == *id && v.base == loc.main => {}' 'Some(v) if v.changeset == *id => {}' --test land
-mutate src/state.rs 'Some(v) if v.changeset == *id && v.base == loc.main => {}' 'Some(v) if v.base == loc.main => {}' --test land
+mutate src/state.rs 'Some(v) if v.changeset == id && v.base == loc.main => Ok(None),' 'Some(v) if v.changeset == id => Ok(None),' --test land
+mutate src/state.rs 'Some(v) if v.changeset == id && v.base == loc.main => Ok(None),' 'Some(v) if v.base == loc.main => Ok(None),' --test land
 mutate src/state.rs '            if loc.remote.is_some() {
                 return Err(CoreError::HasRemote(at.to_string()));' '            if false {
                 return Err(CoreError::HasRemote(at.to_string()));' --test land
@@ -196,10 +192,8 @@ mutate src/state.rs 'check_writer(view, &state, writer)?;
             return draft(view, offset, state, id, changeset);' --test forks
 mutate src/state.rs 'check_writer(view, &state, writer)?;
             return draft(view, offset, state, id, changeset);' 'return draft(view, offset, state, id, changeset);' --test forks
-mutate src/state.rs 'let mut state = fork(view, name)?;
-            check_writer(view, &state, writer)?;
-            if let Some(l) = &state.landing' 'let mut state = fork(view, name)?;
-            if let Some(l) = &state.landing' --test forks
+mutate src/state.rs '    let state = fork(view, name)?;
+    check_writer(view, &state, writer)?;' '    let state = fork(view, name)?;' --test forks
 mutate src/state.rs 'Ok(()) => {
                     return Err(CoreError::Inconsistent(format!(
                         "draft {id} is fenced from {name:?}, but its writer holds it"
@@ -254,7 +248,7 @@ mutate src/store.rs 'let locations: BTreeMap<String, Location> = txn
                 let l: Location = from_json(v.value())?;
                 Ok((l.name.to_string(), l))' --lib
 mutate src/store.rs 'if index != replayed {' 'if false {' --lib
-mutate src/store.rs '.map_or(0, |last| last + 1)' '.map_or(0, |last| last + 2)' --test store
+mutate src/store.rs 'offset = last_offset(&log)?.map_or(0, |last| last + 1);' 'offset = last_offset(&log)?.map_or(0, |last| last + 2);' --test store
 # Trees are rebuilt and checked against their id.
 mutate src/store.rs 'if tree.git_tree_id() != root {' 'if false {' --lib
 # Names and remotes.
@@ -276,6 +270,90 @@ mutate src/store.rs 'let (Some(sha), Some(size)) = (bytes.get(..32), bytes.get(3
 # Commits are durable before they return: without it, a kill loses acknowledged drafts.
 mutate src/store.rs 'txn.set_durability(Durability::Immediate);' 'txn.set_durability(Durability::None);' --test crash
 
+# Gate engine (BRO-3313): the intent is journaled against the main it was recorded
+# on, the writer is checked before any gate runs, the governance window and size limit
+# have edges, findings are capped, and the policy compiler refuses what it must.
+mutate src/store.rs 'if loc.main_moved.is_some_and(|m| m.offset >= seen) {' 'if false {' --lib
+mutate src/store.rs '            if let Some(offset) = check_landing(&view, fork, writer, id)? {
+                return self.journaled_landing(offset);
+            }' '' --test forks
+mutate src/gates/builtin.rs '*at >= since && ' '' --lib
+mutate src/gates/builtin.rs 'let since = cx.at_ms.saturating_sub(self.window_ms);' 'let since = 0;' --lib
+mutate src/gates/builtin.rs 'Some(c) if c.len() as u64 > self.0 =>' 'Some(c) if c.len() as u64 >= self.0 =>' --lib
+mutate src/gates/mod.rs 'findings.truncate(MAX_FINDINGS_PER_GATE);' '' --lib
+mutate src/gates/policy.rs '            Ok((Event::Alias(_), mark)) => {' '            Ok((Event::Alias(_), mark)) if false => {' --lib
+mutate src/gates/policy.rs 'if bytes.len() > MAX_POLICY_BYTES {' 'if false {' --lib
+# P20 r9 (B): a line break PyYAML reads and yaml-rust2 does not is refused.
+mutate src/gates/policy.rs "                '\\u{85}' | '\\u{2028}' | '\\u{2029}' | '\\u{fffe}' | '\\u{ffff}'" "                '\\u{fffe}' | '\\u{ffff}'" --lib
+# A15 differential: a tab, a plain scalar YAML 1.1 reads otherwise, and what p9 refuses
+# in auto_merge are refused. scripts/policy-differential-mutants.sh proves the
+# differential test catches each of these too.
+mutate src/gates/policy.rs "|| (c.is_control() && !matches!(c, '\\n' | '\\r'))" "|| (c.is_control() && !matches!(c, '\\t' | '\\n' | '\\r'))" --lib
+mutate src/gates/policy.rs '                if !plain_scalar_agrees(&value) =>' '                if false =>' --lib
+mutate src/gates/policy.rs '                && v.as_bool().is_none()' '                && false' --lib
+mutate src/gates/policy.rs '            && !["squash", "merge", "rebase"].contains(&method.as_str())' '            && false' --lib
+mutate src/gates/policy.rs '        if gated && default_action == "auto" {' '        if false {' --lib
+mutate src/gates/policy.rs '                if gated && action == "auto" {' '                if false {' --lib
+mutate src/gates/policy.rs '            && !(lo..=hi).contains(&n)' '            && false' --lib
+mutate src/gates/policy.rs '        if strata != ["A", "B", "C"] {' '        if false {' --lib
+mutate src/gates/policy.rs ')? && !checks.iter().any(|c| c == "stability-check")' ')? && false' --lib
+mutate src/gates/policy.rs '.is_some_and(|n| n.iter().any(String::is_empty))' '.is_some_and(|_| false)' --lib
+mutate src/gates/policy.rs '                _ => return Err(format!("{at}: unknown key {key:?}")),' '                _ => {}' --lib
+mutate src/store.rs '        let bytes = if matches!(entry, Entry::Symlink(_)) {' '        let bytes = if false {' --lib
+
+# Gate engine floors (P20 r1, C): p9's governance tier and the size limit cannot be loosened; an unreadable check manifest fails.
+mutate src/gates/policy.rs '            if !missing.is_empty() {' '            if false {' --lib
+mutate src/gates/policy.rs ')? && max != 1' ')? && false' --lib
+mutate src/gates/policy.rs '    if !(lo..=hi).contains(&window) {' '    if false {' --lib
+mutate src/gates/policy.rs '        None => GOVERNANCE_PATHS.iter().map(|p| p.to_string()).collect(),' '        None => Vec::new(),' --lib
+mutate src/gates/policy.rs '        Some(Yaml::Null) => None,
+        gates => gates,' '        Some(Yaml::Null) => return Ok(None),
+        gates => gates,' --lib
+mutate src/gates/policy.rs '            if max > DEFAULT_MAX_FILE_BYTES {' '            if false {' --lib
+mutate src/gates/mod.rs '        if let Err(error) = &input.checks.bytes {' '        if let Err(error) = &Ok::<(), String>(()) {' --lib
+
+# P20 r1 (A): the pattern count is capped.
+mutate src/gates/policy.rs '    if patterns >= MAX_POLICY_PATTERNS {' '    if false {' --lib
+
+# P20 r1 (B): only governance moves count; directory declarations; the built-in G4 is case-folded.
+mutate src/gates/builtin.rs '*at >= since && self.touches(paths.iter().map(|p| p.as_str()))' '*at >= since' --lib
+mutate src/gates/mod.rs '.any(|(i, _)| self.dirs.contains(&path[..=i]))' '.any(|_| false)' --lib
+mutate src/gates/policy.rs 'r"(?i)\.(env' 'r"\.(env' --lib
+
+# P20 r2 (C): the per-blob cache is keyed by whether the put changes main's content; rules are capped.
+mutate src/gates/mod.rs '(Some(before), Some((entry, _))) => usize::from(before.oid() != entry.oid()),' '(Some(_), Some(_)) => 1,' --lib
+mutate src/gates/policy.rs '        if rules > MAX_POLICY_RULES {' '        if false {' --lib
+
+# P20 r2 (A, B): YAML depth is capped before the loader; an unusable base file keeps its hash; declarations are paths, matched by directory.
+mutate src/gates/policy.rs '                if depth > MAX_POLICY_DEPTH {' '                if false {' --lib
+mutate src/store.rs '        (Some(info.sha256), bytes)' '        (None, bytes)' --lib
+mutate src/gates/mod.rs '            if RepoPath::new(key.trim_end_matches('"'"'/'"'"')).is_err() {' '            if false {' --lib
+mutate src/gates/mod.rs '        let dirs = path.match_indices('"'"'/'"'"').map(|(i, _)| &path[..=i]);' '        let dirs = std::iter::empty::<&str>();' --lib
+
+mutate src/gates/policy.rs '        Some(y) if y.as_hash().is_some() => Ok(y),' '        Some(y) => Ok(y),' --lib
+
+# P20 r4 (A, B, C): only a missing key is absent; a byte-order mark is skipped; rules are checked as p9 checks them.
+mutate src/gates/policy.rs '    y.as_hash()?.get(&Yaml::String(key.to_string()))' '    Some(&y[key]).filter(|v| !v.is_badvalue() && !v.is_null())' --lib
+mutate src/gates/policy.rs "        let text = text.strip_prefix('\\u{feff}').unwrap_or(text);" '' --lib
+mutate src/gates/policy.rs '                if !RULE_ACTIONS.contains(&action) {' '                if false {' --lib
+mutate src/gates/policy.rs '                        return Err(format!("{key} sets both branch_pattern and path_touched"));' '                        return Ok(policy);' --lib
+mutate src/gates/policy.rs '                    (None, None) => {' '                    (None, None) if false => {' --lib
+
+# P20 r5, r6 and A10: every mapping, the top level included, is read through one schema
+# (`Section`), which refuses an unknown key and a missing required key; an id that looks
+# like G4 is an error. One mechanism, so one mutant each; the walk test covers every
+# mapping in SCHEMA.
+mutate src/gates/policy.rs '                if field(y, key).is_none() {' '                if false {' --lib
+mutate src/gates/policy.rs '                    if folded == "g4" {' '                    if false {' --lib
+
+# P20 r7 (A, B, C): open mappings refuse near misses; tags are refused before loading;
+# a governance glob must compile.
+mutate src/gates/policy.rs '    row[b.len()] <= 2' '    false' --lib
+mutate src/gates/policy.rs '    if a.starts_with(&b) {' '    if false {' --lib
+mutate src/gates/policy.rs '                Event::Scalar(_, _, _, Some(_))
+                | Event::SequenceStart(_, Some(_))' '                Event::SequenceStart(_, Some(_))' --lib
+mutate src/gates/policy.rs '                | Event::MappingStart(_, Some(_)),' '                | Event::MappingStart(usize::MAX, Some(_)),' --lib
+mutate src/gates/policy.rs '.any(|p| p.is_empty() || super::builtin::try_glob(p).is_err())' '.any(|p| p.is_empty())' --lib
 
 # Verify records (BRO-3254): the checks run are the base's list, read by the store from
 # the location's main, exactly and in order; only the holder, on the head, against the
