@@ -41,17 +41,26 @@ done
 [ "$(id -u)" -eq 0 ] || die "run as root"
 [ ${#allow[@]} -gt 0 ] || die "name at least one enrolled owner device with --allow <tailnet address>"
 # A device reaches smbd over either of its tailnet addresses (MagicDNS names resolve to both),
-# so each must be named: 100.64.0.0/10 or fd7a:115c:a1e0::/48, one address, never a range.
+# so each must be named: 100.64.0.0/10 or fd7a:115c:a1e0::/48, one address, never a range,
+# spelled canonically (Samba matches the text, so another spelling would never admit the device).
+# shellcheck source=tailnet-addr.sh
+. "$here/tailnet-addr.sh"
 for ip in "${allow[@]}"; do
-    if [[ $ip =~ ^100\.([0-9]{1,3})\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-        [ "${BASH_REMATCH[1]}" -ge 64 ] && [ "${BASH_REMATCH[1]}" -le 127 ] \
-            || die "--allow $ip is not a tailnet IPv4 address (100.64.0.0/10)"
-    elif ! [[ ${ip,,} =~ ^fd7a:115c:a1e0:[0-9a-f:]*[0-9a-f]$ ]]; then
-        die "--allow $ip is not a single tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48)"
-    fi
+    c=$(canonical_tailnet "$ip") \
+        || die "--allow $ip is not a single tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48)"
+    [ "$c" = "$ip" ] || die "--allow $ip: write it canonically, as $c"
 done
 # Plain characters only: the path is written into smb.conf and the unit by sed.
 [[ $volume =~ ^/[A-Za-z0-9._/-]+$ ]] || die "--volume must be an absolute path of letters, digits, '.', '_', '-' and '/'"
+# The volume is chowned and re-moded below, so it must name a directory of its own: no '.' or '..'
+# component, no empty one, never in the authority's home, and never a directory that exists
+# unless an earlier install made it Cuenca's (which also refuses /, /etc and /var/lib).
+[[ $volume =~ (^|/)\.\.?(/|$) || $volume == *//* || $volume == */ ]] \
+    && die "--volume $volume has a '.', '..' or empty component"
+case "$volume/" in "$home"/*) die "--volume $volume is inside the authority's home $home" ;; esac
+if [ -e "$volume" ] && [ "$(stat -c %U "$volume")" != cuenca ]; then
+    die "--volume $volume already exists and is not Cuenca's; name a new directory"
+fi
 if [ -n "$binary" ]; then
     [ -f "$binary" ] && [ -x "$binary" ] || die "--binary $binary is not an executable file"
 elif [ ! -x /usr/local/bin/cuenca ]; then

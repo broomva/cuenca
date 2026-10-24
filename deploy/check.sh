@@ -68,9 +68,10 @@ expect_param "nt acl support" No cuenca
 expect_param path "$CUENCA_VOLUME" cuenca
 allow=$(param "hosts allow")
 [ -n "$allow" ] && ok "hosts allow names the enrolled devices: $allow" || bad "hosts allow is empty"
+# shellcheck source=tailnet-addr.sh
+. "$(dirname "$0")/tailnet-addr.sh"
 for a in ${allow//,/ }; do
-    [[ $a =~ ^100\.(6[4-9]|[7-9][0-9]|1[01][0-9]|12[0-7])\.[0-9]+\.[0-9]+$ || ${a,,} =~ ^fd7a:115c:a1e0:[0-9a-f:]*[0-9a-f]$ ]] \
-        || bad "hosts allow entry $a is not a single tailnet address"
+    [ "$(canonical_tailnet "$a")" = "$a" ] || bad "hosts allow entry $a is not a single, canonically written tailnet address"
 done
 
 if [ "$services" = 0 ]; then

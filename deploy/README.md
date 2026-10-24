@@ -9,6 +9,7 @@ One Ubuntu 24.04 host on the tailnet runs the Cuenca authority (`cuenca serve`) 
 | `cuenca.service.in` | The authority's systemd unit, run as `cuenca:cuenca` |
 | `smbd-cuenca.conf` | A drop-in for Ubuntu's `smbd.service`: start only once `tailscale0` has its address |
 | `smb.conf.in` | Samba's configuration: tailnet only, one account, server-side modes, `fruit` + `streams_xattr` |
+| `tailnet-addr.sh` | Sourced by both scripts: an `--allow` / `hosts allow` address must be one tailnet address, written canonically |
 | `wait-tailnet` | Waits for `tailscale0`'s IPv4 address (both units run it before starting) |
 | `test-container.sh` | CI: install twice in `ubuntu:24.04`, check that nothing moved, and check that `check.sh` catches each planted fault |
 | `test-systemd.sh` | Before changing the units: the real binary under Ubuntu's systemd in a privileged container, with a dummy `tailscale0`. It runs the full `check.sh`, shows that Samba refuses the host's own address (with a control that logs in as `cuenca-owner` and finds `main/` read-only), restarts after a kill, and shows that `smbd` waits for `tailscale0` |
@@ -39,7 +40,7 @@ There are two accounts, and neither has a shell. `cuenca` runs the authority. `c
    ```bash
    sudo bash deploy/install.sh --binary ./cuenca --allow <mac ipv4> --allow <mac ipv6> --allow <iphone ipv4> --allow <iphone ipv6>
    ```
-   The script installs `samba`, `samba-vfs-modules` (which holds `fruit` and `streams_xattr`), `git`, `gh` and `curl` from Ubuntu's archive, holding their services until Cuenca's `smb.conf` is in place, creates the accounts and directories, renders the unit and `smb.conf` (it checks `smb.conf` with `testparm` first, and keeps Ubuntu's own file once as `smb.conf.pre-cuenca`). The host's `smb.conf` becomes Cuenca's alone: any other share on it is dropped, so use a host that serves nothing else over SMB, masks `nmbd`, and starts `smbd` and `cuenca`. On a host that still runs spike C, add `--retire-spike` to remove the `cuenca-spike` container, which holds `:445`.
+   The script installs `samba`, `samba-vfs-modules` (which holds `fruit` and `streams_xattr`), `git`, `gh` and `curl` from Ubuntu's archive, holding their services until Cuenca's `smb.conf` is in place, creates the accounts and directories, renders the unit and `smb.conf` (it checks `smb.conf` with `testparm` first, and keeps Ubuntu's own file once as `smb.conf.pre-cuenca`), masks `nmbd`, and starts `smbd` and `cuenca`. The host's `smb.conf` becomes Cuenca's alone: any other share on it is dropped, so use a host that serves nothing else over SMB. Each `--allow` address must be written canonically (as `tailscale ip` prints it), and `--volume` must be a new directory outside `/var/lib/cuenca`. On a host that still runs spike C, add `--retire-spike` to remove the `cuenca-spike` container, which holds `:445`.
 4. Hand the owner the Samba password, out of band. The script generates it once and never prints it. It is in `/root/cuenca-owner.smbpass` (root only). Read it on the host, store it in the owner's password manager, then `sudo rm /root/cuenca-owner.smbpass`.
 5. Log the authority's `gh` in for landing (the shared login, for now; spec rev 2.2 §6):
    ```bash
