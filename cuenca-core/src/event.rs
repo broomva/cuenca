@@ -108,8 +108,9 @@ pub enum Event {
         changeset: ChangesetId,
     },
     /// The authority built `commit` (the changeset's target tree, with `parent`, a
-    /// commit of the remote's `base_ref` whose tree is the changeset's base) and is
-    /// about to push it to the remote's `branch`. Written before the push.
+    /// commit of the remote's `base_ref` whose tree is the main the request's verify
+    /// judged, [`crate::Landing::main`]), or found it already on the remote's `branch`,
+    /// and is about to push it there. Written before the push.
     ExportIntent {
         fork: ForkName,
         changeset: ChangesetId,

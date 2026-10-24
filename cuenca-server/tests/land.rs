@@ -604,6 +604,50 @@ fn a_branch_with_the_drafts_tree_onto_another_parent_fails_the_landing() {
     assert!(up.creates().is_empty());
 }
 
+/// An export already on the remote with the right trees but other metadata (another
+/// author, date or message: an earlier authority's, or a person's) is adopted, not
+/// fought: it becomes this landing's export, and its pull request is opened from it.
+#[test]
+fn an_export_with_the_right_trees_and_other_metadata_is_adopted() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (_a1, id) = requested(&s, &up, Some(&up.url));
+    std::fs::write(up.work.join("README"), "landed\n").unwrap();
+    std::fs::create_dir_all(up.work.join("new")).unwrap();
+    std::fs::write(up.work.join("new/file.txt"), "new\n").unwrap();
+    git(&up.work, &["add", "-A"]);
+    git(&up.work, &["commit", "-q", "-m", "by hand"]);
+    let theirs = git(&up.work, &["rev-parse", "HEAD"]);
+    git(
+        &up.work,
+        &[
+            "push",
+            "-q",
+            up.remote.to_str().unwrap(),
+            &format!("HEAD:refs/heads/cp/{id}"),
+        ],
+    );
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
+    let step = wait_for(s.authority.store(), &f1(), |st| {
+        in_review(st) || matches!(st, LandingStep::Failed { .. })
+    });
+    let LandingStep::InReview { export, pr: 1, .. } = step else {
+        panic!("{step:?}")
+    };
+    assert_eq!(export.commit.to_hex(), theirs, "adopted, not rebuilt");
+    assert_eq!(
+        up.git(&["rev-parse", &format!("cp/{id}")]),
+        theirs,
+        "not moved"
+    );
+    assert_eq!(up.creates().len(), 1);
+}
+
 /// Nor is a merge commit with the draft's tree whose first parent is main.
 #[test]
 fn a_merge_commit_with_the_drafts_tree_is_not_an_export() {
