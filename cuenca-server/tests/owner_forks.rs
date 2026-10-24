@@ -788,15 +788,72 @@ fn a_revocation_does_not_wait_for_a_fork() {
         .unwrap();
         let _ = tx.send((v, start.elapsed()));
     });
-    let Ok((v, took)) = rx.recv_timeout(Duration::from_millis(200)) else {
+    // Well under the fork's 5 s of attempts, and well over a loaded host's fsync.
+    let Ok((v, took)) = rx.recv_timeout(Duration::from_secs(2)) else {
         // Stuck behind the fork. Exit at once: a server whose locks are stuck cannot
         // shut down, so failing the test the usual way would hang it instead.
-        eprintln!("the revocation waited for the fork");
+        eprintln!("a_revocation_does_not_wait_for_a_fork: the revocation waited for the fork");
         std::process::exit(101);
     };
     assert_eq!(v["ok"], true, "{v}");
     eprintln!("revoked in {took:?} while a fork was snapshotting");
     assert_eq!(forking.join().unwrap(), 409);
+    drop(materialiser);
+    s.stop();
+}
+
+/// The volume is unlocked between a fork's snapshot attempts: while one fork keeps
+/// failing its snapshot, a fork of another owner fork, which needs the volume too, is
+/// made at once rather than after the first fork's 5 s.
+#[test]
+fn a_fork_retrying_its_snapshot_leaves_the_volume_to_others() {
+    let (s, mac, shown, _dir, materialiser) = forking_setup();
+    let v = s.admin(AdminRequest::OwnerFork {
+        location: loc("l1"),
+        fork: fork("owner-ipad"),
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let ipad = shown.parent().unwrap().join("owner-ipad");
+    let start = Instant::now();
+    while !ipad.is_dir() {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "owner-ipad not shown"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    std::fs::write(ipad.join("note.md"), b"from the ipad\n").unwrap();
+    std::fs::write(shown.join("secret.md"), b"locked\n").unwrap();
+    std::fs::set_permissions(
+        shown.join("secret.md"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
+    let (url, token) = (s.url.clone(), mac.clone());
+    let started = Instant::now();
+    let stuck = std::thread::spawn(move || {
+        let status = reqwest::blocking::Client::new()
+            .post(format!("{url}/v1/forks"))
+            .bearer_auth(&token)
+            .json(&serde_json::json!({ "fork": "mac-1", "from": "owner-mac" }))
+            .send()
+            .unwrap()
+            .status();
+        (status, started.elapsed())
+    });
+    std::thread::sleep(Duration::from_millis(300));
+    let other = Instant::now();
+    let r = fork_from(&s, &mac, "mac-2", "owner-ipad");
+    let took = other.elapsed();
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap_or_default());
+    assert!(
+        took < Duration::from_secs(2),
+        "the second fork waited {took:?} for the first fork's attempts"
+    );
+    let (status, first) = stuck.join().unwrap();
+    assert_eq!(status, 409);
+    // The second fork was made while the first was still trying.
+    assert!(first > Duration::from_millis(300) + took, "{first:?}");
     drop(materialiser);
     s.stop();
 }

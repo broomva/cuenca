@@ -70,5 +70,6 @@ pub use checkout::{BlobSource, Checkout, CheckoutSource, Fetched, ObjectDir, Vou
 pub use error::FsError;
 pub use ignore::{DEFAULT_FORKIGNORE, FORKIGNORE, ForkIgnore};
 pub use scan::{
-    Content, MAX_FILE_BYTES, NewBlob, Skipped, Snapshot, SnapshotOptions, snapshot, snapshot_with,
+    Content, Keep, MAX_FILE_BYTES, NewBlob, Skipped, Snapshot, SnapshotOptions, snapshot,
+    snapshot_with,
 };

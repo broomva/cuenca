@@ -232,15 +232,9 @@ impl Authority {
             };
             if started.elapsed() + SNAPSHOT_PAUSE >= SNAPSHOT_BUDGET {
                 tracing::error!(fork = %from, error, attempt, "owner fork snapshot failed; not forked");
-                // Paths in the answer are the fork's own; where the volume is on the
-                // authority's host stays in its log.
-                let shown = format!(
-                    "{}/",
-                    locked.root().join("forks").join(from.as_str()).display()
-                );
                 return Err(BranchError::Snapshot {
                     fork: from.to_string(),
-                    error: error.replace(&shown, ""),
+                    error: without_host_paths(&error, locked.root(), from),
                 });
             }
             drop(locked);
@@ -417,6 +411,19 @@ impl Authority {
     }
 }
 
+/// A failed owner-fork snapshot as the caller is told it: paths are the fork's own
+/// (the fork's folder itself is named by the fork), and where the volume is on the
+/// authority's host stays in its log.
+fn without_host_paths(error: &str, root: &Path, fork: &ForkName) -> String {
+    let dir = root.join("forks").join(fork.as_str());
+    let dir = dir.display().to_string();
+    let root = root.display().to_string();
+    error
+        .replace(&format!("{dir}/"), "")
+        .replace(&dir, fork.as_str())
+        .replace(&root, "<volume>")
+}
+
 /// An IPv4 address that arrived as IPv4-mapped IPv6 is the IPv4 address.
 fn canonical(ip: IpAddr) -> IpAddr {
     match ip {
@@ -459,6 +466,25 @@ impl Caller {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn a_snapshot_error_names_no_host_path() {
+        let root = Path::new("/srv/cuenca/volume");
+        let fork = ForkName::new("owner-mac").unwrap();
+        let said = |e: &str| without_host_paths(e, root, &fork);
+        assert_eq!(
+            said("/srv/cuenca/volume/forks/owner-mac/a/b.md: changed while it was snapshotted"),
+            "a/b.md: changed while it was snapshotted"
+        );
+        assert_eq!(
+            said("/srv/cuenca/volume/forks/owner-mac: Permission denied (os error 13)"),
+            "owner-mac: Permission denied (os error 13)"
+        );
+        assert_eq!(
+            said("/srv/cuenca/volume/forks: gone"),
+            "<volume>/forks: gone"
+        );
+    }
 
     struct Nobody;
 

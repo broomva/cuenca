@@ -96,9 +96,9 @@ mutate src/store.rs 'let target = changeset.apply(&load_tree(&trees, changeset.b
 mutate src/state.rs 'if view.location(name)?.is_some() {' 'if false {' --test store
 mutate src/state.rs 'if view.fork(name)?.is_some() {' 'if false {' --test store
 mutate src/state.rs 'if is_owner_fork(name) != holder.is_volume()
-                ||' 'if false
-                ||' --test forks only_the_volume
-mutate src/state.rs '                || (holder.is_volume() && *holder != Holder::volume())' '' --test forks only_the_volume
+        ||' 'if false
+        ||' --test forks only_the_volume
+mutate src/state.rs '        || (holder.is_volume() && *holder != Holder::volume())' '' --test forks only_the_volume
 mutate src/state.rs 'if name.as_str() == OWNER_FORK_PREFIX.trim_end_matches(' 'if false && name.as_str() == OWNER_FORK_PREFIX.trim_end_matches(' --test forks a_fork_cannot_take_a_name
 mutate src/state.rs 'if is_owner_fork(name) || holder.is_volume() {' 'if holder.is_volume() {' --test forks never_taken_over
 mutate src/state.rs 'if is_owner_fork(name) || holder.is_volume() {' 'if is_owner_fork(name) {' --test forks never_taken_over
@@ -179,7 +179,7 @@ mutate src/state.rs 'fn check_writer(view: &impl View, state: &Fork, writer: &Wr
 mutate src/state.rs 'if state.holder_at(writer.epoch) != Some(&writer.holder) {' 'if false {' --test forks
 mutate src/state.rs 'if writer.epoch != current {' 'if false {' --test forks
 mutate src/state.rs 'not_revoked(view, &holder.principal)?;
-            // `-from` is kept' '// `-from` is kept' --test forks
+    // `-from` is kept' '// `-from` is kept' --test forks
 mutate src/state.rs 'not_revoked(view, &holder.principal)?;
             let mut state = fork(view, name)?;' 'let mut state = fork(view, name)?;' --test forks
 mutate src/state.rs 'if state.epoch() != *expected_epoch {' 'if false {' --test forks
@@ -330,8 +330,8 @@ pub struct Check {' 'pub struct Check {' --lib checks
 # A fork of a fork: from its source's head only, under every new fork's rules, and
 # it remembers its source.
 mutate src/state.rs '            if *base != source.head {' '            if false {' --lib branch_that_does_not_start
-mutate src/state.rs '            new_fork(view, name, holder)?;
-            let source = fork(view, from)?;' '            let source = fork(view, from)?;' --test forks rules_of_a_new_fork
+mutate src/state.rs '    new_fork(view, name, holder)?;
+    fork(view, from)' '    fork(view, from)' --test forks rules_of_a_new_fork
 mutate src/state.rs '                from: Some(from.clone()),' '                from: None,' --test forks fork_of_a_fork
 
 exit $survived

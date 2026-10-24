@@ -124,9 +124,9 @@ mutate src/authority.rs '        drop(self.revocation.write().expect("revocation
 # the ban.
 mutate src/authority.rs 'if self.is_banned(principal) || self.store.revoked(principal)?.is_some() {' 'if false {' --test api
 mutate src/authority.rs '        let _writes = self.revocation.read().expect("revocation lock");' '' --lib
-mutate src/http.rs 'let offset = a.guarded(&c.key.principal, || {
-            a.store.create_fork(&fork, &location, &c.holder)
-        })?;' 'let offset = a.store.create_fork(&fork, &location, &c.holder)?;' --test api
+mutate src/http.rs '                a.guarded(&c.key.principal, || {
+                    a.store.create_fork(&fork, &location, &c.holder)
+                })?' '                a.store.create_fork(&fork, &location, &c.holder)?' --test api
 mutate src/http.rs 'let p = a.guarded(&c.key.principal, || {
             a.store.publish_draft(&name, &writer, &req.changeset)
         })?;' 'let p = a.store.publish_draft(&name, &writer, &req.changeset)?;' --test api
@@ -245,9 +245,9 @@ mutate src/materialise.rs '            swap_into_place(staged, &dest)?;' '      
 # The record follows the swap: written first, a failed swap leaves it naming a tree
 # that is not shown.
 mutate src/materialise.rs '        forget_record(&record)?;
-        if what.is_owner() {' '        forget_record(&record)?;
+        if owner {' '        forget_record(&record)?;
         write_record(&record, tree)?;
-        if what.is_owner() {' --test materialise a_failed_swap_records_nothing
+        if owner {' --test materialise a_failed_swap_records_nothing
 # What the path shows is forgotten before the swap, in memory and on disk: kept, a
 # failure after the swap leaves a record of a tree no longer shown.
 mutate src/materialise.rs '        self.shown.remove(what);
@@ -274,7 +274,12 @@ mutate src/materialise.rs '        if !self.shown.contains_key(what) {
             write_record' '        if false {
             write_record' --test owner_forks adopted
 mutate src/materialise.rs '    if snap.is_clean() {' '    if false {' --test owner_forks shown_once
-mutate src/materialise.rs '    let snap = cuenca_fs::snapshot(dir, &head, cache)' '    let snap = cuenca_fs::snapshot_with(dir, &head, cache, &cuenca_fs::SnapshotOptions { rules: Some(&cuenca_fs::ForkIgnore::parse("").unwrap()), drop_ignored: true })' --test owner_forks finder_metadata
+mutate src/materialise.rs '    cuenca_fs::snapshot_with(dir, head, cache, &options)' '    let none = cuenca_fs::ForkIgnore::parse("").unwrap();
+    let options = cuenca_fs::SnapshotOptions { rules: Some(&none), drop_ignored: true, ..options };
+    cuenca_fs::snapshot_with(dir, head, cache, &options)' --test owner_forks finder_metadata
+# A small file is uploaded as the scan read it, so a client still writing cannot fail
+# the snapshot (BRO-3456).
+mutate src/materialise.rs '        keep: KEEP,' '        keep: cuenca_fs::Keep::default(),' --lib a_small_file_changed_after_the_scan
 mutate src/admin.rs '    if principal.as_str() == cuenca_core::VOLUME_PRINCIPAL {' '    if false {' --test owner_forks keeps_the_volume_keyless
 mutate src/http.rs '            CoreError::OwnerFork(_) => (S::FORBIDDEN, "owner_fork"),' '' --test owner_forks no_key_creates
 mutate src/admin.rs '            let main = ignored_in_main(a, &location)?;' '            let main = a.store.main_tree(&location).map_err(|e| s(&e))?.git_tree_id();' --lib an_owner_fork_of_a_main_tracking
@@ -290,7 +295,10 @@ mutate src/materialise.rs '                if snapped_at.is_none_or(|t| t.elapse
 # a snapshot that keeps failing refuses the fork; only a fork the caller reads is forked;
 # an owner fork's main and its rules are checked strictly, and the fork starts from that
 # main.
-mutate src/authority.rs '            match volume.snapshot_owner_fork(&self.store, &source) {' '            match None::<Result<crate::materialise::SnapshotOne, String>> {' --test owner_forks unsnapshotted_edits
+mutate src/authority.rs '            let error = match locked.snapshot_owner_fork(&self.store, &source) {' '            let error = match None::<Result<crate::materialise::SnapshotOne, String>> {' --test owner_forks unsnapshotted_edits
+# The volume is unlocked between attempts (BRO-3456).
+mutate src/authority.rs '            drop(locked);
+' '' --test owner_forks leaves_the_volume_to_others
 mutate src/authority.rs '        self.guarded(principal, || self.store.check_branch(fork, from, holder))?;' '' --test owner_forks refused_fork
 mutate src/http.rs '                a.branch_fork(&fork, &from, &c.holder)?' '                a.guarded(&c.key.principal, || a.branch_fork(&fork, &from, &c.holder))?' --test owner_forks revocation_does_not_wait
 mutate src/authority.rs '            .filter(|_| source.holder().is_some_and(Holder::is_volume))' '            .filter(|_| false)' --test owner_forks unsnapshotted_edits
@@ -304,7 +312,8 @@ mutate src/http.rs '                let source = visible_fork(a, &c, &from)?;' '
 mutate src/admin.rs 'cuenca_fs::ForkIgnore::for_tree(&main, |oid|' 'cuenca_fs::ForkIgnore::for_tree(&Tree::new(), |oid|' --lib an_owner_fork_of_a_main_tracking
 
 mutate src/authority.rs 'std::time::Duration::from_secs(5);' 'std::time::Duration::from_secs(0);' --test owner_forks tried_again
-mutate src/authority.rs '                    error: error.replace(&shown, ""),' '                    error,' --test owner_forks cannot_be_snapshotted
+mutate src/authority.rs '                    error: without_host_paths(&error, locked.root(), from),' '                    error,' --test owner_forks cannot_be_snapshotted
+mutate src/authority.rs '        .replace(&dir, fork.as_str())' '' --lib a_snapshot_error_names_no_host_path
 mutate src/http.rs '                visible_location(a, &c, &source.location)?;' '' --test owner_forks needs_reading
 
 # Only what the scan read is uploaded: a folder swapped for a link since never brings an
