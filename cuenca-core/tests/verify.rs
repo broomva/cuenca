@@ -291,6 +291,16 @@ fn once_main_moves_a_verify_against_the_old_main_is_refused() {
         .publish_draft(&fork("g"), &w1(), &write(&store, &main, &[("g", b"g")]))
         .unwrap()
         .id;
+    store
+        .record_verify(
+            &fork("g"),
+            &w1(),
+            g,
+            old,
+            ran(BASE, CheckStatus::Passed, Some(0)),
+        )
+        .unwrap();
+    store.record_landing_intent(&fork("g"), &w1(), g).unwrap();
     store.advance_main(&fork("g"), g).unwrap();
     let e = store
         .record_verify(

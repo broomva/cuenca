@@ -156,4 +156,39 @@ mutate src/http.rs '        let (offset, manifest) = a.guarded(&c.key.principal,
             a.store.record_verify(&name, &writer, id, base, req.checks)' '        let (offset, manifest) = a.guarded(&c.key.principal, || {
             a.store.record_verify(&name, &Writer::new(a.store.fork(&name)?.and_then(|f| f.holder().cloned()).unwrap(), req.epoch), id, base, req.checks)' --test api a_verify_is_recorded
 
+# Landing: idempotent against the remote at every step, refusals recorded.
+mutate src/land.rs 'Some(at) if at == export.commit => return Ok(()),' 'Some(at) if false => return Ok(()),' --test land a_kill
+mutate src/land.rs '        if let Some(found) = gh.find(export)? {
+            return Ok(found);
+        }' '' --test land a_kill
+mutate src/land.rs 'if !pushed && !git.has_commit(export.commit)? {' 'if false {' --test land a_kill
+mutate src/land.rs '                    self.a.store.record_export_intent(name, id, &export)?;' '' --test land a_draft_lands
+mutate src/land.rs '            Some(at) => {
+                return Err(LandError::Fail(format!(' '            Some(_) if false => {
+                return Err(LandError::Fail(format!(' --test land a_branch_that
+mutate src/land.rs '                && t == tree.to_hex()' '' --test land a_remote_without
+mutate src/land.rs '            let Some(remote) = location.remote.clone() else {
+                return Ok(());
+            };' '            let remote = location.remote.clone().unwrap_or_default();' --test land without_a_remote
+mutate src/admin.rs '                && expected != requested' '                && false' --test land without_a_remote
+mutate src/http.rs '            CoreError::NotVerified { .. } => (S::CONFLICT, "not_verified"),' '' --test api publishes_and
+
+mutate src/land.rs '            && tree_of(ids[0])? == changeset.target.to_hex()' '' --test land a_branch_that
+mutate src/land.rs '                    let export = match git.remote_branch(&remote, &export_branch(id))? {
+                        Some(at) => git.adopt(&remote, &self.a.store, id, landing.main, at)?,
+                        None => self.build(&git, &remote, &landing, None)?,
+                    };' '                    let export = self.build(&git, &remote, &landing, None)?;' --test land a_branch_with_the_drafts_tree
+mutate src/land.rs '            Ok(None) if std::time::Instant::now() >= deadline => {' '            Ok(None) if false => {' --test land a_hung_call
+
+mutate src/land.rs '            if !on_main.contains(&oid)' '            if false' --test land a_fork_with_several
+mutate src/land.rs '        let main = landing.main;' '        let main = changeset.base;' --test land a_fork_with_several
+mutate src/land.rs '            Some(p) if p.head_ref_oid == export.commit.to_hex() => Ok(Some((p.number, p.url))),' '            Some(p) => Ok(Some((p.number, p.url))),' --test land a_pull_request_from
+
+mutate src/land.rs '            && tree_of(ids[1])? == main.to_hex();' ';' --test land a_branch_with_the_drafts_tree
+mutate src/land.rs '                    if !pushed {
+                        git.push(&remote, export)?;
+                    }' '' --test land a_kill
+
+mutate src/land.rs '        let ours = ids.len() == 2' '        let ours = ids.len() >= 2' --test land a_merge_commit
+
 exit $survived

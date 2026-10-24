@@ -94,8 +94,12 @@ enum Verb {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Ask to land the checkout's fork at its head (publishes anything queued first).
+    /// Ask to land the checkout's fork at its head, verified first (publishes anything
+    /// queued first). On a location with a git remote, waits for the pull request.
     Land {
+        /// Seconds to wait for the pull request.
+        #[arg(long, default_value_t = 60)]
+        wait: u64,
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
@@ -123,6 +127,9 @@ enum Verb {
         /// The tailscale binary.
         #[arg(long, default_value = "tailscale")]
         tailscale: PathBuf,
+        /// The gh binary, logged in, that landing opens pull requests with.
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
     },
 }
 
@@ -203,7 +210,9 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Verb::Log { fork, dir } => verbs::log(&client()?, &dir, fork.as_deref())?,
         Verb::Verify { dir } => verbs::verify(&client()?, &dir)?,
-        Verb::Land { dir } => verbs::land(&client()?, &dir)?,
+        Verb::Land { dir, wait } => {
+            verbs::land(&client()?, &dir, std::time::Duration::from_secs(wait))?
+        }
         Verb::Mcp => {
             // Standard output is the MCP channel: a startup failure goes to stderr even
             // under --json.
@@ -224,6 +233,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             admin_socket,
             unsafe_bind,
             tailscale,
+            gh,
         } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -238,6 +248,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     admin_socket,
                     unsafe_bind,
                     tailscale,
+                    gh,
                 },
             ))?;
             return Ok(0);

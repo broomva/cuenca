@@ -41,6 +41,9 @@ pub const TOOLS: [&str; 9] = [
     "forks", "fork", "checkout", "status", "snapshot", "diff", "log", "verify", "land",
 ];
 
+/// How long the `land` tool waits for the pull request.
+const LAND_WAIT: std::time::Duration = std::time::Duration::from_secs(60);
+
 /// Serve the tools on standard input and output until the client closes them.
 pub async fn serve(config: Config) -> anyhow::Result<()> {
     let running = Server { config }
@@ -259,7 +262,7 @@ impl Call {
                 verbs::log(&client, &dir, a.fork.as_deref())
             }
             Self::Verify(a) => verbs::verify(&client, &a.dir),
-            Self::Land(a) => verbs::land(&client, &a.dir),
+            Self::Land(a) => verbs::land(&client, &a.dir, LAND_WAIT),
         }
     }
 }
@@ -543,14 +546,26 @@ pub fn tools() -> Vec<Tool> {
         ),
         (
             "land",
-            "Ask to land the checkout's fork at its head (publishes anything queued first).",
+            "Ask to land the checkout's fork at its head, which `verify` must have checked \
+             against the location's main (publishes anything queued first). On a location \
+             with a git remote the authority opens a pull request, which GitHub's required \
+             checks gate; this waits up to a minute for it. On one without, the request \
+             waits for the owner. `status`: requested, exporting, exported, reviewing, \
+             in_review, landed, failed, or dropped (a takeover or a newer request replaced it).",
             input(
                 json!({ "dir": dir("a directory inside the checkout") }),
                 &["dir"],
             ),
             output(
-                json!({ "fork": s, "changeset": s, "offset": n, "status": s }),
-                &["fork", "changeset", "offset", "status"],
+                json!({
+                    "fork": s, "changeset": s, "offset": n, "status": s,
+                    "waiting_for": { "type": ["string", "null"], "enum": ["owner", "authority", null] },
+                    "pr": { "type": ["integer", "null"] },
+                    "url": { "type": ["string", "null"] },
+                    "reason": { "type": ["string", "null"] },
+                    "retrying_after": { "type": ["string", "null"] },
+                }),
+                &["fork", "changeset", "offset", "status", "waiting_for"],
             ),
             write,
         ),

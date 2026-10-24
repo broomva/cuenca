@@ -1,10 +1,10 @@
 //! Owner acts, on a local Unix socket (spec section 0, "Owner acts are local").
 //!
-//! Minting and revoking keys, registering a location and taking a fork over have no
-//! HTTP route. They run here, on a socket the authority creates with mode 0600 and that
-//! answers only connections whose peer runs as the authority's own OS user (checked
-//! with the kernel's peer credentials on every connection). The owner reaches it over
-//! SSH as that user. In the first build that is not a boundary against agents on the
+//! Minting and revoking keys, registering a location, taking a fork over and landing
+//! on a location without a git remote have no HTTP route. They run here, on a socket
+//! the authority creates with mode 0600 and that answers only connections whose peer
+//! runs as the authority's own OS user (checked with the kernel's peer credentials on
+//! every connection). The owner reaches it over SSH as that user. In the first build that is not a boundary against agents on the
 //! same host (spec Drawbacks, BRO-3289); it keeps owner acts off the agent surface.
 //!
 //! The protocol: one JSON request per connection, one line; one JSON answer, one line,
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
-use cuenca_core::{ForkName, Holder, LocationName, NodeId, PrincipalName};
+use cuenca_core::{ChangesetId, ForkName, Holder, LocationName, NodeId, PrincipalName};
 use cuenca_tree::Tree;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -59,6 +59,14 @@ pub enum AdminRequest {
         git: Option<GitSource>,
         #[serde(default)]
         dir: Option<PathBuf>,
+    },
+    /// Land the fork's landing request on a location without a git remote: main moves
+    /// by its changeset. `changeset`, if given, must be the request's (the one the owner
+    /// read the diff and verify of).
+    Land {
+        fork: ForkName,
+        #[serde(default)]
+        changeset: Option<ChangesetId>,
     },
     /// Move a fork to `holder` by compare-and-swap on its epoch.
     TakeOver {
@@ -227,6 +235,32 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
                 .add_location(&name, remote.as_deref(), &tree)
                 .map_err(|e| s(&e))?;
             Ok(json!({ "offset": offset, "main": tree.git_tree_id().to_hex() }))
+        }
+        AdminRequest::Land { fork, changeset } => {
+            let state = a
+                .store
+                .fork(&fork)
+                .map_err(|e| s(&e))?
+                .ok_or_else(|| format!("no fork {fork:?}"))?;
+            let requested = state
+                .landing
+                .as_ref()
+                .map(|l| l.changeset)
+                .ok_or_else(|| format!("fork {fork:?} has no landing request"))?;
+            if let Some(expected) = changeset
+                && expected != requested
+            {
+                return Err(format!(
+                    "fork {fork:?} asks to land {requested}, not {expected}"
+                ));
+            }
+            let offset = a.store.advance_main(&fork, requested).map_err(|e| s(&e))?;
+            let main = a
+                .store
+                .location(&state.location)
+                .map_err(|e| s(&e))?
+                .map(|l| l.main.to_hex());
+            Ok(json!({ "offset": offset, "changeset": requested, "main": main }))
         }
         AdminRequest::TakeOver {
             fork,

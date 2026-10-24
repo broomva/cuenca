@@ -18,7 +18,10 @@ use crate::error::{CoreError, Result};
 use crate::event::{ChangesetId, Event, Record};
 use crate::names::{ForkName, LocationName, PrincipalName};
 use crate::owner::{Holder, Writer};
-use crate::state::{Applied, Fork, Location, Memory, View, apply, check_writer, fenced_target};
+use crate::state::{
+    Applied, Export, Fork, Location, MAX_LANDING_TEXT, Memory, View, apply, check_writer,
+    fenced_target,
+};
 
 type Bytes = &'static [u8];
 
@@ -275,7 +278,6 @@ impl Store {
                 forks: txn.open_table(FORKS)?,
                 changesets: txn.open_table(CHANGESETS)?,
                 revoked: txn.open_table(REVOKED)?,
-                log: &log,
             };
             let event = build(&view)?;
             if let Applied::Repeat(at) = apply(&mut view, offset, &event)? {
@@ -444,9 +446,11 @@ impl Store {
         Ok(self.record(event, |_| Ok(()))?.0)
     }
 
-    /// Record the holder's intent to land `id`, which must be the fork's head.
-    /// Recording the same intent again while it is the latest is a retry and appends
-    /// nothing.
+    /// Record the holder's request to land `id`, which must be the fork's head and
+    /// verified against the location's main as it is now ([`Fork::verified`]; the
+    /// verify's result does not matter: GitHub's required checks, or the owner, decide).
+    /// Asking again for the fork's latest request is a retry and appends nothing,
+    /// whatever step it is at.
     pub fn record_landing_intent(
         &self,
         fork: &ForkName,
@@ -545,10 +549,11 @@ impl Store {
         ))
     }
 
-    /// Move the main of `fork`'s location by `id`, the fork's head, as a
-    /// compare-and-swap: the changeset must start from the main the location has now.
-    /// Advancing by the changeset that last moved main is a retry: it appends nothing
-    /// and returns that move's offset.
+    /// The owner lands `id` on a location without a git remote: main moves by `id`, the
+    /// fork's head and its holder's live landing request, as a compare-and-swap (the
+    /// changeset must start from the main the location has now). Advancing by the
+    /// changeset that last moved main is a retry: it appends nothing and returns that
+    /// move's offset. The earlier main stays in the log.
     pub fn advance_main(&self, fork: &ForkName, id: ChangesetId) -> Result<u64> {
         let location = self
             .fork(fork)?
@@ -558,6 +563,80 @@ impl Store {
             location,
             fork: fork.clone(),
             changeset: id,
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record the authority's intent to push `export` for the landing of `id` (before
+    /// the push).
+    pub fn record_export_intent(
+        &self,
+        fork: &ForkName,
+        id: ChangesetId,
+        export: &Export,
+    ) -> Result<u64> {
+        let event = Event::ExportIntent {
+            fork: fork.clone(),
+            changeset: id,
+            commit: export.commit,
+            parent: export.parent,
+            branch: export.branch.clone(),
+            base_ref: export.base_ref.clone(),
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record that the export of `id` is on the remote (after the push).
+    pub fn record_exported(&self, fork: &ForkName, id: ChangesetId) -> Result<u64> {
+        let event = Event::Exported {
+            fork: fork.clone(),
+            changeset: id,
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record the authority's intent to open a pull request for `id`.
+    pub fn record_review_intent(&self, fork: &ForkName, id: ChangesetId) -> Result<u64> {
+        let event = Event::ReviewIntent {
+            fork: fork.clone(),
+            changeset: id,
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record that pull request `pr` at `url` is open for `id`.
+    pub fn record_in_review(
+        &self,
+        fork: &ForkName,
+        id: ChangesetId,
+        pr: u64,
+        url: &str,
+    ) -> Result<u64> {
+        let event = Event::InReview {
+            fork: fork.clone(),
+            changeset: id,
+            pr,
+            url: url.to_string(),
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record that the landing of `id` cannot go on. A reason over
+    /// [`MAX_LANDING_TEXT`] bytes is cut there.
+    pub fn record_landing_failed(
+        &self,
+        fork: &ForkName,
+        id: ChangesetId,
+        reason: &str,
+    ) -> Result<u64> {
+        let mut end = reason.len().min(MAX_LANDING_TEXT);
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        let event = Event::LandingFailed {
+            fork: fork.clone(),
+            changeset: id,
+            reason: reason[..end].to_string(),
         };
         Ok(self.record(event, |_| Ok(()))?.0)
     }
@@ -635,6 +714,22 @@ impl Store {
     pub fn changeset(&self, id: ChangesetId) -> Result<Option<Changeset>> {
         let txn = self.db.begin_read()?;
         indexed_changeset(&txn.open_table(CHANGESETS)?, &txn.open_table(LOG)?, id)
+    }
+
+    /// When `id` was first recorded: the wall-clock time (ms) of the first draft that
+    /// carried it, the same for every fork and holder that publishes it.
+    pub fn changeset_first_at(&self, id: ChangesetId) -> Result<Option<u64>> {
+        let txn = self.db.begin_read()?;
+        let index = txn.open_table(CHANGESETS)?;
+        let Some(offset) = index.get(id.as_bytes().as_slice())?.map(|v| v.value()) else {
+            return Ok(None);
+        };
+        let log = txn.open_table(LOG)?;
+        let value = log.get(offset)?.ok_or(CoreError::CorruptLog {
+            offset,
+            reason: "the changeset index points past the log".into(),
+        })?;
+        Ok(Some(decode_record(offset, value.value())?.at_ms))
     }
 
     /// The number of records in the log.
@@ -772,7 +867,6 @@ struct Tables<'t> {
     forks: redb::Table<'t, &'static str, Bytes>,
     changesets: redb::Table<'t, Bytes, u64>,
     revoked: redb::Table<'t, &'static str, u64>,
-    log: &'t redb::Table<'t, u64, Bytes>,
 }
 
 impl View for Tables<'_> {
@@ -791,10 +885,6 @@ impl View for Tables<'_> {
     fn put_revoked(&mut self, principal: &PrincipalName, offset: u64) -> Result<()> {
         self.revoked.insert(principal.as_str(), offset)?;
         Ok(())
-    }
-
-    fn changeset(&self, id: ChangesetId) -> Result<Option<Changeset>> {
-        indexed_changeset(&self.changesets, self.log, id)
     }
 
     fn put_location(&mut self, location: &Location) -> Result<()> {
@@ -1368,8 +1458,9 @@ mod tests {
         assert!(corrupt(&store).contains("names candidate"));
         inject_event(&store, 4, verify(cs.target, cs.target));
         assert!(corrupt(&store).contains("the base the checks were read from"));
+        // A valid verify is refused too, since the forks table does not show it.
         inject_event(&store, 4, verify(cs.target, main));
-        store.replay_check().unwrap();
+        assert!(inconsistent(&store).contains("forks differ"));
     }
 
     #[test]

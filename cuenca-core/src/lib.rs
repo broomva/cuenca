@@ -24,9 +24,9 @@
 //! fencing epoch, 1 when the fork is created. Only the holder, under the current epoch,
 //! may publish a draft or ask to land. [`Store::take_over`] moves the fork to a new
 //! holder by compare-and-swap on the epoch, which it increments, and drops the old
-//! holder's landing intent (moving main does not read intents: landing, BRO-3255,
-//! must check, in the transaction that moves main, that the intent is live and its
-//! holder still holds the fork and is not revoked: a revocation leaves intents in place). A
+//! holder's landing request. A revocation leaves requests in place, so each landing
+//! step that acts on one (the owner moving main, an export or review intent) checks
+//! that its holder is not revoked, in the transaction that records it. A
 //! takeover retried after it succeeded gets `EpochMismatch`; read the fork to see who
 //! holds it. A publish by the holder of an earlier epoch is not
 //! dropped and not merged in: it becomes a draft of that epoch's sibling fork,
@@ -38,6 +38,18 @@
 //! log refuse every later write a principal asks for. Who a request comes from (keys,
 //! `tailscale whois`) is the authority's to establish (BRO-3251); this layer trusts
 //! the [`Writer`] it is given.
+//!
+//! # Landing
+//!
+//! The holder asks to land its fork's head once a verify against the location's main
+//! is recorded ([`Store::record_landing_intent`]). From there a [`Landing`] moves through
+//! [`LandingStep`]s, one record each (spec section 6). On a location with a git remote,
+//! the authority records an export intent before it pushes `cp/<changeset id>`, the
+//! export after, a review intent before it opens a pull request and the pull request
+//! after; GitHub's required checks merge it from there. On a location without one,
+//! the request waits until the owner moves main ([`Store::advance_main`]). Each step
+//! follows only its predecessor and repeats only itself, so an authority that restarts
+//! picks up from the step the log has.
 //!
 //! # Why not `lago-journal`
 //!
@@ -60,5 +72,8 @@ pub use error::{CoreError, Result};
 pub use event::{ChangesetId, Event, Record};
 pub use names::{ForkName, LocationName, MAX_NAME_BYTES, NameError, PrincipalName};
 pub use owner::{Holder, MAX_NODE_BYTES, NodeId, Writer, sibling_name};
-pub use state::{Fork, Location, MainMove};
+pub use state::{
+    Export, Fork, Landing, LandingStep, Location, MAX_LANDING_TEXT, MainMove, Verified,
+    export_branch,
+};
 pub use store::{BlobBatch, BlobInfo, Published, ReplaySummary, Snapshot, Store};

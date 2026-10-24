@@ -25,6 +25,9 @@ struct Args {
     /// The tailscale binary.
     #[arg(long, default_value = "tailscale")]
     tailscale: PathBuf,
+    /// The gh binary, logged in, that landing opens pull requests with.
+    #[arg(long, default_value = "gh")]
+    gh: PathBuf,
 }
 
 #[tokio::main]
@@ -41,6 +44,7 @@ async fn main() -> anyhow::Result<()> {
         admin_socket: a.admin_socket,
         unsafe_bind: a.unsafe_bind,
         tailscale: a.tailscale,
+        gh: a.gh,
     })
     .await
 }

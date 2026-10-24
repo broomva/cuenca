@@ -106,16 +106,65 @@ mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(*id) 
                 return Err(CoreError::NotHead {
                     fork: from.to_string(),' 'if false {
                 return Err(CoreError::NotHead {
-                    fork: from.to_string(),' --test store
-mutate src/state.rs 'if changeset.base != loc.main {' 'if false {' --test store
-mutate src/state.rs 'state.landing_intent
-                && last == *id' 'state.landing_intent
+                    fork: from.to_string(),' --test land
+mutate src/state.rs '            let ours =
+                loc.main == state.base || loc.main_moved.as_ref().is_some_and(|m| m.fork == *from);' '            let ours = true;' --test land
+mutate src/state.rs '            let ours =
+                loc.main == state.base || loc.main_moved.as_ref().is_some_and(|m| m.fork == *from);' '            let ours = loc.main == state.base;' --test land
+mutate src/state.rs '            loc.main = state.head;' '            loc.main = state.base;' --test land
+mutate src/state.rs 'if let Some(l) = &state.landing
+                && l.changeset == *id' 'if let Some(l) = &state.landing
                 && false' --test store
-mutate src/state.rs 'return Ok(Applied::Repeat(at));
+mutate src/state.rs 'return Ok(Applied::Repeat(l.offset));
             }
-            if state.head_changeset.map(|(head, _)| head) != Some(*id) {' 'return Ok(Applied::Repeat(at));
+            if state.head_changeset.map(|(head, _)| head) != Some(*id) {' 'return Ok(Applied::Repeat(l.offset));
             }
             if false {' --test store
+# Landing: verified first, each step after its predecessor, a remote decides the path.
+mutate src/state.rs 'Some(v) if v.changeset == *id && v.base == loc.main => {}' 'Some(v) if v.changeset == *id => {}' --test land
+mutate src/state.rs 'Some(v) if v.changeset == *id && v.base == loc.main => {}' 'Some(v) if v.base == loc.main => {}' --test land
+mutate src/state.rs '            if loc.remote.is_some() {
+                return Err(CoreError::HasRemote(at.to_string()));' '            if false {
+                return Err(CoreError::HasRemote(at.to_string()));' --test land
+mutate src/state.rs 'if landing.step != LandingStep::Requested {' 'if false {' --test land
+mutate src/state.rs '            if let Some(holder) = state.holder() {
+                not_revoked(view, &holder.principal)?;
+            }' '' --test land
+mutate src/state.rs 'if location(view, &state.location)?.remote.is_none() {' 'if false {' --test land
+mutate src/state.rs 'if *branch != export_branch(*id) || base_ref.is_empty()' 'if base_ref.is_empty()' --test land
+mutate src/state.rs '                _ => return Err(step_error(&state, &landing, "requested")),
+            }
+            holder_not_revoked(view, &state)?;' '                _ => {}
+            }
+            holder_not_revoked(view, &state)?;' --test land
+mutate src/state.rs '                _ => return Err(step_error(&state, &landing, "requested")),
+            }
+            holder_not_revoked(view, &state)?;' '                _ => return Err(step_error(&state, &landing, "requested")),
+            }' --test land
+mutate src/state.rs '            holder_not_revoked(view, &state)?;
+            set_step(
+                view,
+                state,
+                landing,
+                offset,
+                LandingStep::Reviewing { export },' '            set_step(
+                view,
+                state,
+                landing,
+                offset,
+                LandingStep::Reviewing { export },' --test land
+mutate src/state.rs 'LandingStep::Exported { .. } => return Ok(Applied::Repeat(landing.moved)),' '' --test land
+mutate src/state.rs 'if *pr == 0 || url.is_empty() || url.len() > MAX_LANDING_TEXT {' 'if url.is_empty() {' --test land
+mutate src/state.rs '                | LandingStep::Reviewing { .. } => {}
+                _ => return Err(step_error(&state, &landing, "in flight")),' '                | LandingStep::Reviewing { .. } => {}
+                _ => {}' --test land
+mutate src/state.rs '            state.verified = Some(Verified {
+                changeset: *id,
+                base: *base,
+                offset,
+            });
+            view.put_fork(&state)?;' '' --test land
+mutate src/store.rs 'while !reason.is_char_boundary(end) {' 'while false {' --test land
 # One writer per fork: holders, fencing epochs, takeover, sibling forks, revocation.
 mutate src/state.rs 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {
     not_revoked(view, &writer.holder.principal)?;' 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {' --test forks
@@ -140,7 +189,9 @@ mutate src/state.rs 'check_writer(view, &state, writer)?;
 mutate src/state.rs 'check_writer(view, &state, writer)?;
             return draft(view, offset, state, id, changeset);' 'return draft(view, offset, state, id, changeset);' --test forks
 mutate src/state.rs 'let mut state = fork(view, name)?;
-            check_writer(view, &state, writer)?;' 'let mut state = fork(view, name)?;' --test forks
+            check_writer(view, &state, writer)?;
+            if let Some(l) = &state.landing' 'let mut state = fork(view, name)?;
+            if let Some(l) = &state.landing' --test forks
 mutate src/state.rs 'Ok(()) => {
                     return Err(CoreError::Inconsistent(format!(
                         "draft {id} is fenced from {name:?}, but its writer holds it"
@@ -161,7 +212,7 @@ mutate src/state.rs 'if sibling.epoch() == 1 {' 'if true {' --test forks
 mutate src/state.rs '(at, epoch) = (sibling, 1);' '(at, epoch) = (sibling, epoch + 1);' --test forks
 mutate src/state.rs 'head: base,' 'head: at.head,' --test forks
 mutate src/state.rs 'if name.as_str().contains("-from") {' 'if false {' --test forks
-mutate src/state.rs 'state.landing_intent = None;' '' --test forks
+mutate src/state.rs 'state.landing = None;' '' --test forks
 mutate src/store.rs 'placed = (sibling.name.clone(), sibling.epoch(), true);' '' --test forks
 # Sibling names: every (parent, epoch) its own name, and one that fits.
 mutate src/owner.rs '&& s.len() <= MAX_NODE_BYTES' '' --lib

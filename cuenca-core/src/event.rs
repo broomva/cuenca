@@ -91,19 +91,58 @@ pub enum Event {
     /// A principal's keys were revoked: from here on the log refuses every write it
     /// asks for. Permanent; a new key means a new principal.
     PrincipalRevoked { principal: PrincipalName },
-    /// A location's main moved by the changeset at the head of one of its forks. An
-    /// authority act after the gates (landing, BRO-3255), so it names no writer.
+    /// A location's main moved by the changeset at the head of one of its forks: the
+    /// owner landed the fork's landing request on a location without a git remote
+    /// (spec section 6). An owner act, so it names no writer.
     MainAdvanced {
         location: LocationName,
         fork: ForkName,
         changeset: ChangesetId,
     },
-    /// The fork's holder asked to land the fork's head changeset; landing itself
-    /// (BRO-3255) records what happened to it.
+    /// The fork's holder asked to land the fork's head changeset, which a verify of
+    /// the location's main now has judged ([`crate::Verified`]). What happens to it is
+    /// recorded by the events below, each about this request ([`crate::Landing`]).
     LandingIntent {
         fork: ForkName,
         writer: Writer,
         changeset: ChangesetId,
+    },
+    /// The authority built `commit` (the changeset's target tree, with `parent`, a
+    /// commit of the remote's `base_ref` whose tree is the main the request's verify
+    /// judged, [`crate::Landing::main`]), or found it already on the remote's `branch`,
+    /// and is about to push it there. Written before the push.
+    ExportIntent {
+        fork: ForkName,
+        changeset: ChangesetId,
+        commit: GitOid,
+        parent: GitOid,
+        branch: String,
+        base_ref: String,
+    },
+    /// The remote's `branch` is at the export's commit. Written after the push, or
+    /// after finding the branch already there.
+    Exported {
+        fork: ForkName,
+        changeset: ChangesetId,
+    },
+    /// The authority is about to open a pull request from the export's branch.
+    ReviewIntent {
+        fork: ForkName,
+        changeset: ChangesetId,
+    },
+    /// A pull request from the export's branch at its commit: opened now, or found (in
+    /// any state, so a retry never opens a second one).
+    InReview {
+        fork: ForkName,
+        changeset: ChangesetId,
+        pr: u64,
+        url: String,
+    },
+    /// The landing request cannot go on, for `reason`; asking again needs a new draft.
+    LandingFailed {
+        fork: ForkName,
+        changeset: ChangesetId,
+        reason: String,
     },
     /// The fork's holder ran the checks the base declares ([`crate::checks`]) on the
     /// fork's head changeset, whose target is `candidate`, and reported how they ended.
@@ -132,6 +171,11 @@ impl Event {
             | Event::TakenOver { fork, .. }
             | Event::MainAdvanced { fork, .. }
             | Event::LandingIntent { fork, .. }
+            | Event::ExportIntent { fork, .. }
+            | Event::Exported { fork, .. }
+            | Event::ReviewIntent { fork, .. }
+            | Event::InReview { fork, .. }
+            | Event::LandingFailed { fork, .. }
             | Event::VerifyRecorded { fork, .. } => vec![fork],
             Event::DraftFenced { fork, sibling, .. } => vec![fork, sibling],
         }

@@ -45,6 +45,8 @@ pub struct Authority {
     pub port: u16,
     pub child: Option<Child>,
     pub fd_limit: Option<u32>,
+    /// The upstream its lander lands to, if any.
+    pub upstream: Option<(PathBuf, PathBuf)>,
 }
 
 impl Authority {
@@ -52,7 +54,17 @@ impl Authority {
         Self::start_with(None)
     }
 
+    /// An authority whose lander lands to `up`: its `gh`, and its GitHub URL pointed at
+    /// the local remote through git's environment configuration.
+    pub fn start_landing(up: &Upstream) -> Self {
+        Self::start_inner(None, Some((up.gh.clone(), up.remote.clone())))
+    }
+
     pub fn start_with(fd_limit: Option<u32>) -> Self {
+        Self::start_inner(fd_limit, None)
+    }
+
+    fn start_inner(fd_limit: Option<u32>, upstream: Option<(PathBuf, PathBuf)>) -> Self {
         let dir = tempfile::tempdir().unwrap();
         std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
         let script = dir.path().join("tailscale");
@@ -69,6 +81,7 @@ impl Authority {
             port: 0,
             child: None,
             fd_limit,
+            upstream,
         };
         // A port found free can be taken by a parallel test before the server binds it:
         // then the server exits, and another port is tried.
@@ -106,8 +119,21 @@ impl Authority {
             .append(true)
             .open(self.dir.path().join("serve.log"))
             .unwrap();
-        let mut child = cuenca(self.fd_limit)
-            .args(["serve", "--unsafe-bind", "--bind"])
+        let mut serve = cuenca(self.fd_limit);
+        serve.arg("serve");
+        if let Some((gh, remote)) = &self.upstream {
+            serve
+                .arg("--gh")
+                .arg(gh)
+                .env("GIT_CONFIG_COUNT", "1")
+                .env(
+                    "GIT_CONFIG_KEY_0",
+                    format!("url.file://{}.insteadOf", remote.display()),
+                )
+                .env("GIT_CONFIG_VALUE_0", UPSTREAM_URL);
+        }
+        let mut child = serve
+            .args(["--unsafe-bind", "--bind"])
             .arg(format!("127.0.0.1:{}", self.port))
             .arg("--state")
             .arg(self.dir.path().join("state"))
@@ -294,4 +320,129 @@ pub fn site(a: &Authority) -> tempfile::TempDir {
     assert!(!site.path().join(".git").exists());
     a.admin(&["location", "add", "site", "--dir", s(site.path())]);
     site
+}
+
+pub const UPSTREAM_URL: &str = "https://github.com/cuenca-test/land";
+
+/// Run git in `dir`; its stdout.
+pub fn git(dir: &Path, args: &[&str]) -> String {
+    let out = Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// A stand-in for a GitHub repository (as in cuenca-server's tests): `work`, a git
+/// repository with one commit of `files`; `remote.git`, a bare clone of it; and a fake
+/// `gh` that keeps pull requests as files.
+pub struct Upstream {
+    pub dir: tempfile::TempDir,
+    pub work: PathBuf,
+    pub remote: PathBuf,
+    pub gh: PathBuf,
+}
+
+impl Upstream {
+    pub fn new(files: &[(&str, &str)]) -> Self {
+        let dir = tempfile::tempdir().unwrap();
+        let work = dir.path().join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        for (path, content) in files {
+            let p = work.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        }
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "init"]);
+        git(
+            dir.path(),
+            &["clone", "-q", "--bare", s(&work), "remote.git"],
+        );
+        let remote = dir.path().join("remote.git");
+        let gh = dir.path().join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                r#"#!/bin/sh
+DIR='{dir}'
+REMOTE='{remote}'
+cmd="$1 $2"
+shift 2
+repo= head= base=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) repo=$2; shift ;;
+    --head) head=$2; shift ;;
+    --base) base=$2; shift ;;
+  esac
+  shift
+done
+key=$(printf %s "$head" | tr / _)
+mkdir -p "$DIR/prs"
+case "$cmd" in
+  "pr list")
+    if [ -f "$DIR/prs/$key" ]; then
+      n=$(cat "$DIR/prs/$key")
+      oid=$(git --git-dir="$REMOTE" rev-parse "refs/heads/$head")
+      printf '[{{"number":%s,"url":"https://github.com/%s/pull/%s","headRefOid":"%s","headRefName":"%s"}}]\n' "$n" "$repo" "$n" "$oid" "$head"
+    else
+      echo '[]'
+    fi ;;
+  "pr create")
+    cat > "$DIR/body.$key"
+    n=$(( $(ls "$DIR/prs" | wc -l) + 1 ))
+    echo "$n" > "$DIR/prs/$key"
+    echo "$head $base $repo" >> "$DIR/creates.log"
+    echo "https://github.com/$repo/pull/$n" ;;
+  *) echo "fake gh: no $cmd" >&2; exit 1 ;;
+esac
+"#,
+                dir = dir.path().display(),
+                remote = remote.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::fs::Permissions::from_mode(0o755)).unwrap();
+        Self {
+            dir,
+            work,
+            remote,
+            gh,
+        }
+    }
+
+    /// The pull requests `gh pr create` opened: `<head> <base> <repo>` each.
+    pub fn creates(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.path().join("creates.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    pub fn body(&self, branch: &str) -> String {
+        std::fs::read_to_string(
+            self.dir
+                .path()
+                .join(format!("body.{}", branch.replace('/', "_"))),
+        )
+        .unwrap()
+    }
 }
