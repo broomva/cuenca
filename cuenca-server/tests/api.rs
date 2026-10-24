@@ -325,6 +325,18 @@ fn publishes_and_landing_intents_are_idempotent() {
     assert_eq!(again["offset"], first["offset"]);
     let id = first["id"].as_str().unwrap();
     let body = json!({ "epoch": 1, "changeset": id });
+    // Not before a verify of the head against main.
+    let r = s.post(&c.a1, "/v1/forks/f1/landing", body.clone());
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.json::<Value>().unwrap()["error"], "not_verified");
+    let l1 = cuenca_core::LocationName::new("l1").unwrap();
+    let main = s.authority.store().location(&l1).unwrap().unwrap().main;
+    let verdict = json!({ "epoch": 1, "changeset": id, "base": main.to_hex(), "checks": [] });
+    assert!(
+        s.post(&c.a1, "/v1/forks/f1/verdicts", verdict)
+            .status()
+            .is_success()
+    );
     let one: Value = s
         .post(&c.a1, "/v1/forks/f1/landing", body.clone())
         .json()
@@ -333,6 +345,7 @@ fn publishes_and_landing_intents_are_idempotent() {
         .post(&c.a1, "/v1/forks/f1/landing", body.clone())
         .json()
         .unwrap();
+    assert!(one["offset"].is_u64(), "{one}");
     assert_eq!(one["offset"], two["offset"]);
     // A reader that does not hold the fork cannot ask to land it.
     s.whois.node(NB);
@@ -544,6 +557,8 @@ fn the_authority_refuses_a_non_tailnet_bind() {
             admin_socket: dir.path().join("admin.sock"),
             unsafe_bind: false,
             tailscale: "tailscale".into(),
+            gh: "gh".into(),
+            volume: None,
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt.block_on(cuenca_server::run(config)).unwrap_err();
@@ -910,6 +925,14 @@ fn a_write_in_flight_when_its_principal_is_revoked_writes_nothing() {
     let landing = serde_json::to_vec(&json!({ "epoch": 1, "changeset": id })).unwrap();
     let late = b"written after the ban";
     let late_oid = cuenca_tree::GitOid::for_blob(late);
+    let batched = b"batched after the ban".as_slice();
+    let batched_oid = cuenca_tree::GitOid::for_blob(batched);
+    let batch = batch_body(&[(batched_oid, batched)]);
+    let batch_head = format!(
+        "POST /v1/blobs HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {a1}\r\n\
+         Content-Length: {}\r\n\r\n",
+        batch.len()
+    );
     let started = [
         begin(
             s,
@@ -923,16 +946,30 @@ fn a_write_in_flight_when_its_principal_is_revoked_writes_nothing() {
             &landing[..1],
         ),
         begin(s, upload_head(late_oid, late.len()), &late[..1]),
+        begin(s, batch_head, &batch[..1]),
     ];
     let len = s.authority.store().len().unwrap();
     s.authority.ban(&"a1".parse_name());
-    let rests: [&[u8]; 4] = [&publish[1..], &fork[1..], &landing[1..], &late[1..]];
+    let rests: [&[u8]; 5] = [
+        &publish[1..],
+        &fork[1..],
+        &landing[1..],
+        &late[1..],
+        &batch[1..],
+    ];
     for (tcp, rest) in started.into_iter().zip(rests) {
         let status = finish(tcp, rest);
         assert!(status.contains("401"), "{status}");
     }
     assert_eq!(s.authority.store().len().unwrap(), len, "nothing appended");
     assert!(s.authority.store().blob_info(late_oid).unwrap().is_none());
+    assert!(
+        s.authority
+            .store()
+            .blob_info(batched_oid)
+            .unwrap()
+            .is_none()
+    );
 
     // The reported case: an upload held open across the admin's key_revoke.
     s.whois.node(NB);
@@ -1102,4 +1139,225 @@ fn ten_offline_takeovers_lose_no_file() {
         s.whois.node(ND);
         assert!(s.fork_head(&d1, &fork).get("dir/file0.txt").is_none());
     }
+}
+
+/// A batch body: each blob's header, then its bytes.
+fn batch_body(blobs: &[(cuenca_tree::GitOid, &[u8])]) -> Vec<u8> {
+    let mut body = Vec::new();
+    for (oid, bytes) in blobs {
+        body.extend_from_slice(&cuenca_server::http::batch_header(*oid, bytes.len() as u64));
+        body.extend_from_slice(bytes);
+    }
+    body
+}
+
+fn post_batch(s: &Server, token: &str, body: Vec<u8>) -> reqwest::blocking::Response {
+    s.client
+        .post(format!("{}/v1/blobs", s.url))
+        .bearer_auth(token)
+        .body(body)
+        .send()
+        .unwrap()
+}
+
+/// A batch upload stores every blob, answers each one's SHA-256, and lets the caller
+/// name them all in a draft.
+#[test]
+fn a_blob_batch_is_stored_and_its_blobs_may_be_named() {
+    let c = Cast::new();
+    let s = &c.s;
+    s.whois.node(NA);
+    let files: Vec<(String, Vec<u8>)> = (0..40)
+        .map(|i| (format!("f{i}"), format!("content {i}\n").into_bytes()))
+        .collect();
+    let blobs: Vec<_> = files
+        .iter()
+        .map(|(_, b)| (cuenca_tree::GitOid::for_blob(b), b.as_slice()))
+        .collect();
+    let r = post_batch(s, &c.a1, batch_body(&blobs));
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().unwrap();
+    let answered = v["blobs"].as_array().unwrap();
+    assert_eq!(answered.len(), 40);
+    for ((oid, bytes), a) in blobs.iter().zip(answered) {
+        assert_eq!(a["oid"], oid.to_hex());
+        assert_eq!(a["size"], bytes.len());
+        let sha = cuenca_tree::Blob::of(bytes).unwrap().sha256().to_hex();
+        assert_eq!(a["sha256"], sha);
+    }
+    // An empty batch is a batch of none.
+    let r = post_batch(s, &c.a1, Vec::new());
+    assert_eq!(r.status(), 200);
+    assert_eq!(r.json::<Value>().unwrap()["blobs"], json!([]));
+    // a1 has shown it holds every blob: a draft may name them all.
+    let head = s.fork_head(&c.a1, "f1");
+    let ops = files
+        .iter()
+        .map(|(name, b)| {
+            cuenca_tree::Op::put(
+                cuenca_tree::RepoPath::new(name).unwrap(),
+                cuenca_tree::Entry::File(cuenca_tree::GitOid::for_blob(b)),
+            )
+        })
+        .collect();
+    let cs = cuenca_tree::Changeset::new(&head, ops).unwrap();
+    let r = s.publish(&c.a1, "f1", 1, &cs);
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let r = s.get(
+        &c.a1,
+        &format!("/v1/forks/f1/blobs/{}", blobs[7].0.to_hex()),
+    );
+    assert_eq!(r.bytes().unwrap().as_ref(), b"content 7\n");
+}
+
+/// One bad blob, or a body that does not end on a blob's last byte, refuses the whole
+/// batch: none of its blobs is stored or counts as shown, and staging is left empty.
+#[test]
+fn a_blob_batch_is_all_or_nothing() {
+    let c = Cast::new();
+    let s = &c.s;
+    s.whois.node(NA);
+    let good = b"good blob\n".as_slice();
+    let good_oid = cuenca_tree::GitOid::for_blob(good);
+    let claimed = cuenca_tree::GitOid::for_blob(b"claimed");
+    let mut short = batch_body(&[(good_oid, good)]);
+    short.extend_from_slice(&cuenca_server::http::batch_header(claimed, 7));
+    short.extend_from_slice(b"cla");
+    let mut torn_header = batch_body(&[(good_oid, good)]);
+    torn_header.extend_from_slice(&[0u8; 10]);
+    let cases: [(&str, Vec<u8>, u16, &str); 3] = [
+        (
+            "a blob that is not its claim",
+            batch_body(&[(good_oid, good), (claimed, b"other!!")]),
+            422,
+            "bad_blob",
+        ),
+        ("a blob cut short", short, 422, "bad_blob"),
+        ("a header cut short", torn_header, 400, "bad_batch"),
+    ];
+    for (what, body, status, code) in cases {
+        let r = post_batch(s, &c.a1, body);
+        assert_eq!(r.status(), status, "{what}");
+        assert_eq!(r.json::<Value>().unwrap()["error"], code, "{what}");
+        // The good blob was neither stored nor shown: a draft naming it is refused.
+        let head = s.fork_head(&c.a1, "f1");
+        let cs = cuenca_tree::Changeset::new(
+            &head,
+            vec![cuenca_tree::Op::put(
+                cuenca_tree::RepoPath::new("good").unwrap(),
+                cuenca_tree::Entry::File(good_oid),
+            )],
+        )
+        .unwrap();
+        let r = s.publish(&c.a1, "f1", 1, &cs);
+        assert_eq!(r.status(), 422, "{what}");
+        assert_eq!(
+            r.json::<Value>().unwrap()["error"],
+            "missing_blob",
+            "{what}"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        let staging = s.authority.staging_dir();
+        assert_eq!(std::fs::read_dir(staging).unwrap().count(), 0, "{what}");
+    }
+}
+
+/// A batch over the blob count is refused, as is one that says it is over the size
+/// limit, before its body is read; an unauthenticated batch is refused outright.
+#[test]
+fn a_blob_batch_over_its_limits_is_refused() {
+    use cuenca_server::http::{MAX_BATCH_BLOBS, MAX_BATCH_BYTES};
+    let c = Cast::new();
+    let s = &c.s;
+    s.whois.node(NA);
+    let many: Vec<Vec<u8>> = (0..=MAX_BATCH_BLOBS)
+        .map(|i| i.to_string().into_bytes())
+        .collect();
+    let blobs: Vec<_> = many
+        .iter()
+        .map(|b| (cuenca_tree::GitOid::for_blob(b), b.as_slice()))
+        .collect();
+    let r = post_batch(s, &c.a1, batch_body(&blobs));
+    assert_eq!(r.status(), 400);
+    assert_eq!(r.json::<Value>().unwrap()["error"], "bad_batch");
+    // Exactly the limit is fine.
+    let r = post_batch(s, &c.a1, batch_body(&blobs[..MAX_BATCH_BLOBS]));
+    assert_eq!(r.status(), 200);
+
+    use std::io::{Read, Write};
+    let addr = s.url.trim_start_matches("http://");
+    let mut tcp = std::net::TcpStream::connect(addr).unwrap();
+    // Refused before the body is read: no answer within a few seconds is a failure.
+    tcp.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+        .unwrap();
+    let req = format!(
+        "POST /v1/blobs HTTP/1.1\r\nHost: x\r\nAuthorization: Bearer {}\r\n\
+         Content-Length: {}\r\nConnection: close\r\n\r\n",
+        c.a1,
+        MAX_BATCH_BYTES + 1
+    );
+    tcp.write_all(req.as_bytes()).unwrap();
+    let mut answer = String::new();
+    let _ = tcp.read_to_string(&mut answer);
+    assert_eq!(answer.split(' ').nth(1), Some("413"), "{answer}");
+
+    let r = s
+        .client
+        .post(format!("{}/v1/blobs", s.url))
+        .body(batch_body(&blobs[..1]))
+        .send()
+        .unwrap();
+    assert_eq!(r.status(), 401);
+}
+
+/// A verify record: only the holder's, only the base's list (an empty base declares
+/// none), only against the main of the moment.
+#[test]
+fn a_verify_is_recorded_for_the_holder_against_the_bases_list() {
+    let c = Cast::new();
+    let s = &c.s;
+    s.whois.node(NA);
+    let f: Value = s.get(&c.a1, "/v1/forks/f1").json().unwrap();
+    let id = f["head_changeset"][0].as_str().unwrap().to_string();
+    let main: Value = s.get(&c.a1, "/v1/locations/l1/tree").json().unwrap();
+    let base = main["oid"].as_str().unwrap().to_string();
+    let body = |checks: Value, base: &str| json!({ "epoch": 1, "changeset": id, "base": base, "checks": checks });
+    let r = s.post(&c.a1, "/v1/forks/f1/verdicts", body(json!([]), &base));
+    assert_eq!(r.status(), 200);
+    let v: Value = r.json().unwrap();
+    assert_eq!(v["manifest"], Value::Null, "{v}");
+    assert!(v["offset"].is_u64());
+
+    let theirs = json!([{ "name": "gate", "argv": ["true"], "timeout_secs": 5,
+        "status": "passed", "exit_code": 0, "duration_ms": 1 }]);
+    let r = s.post(&c.a1, "/v1/forks/f1/verdicts", body(theirs, &base));
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.json::<Value>().unwrap()["error"], "manifest_mismatch");
+
+    let head = f["head"].as_str().unwrap();
+    let r = s.post(&c.a1, "/v1/forks/f1/verdicts", body(json!([]), head));
+    assert_eq!(r.status(), 409);
+    let r: Value = r.json().unwrap();
+    assert_eq!(r["error"], "base_moved");
+    assert_eq!(r["main"], base.as_str());
+
+    let mut extra = body(json!([]), &base);
+    extra["passed"] = json!(true);
+    assert_eq!(s.post(&c.a1, "/v1/forks/f1/verdicts", extra).status(), 400);
+
+    // A reader that does not hold the fork cannot record one.
+    s.whois.node(NB);
+    let r = s.post(&c.a2, "/v1/forks/f1/verdicts", body(json!([]), &base));
+    assert_eq!(r.status(), 403);
+    assert_eq!(r.json::<Value>().unwrap()["error"], "not_holder");
+    // A fork the caller does not read is not there.
+    s.whois.node(ND);
+    let r = s.post(&c.d1, "/v1/forks", json!({ "fork": "d", "location": "l2" }));
+    assert_eq!(r.status(), 200);
+    s.whois.node(NA);
+    assert_eq!(
+        s.post(&c.a1, "/v1/forks/d/verdicts", body(json!([]), &base))
+            .status(),
+        404
+    );
 }

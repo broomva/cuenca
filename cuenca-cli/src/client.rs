@@ -3,10 +3,14 @@
 //! Every tree the authority sends is checked against the id it is sent under before it
 //! is used; blob content is checked by whoever uses it (a checkout hashes it).
 
-use std::path::Path;
+use std::collections::VecDeque;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+use cuenca_core::checks::{CheckRun, ManifestId};
 use cuenca_core::{ChangesetId, Fork, ForkName, Location, LocationName, Record};
+use cuenca_server::http::{BATCH_HEADER_BYTES, MAX_BATCH_BLOBS, MAX_BATCH_BYTES, batch_header};
 use cuenca_tree::{Changeset, GitOid, Tree};
 use reqwest::StatusCode;
 use reqwest::blocking::{Body, RequestBuilder, Response};
@@ -185,7 +189,23 @@ impl Client {
     /// Blob `oid` of the fork's head, `None` if the head does not name it. Unchecked:
     /// whoever writes it hashes it.
     pub fn fork_blob(&self, name: &ForkName, oid: GitOid) -> Result<Option<Vec<u8>>> {
-        let url = format!("{}/v1/forks/{name}/blobs/{}", self.url, oid.to_hex());
+        self.blob(&format!("/v1/forks/{name}/blobs/{}", oid.to_hex()))
+    }
+
+    /// Blob `oid` of the location's main, `None` if main does not name it, checked
+    /// against its id.
+    pub fn location_blob(&self, name: &LocationName, oid: GitOid) -> Result<Option<Vec<u8>>> {
+        let bytes = self.blob(&format!("/v1/locations/{name}/blobs/{}", oid.to_hex()))?;
+        match bytes {
+            Some(b) if GitOid::for_blob(&b) != oid => Err(ClientError::Other(format!(
+                "the authority sent blob {oid} with content that is not {oid}"
+            ))),
+            b => Ok(b),
+        }
+    }
+
+    fn blob(&self, path: &str) -> Result<Option<Vec<u8>>> {
+        let url = format!("{}{path}", self.url);
         match self.send(self.http.get(url)) {
             Ok(r) => r
                 .bytes()
@@ -200,6 +220,48 @@ impl Client {
 
     /// Upload the blob stored at `path`, `size` bytes, as `oid`. The authority hashes
     /// what it receives and refuses bytes that are not `oid`.
+    pub fn put_blob(&self, oid: GitOid, path: &Path, size: u64) -> Result<()> {
+        self.upload_retried(&format!("blob {oid}"), || {
+            let file = std::fs::File::open(path)
+                .map_err(|e| ClientError::Other(format!("{}: {e}", path.display())))?;
+            let url = format!("{}/v1/blobs/{}", self.url, oid.to_hex());
+            self.send(self.http.put(url).body(Body::sized(file, size)))?;
+            Ok(())
+        })
+    }
+
+    /// Upload blobs in one request, each `(oid, path, size)`: the authority stores all
+    /// of them or none, with one durable commit. At most [`MAX_BATCH_BLOBS`] blobs and
+    /// [`MAX_BATCH_BYTES`] bytes, headers included.
+    pub fn put_blobs(&self, blobs: &[(GitOid, &Path, u64)]) -> Result<()> {
+        let len = batch_len(blobs.iter().map(|b| b.2));
+        if blobs.len() > MAX_BATCH_BLOBS || len > MAX_BATCH_BYTES {
+            return Err(ClientError::Other(format!(
+                "a batch of {} blobs, {len} bytes, is over the authority's limit",
+                blobs.len()
+            )));
+        }
+        self.upload_retried(&format!("a batch of {} blobs", blobs.len()), || {
+            let mut parts: Vec<Box<dyn Read + Send>> = Vec::with_capacity(blobs.len() * 2);
+            for &(oid, path, size) in blobs {
+                // A missing file is an error here, not a cut-off body; this opens nothing.
+                std::fs::metadata(path)
+                    .map_err(|e| ClientError::Other(format!("{}: {e}", path.display())))?;
+                parts.push(Box::new(std::io::Cursor::new(batch_header(oid, size))));
+                parts.push(Box::new(Lazy {
+                    path: path.to_path_buf(),
+                    size,
+                    file: None,
+                }));
+            }
+            let body = Concat(parts.into());
+            let url = format!("{}/v1/blobs", self.url);
+            self.send(self.http.post(url).body(Body::sized(body, len)))?;
+            Ok(())
+        })
+    }
+
+    /// Run an upload, telling a refusal from a lost connection.
     ///
     /// The authority refuses a request it will not serve (a revoked or unknown key)
     /// before reading its body, and closing the connection on an upload larger than the
@@ -207,28 +269,22 @@ impl Client {
     /// that got none asks a small question to tell the two apart. If that is refused,
     /// the refusal is the answer. If that is answered too, the upload is tried once more,
     /// and a second cut-off is reported as an error, not as offline.
-    pub fn put_blob(&self, oid: GitOid, path: &Path, size: u64) -> Result<()> {
-        let Err(ClientError::Offline { url, reason }) = self.put_blob_once(oid, path, size) else {
-            return Ok(());
+    fn upload_retried(&self, what: &str, once: impl Fn() -> Result<()>) -> Result<()> {
+        let (url, reason) = match once() {
+            Ok(()) => return Ok(()),
+            Err(ClientError::Offline { url, reason }) => (url, reason),
+            Err(e) => return Err(e),
         };
         match self.whoami() {
-            Ok(_) => self.put_blob_once(oid, path, size).map_err(|e| match e {
+            Ok(_) => once().map_err(|e| match e {
                 ClientError::Offline { reason, .. } => ClientError::Other(format!(
-                    "the authority answers, but cut off the upload of blob {oid} twice: {reason}"
+                    "the authority answers, but cut off the upload of {what} twice: {reason}"
                 )),
                 e => e,
             }),
             Err(ClientError::Offline { .. }) => Err(ClientError::Offline { url, reason }),
             Err(e) => Err(e),
         }
-    }
-
-    fn put_blob_once(&self, oid: GitOid, path: &Path, size: u64) -> Result<()> {
-        let file = std::fs::File::open(path)
-            .map_err(|e| ClientError::Other(format!("{}: {e}", path.display())))?;
-        let url = format!("{}/v1/blobs/{}", self.url, oid.to_hex());
-        self.send(self.http.put(url).body(Body::sized(file, size)))?;
-        Ok(())
     }
 
     pub fn publish(&self, fork: &ForkName, epoch: u64, changeset: &Changeset) -> Result<Published> {
@@ -249,6 +305,83 @@ impl Client {
             json!({ "epoch": epoch, "changeset": id.to_hex() }),
         )?;
         Ok(o.offset)
+    }
+
+    /// The fork's landing request and where it is (`GET /v1/forks/{fork}/landing`):
+    /// `{landing, remote, error}`.
+    pub fn landing_state(&self, fork: &ForkName) -> Result<serde_json::Value> {
+        self.get(&format!("/v1/forks/{fork}/landing"))
+    }
+
+    /// Record a verify of `id`, the fork's head, run against `base` (the location's
+    /// main): the record's offset, and the manifest the authority judged it by.
+    pub fn verdict(
+        &self,
+        fork: &ForkName,
+        epoch: u64,
+        id: ChangesetId,
+        base: GitOid,
+        checks: &[CheckRun],
+    ) -> Result<(u64, Option<ManifestId>)> {
+        #[derive(Deserialize)]
+        struct Recorded {
+            offset: u64,
+            manifest: Option<ManifestId>,
+        }
+        let r: Recorded = self.post(
+            &format!("/v1/forks/{fork}/verdicts"),
+            json!({ "epoch": epoch, "changeset": id.to_hex(), "base": base.to_hex(), "checks": checks }),
+        )?;
+        Ok((r.offset, r.manifest))
+    }
+}
+
+/// The body size of a batch of blobs of these sizes.
+pub fn batch_len(sizes: impl Iterator<Item = u64>) -> u64 {
+    sizes.map(|s| s + BATCH_HEADER_BYTES as u64).sum()
+}
+
+/// The first `size` bytes of the file at `path`, opened on the first read and closed
+/// at its end, so a batch body holds one open file at a time, not one per blob.
+struct Lazy {
+    path: PathBuf,
+    size: u64,
+    file: Option<std::io::Take<std::fs::File>>,
+}
+
+impl Read for Lazy {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let file = match &mut self.file {
+            Some(f) => f,
+            None => {
+                let f = std::fs::File::open(&self.path).map_err(|e| {
+                    std::io::Error::new(e.kind(), format!("{}: {e}", self.path.display()))
+                })?;
+                self.file.insert(f.take(self.size))
+            }
+        };
+        let n = file.read(buf)?;
+        if n == 0 && !buf.is_empty() {
+            self.file = None;
+        }
+        Ok(n)
+    }
+}
+
+/// Readers read one after another, each dropped once it has ended.
+struct Concat(VecDeque<Box<dyn Read + Send>>);
+
+impl Read for Concat {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while let Some(part) = self.0.front_mut() {
+            match part.read(buf)? {
+                0 if !buf.is_empty() => {
+                    self.0.pop_front();
+                }
+                n => return Ok(n),
+            }
+        }
+        Ok(0)
     }
 }
 

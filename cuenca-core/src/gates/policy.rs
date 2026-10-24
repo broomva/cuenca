@@ -61,8 +61,9 @@ use yaml_rust2::parser::{Event, Parser};
 /// Where the base's policy is read from.
 pub const POLICY_PATH: &str = ".control/policy.yaml";
 /// Where the base's check manifest is read from (decision 4 of the build loop: checks
-/// for verify come from the base tree). The engine only records its hash.
-pub const CHECKS_PATH: &str = ".cuenca/checks.toml";
+/// for verify come from the base tree). The engine only records its hash; `cuenca
+/// verify` reads it ([`crate::checks`]).
+pub const CHECKS_PATH: &str = crate::checks::MANIFEST_PATH;
 /// A larger policy file is refused.
 pub const MAX_POLICY_BYTES: usize = 1 << 20;
 /// Files larger than this fail `file_size` unless the policy says otherwise. GitHub

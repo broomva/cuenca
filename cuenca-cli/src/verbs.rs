@@ -9,17 +9,20 @@ use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context as _, bail};
-use cuenca_core::{Event, ForkName, LocationName};
+use cuenca_core::checks::{CheckRun, CheckStatus, MANIFEST_PATH, Manifest, ManifestId};
+use cuenca_core::{ChangesetId, Event, ForkName, LocationName};
 use cuenca_fs::{BlobSource, Fetched, SnapshotOptions};
-use cuenca_tree::{Changeset, Entry, GitOid, Op, Tree};
+use cuenca_tree::{Changeset, ContentHash, Entry, GitOid, Op, Tree};
 use serde::Serialize;
 use serde_json::{Value, json};
 
-use crate::client::Client;
+use crate::client::{Client, ClientError};
 use crate::local::{Flush, Local, State};
+use crate::run;
 
 /// What a verb did: `json` for agents, `text` for people. `exit` is the process's exit
-/// status: 0 done, 1 refused or failed, 2 unavailable (the verb is not built yet).
+/// status: 0 done, 1 refused or failed, 2 unavailable (the verb is not built yet),
+/// 3 verify ran its checks but the authority did not record them.
 #[derive(Debug, Clone)]
 pub struct Report {
     pub json: Value,
@@ -328,7 +331,7 @@ pub fn status(client: Option<&Client>, dir: &Path) -> anyhow::Result<Report> {
                 "head": f.head,
                 "epoch": f.epoch(),
                 "holder": f.holder(),
-                "landing_intent": f.landing_intent.map(|(id, _)| id),
+                "landing": f.landing,
             }),
             Err(e) => json!({ "error": e.to_string(), "offline": e.is_offline() }),
         },
@@ -343,13 +346,22 @@ pub fn status(client: Option<&Client>, dir: &Path) -> anyhow::Result<Report> {
         s.published.git_tree_id(),
     );
     match remote.get("holder") {
-        Some(holder) => text.push_str(&format!(
-            "authority: head {}, epoch {}, held by {}@{}\n",
-            remote["head"].as_str().unwrap_or("?"),
-            remote["epoch"],
-            holder["principal"].as_str().unwrap_or("?"),
-            holder["node"].as_str().unwrap_or("?"),
-        )),
+        Some(holder) => {
+            text.push_str(&format!(
+                "authority: head {}, epoch {}, held by {}@{}\n",
+                remote["head"].as_str().unwrap_or("?"),
+                remote["epoch"],
+                holder["principal"].as_str().unwrap_or("?"),
+                holder["node"].as_str().unwrap_or("?"),
+            ));
+            if let Some(l) = remote.get("landing").filter(|l| !l.is_null()) {
+                text.push_str(&format!(
+                    "landing {}: {}\n",
+                    l["changeset"].as_str().unwrap_or("?"),
+                    step_line(&l["step"])
+                ));
+            }
+        }
         None => text.push_str(&format!(
             "authority: {}\n",
             remote["error"].as_str().unwrap_or("unknown")
@@ -708,6 +720,47 @@ fn summarise(record: &cuenca_core::Record) -> (Value, String) {
         } => {
             format!("asked to land {changeset} from {fork}")
         }
+        Event::ExportIntent {
+            fork,
+            changeset,
+            commit,
+            branch,
+            ..
+        } => format!("exporting {changeset} from {fork} as commit {commit} to {branch}"),
+        Event::Exported { fork, changeset } => {
+            format!("exported {changeset} from {fork}")
+        }
+        Event::ReviewIntent { fork, changeset } => {
+            format!("opening a pull request for {changeset} from {fork}")
+        }
+        Event::InReview {
+            fork,
+            changeset,
+            url,
+            ..
+        } => format!("{changeset} from {fork} is in review: {url}"),
+        Event::LandingFailed {
+            fork,
+            changeset,
+            reason,
+        } => format!("landing {changeset} from {fork} failed: {reason}"),
+        Event::VerifyRecorded {
+            fork,
+            changeset,
+            checks,
+            manifest,
+            ..
+        } => {
+            let passed = checks
+                .iter()
+                .filter(|c| c.status == CheckStatus::Passed)
+                .count();
+            format!(
+                "verify of {changeset} on {fork}: {passed} of {} check(s) passed ({})",
+                checks.len(),
+                manifest.map_or("no manifest".to_string(), |m| format!("manifest {}", m.oid))
+            )
+        }
         other => format!("{other:?}"),
     };
     (
@@ -727,23 +780,205 @@ pub fn log(client: &Client, dir: &Path, fork: Option<&str>) -> anyhow::Result<Re
     Ok(Report::ok(json!({ "fork": name, "records": json }), text))
 }
 
-/// `cuenca verify`: run the location's checks, read from the base tree, on the
-/// checkout's head. Not built yet (BRO-3254): it says so and exits 2.
+/// `cuenca verify`: run the checks the location's main declares
+/// ([`cuenca_core::checks`], `.cuenca/checks.toml` of the base, never the candidate's) on
+/// the fork's head, in a temporary checkout of it, and have the authority record how
+/// they ended beside the head changeset. Everything queued is published first, and the
+/// authority's head must be the checkout's last snapshot, so what is verified is what
+/// the checkout holds (edits since the last snapshot are not). Exits 0 when every check
+/// passed (a base that declares none passes with zero), 1 otherwise.
+///
+/// Advisory (spec rev 2.2 section 6): the results are the caller's own and a check
+/// reads the candidate's files, so the record blocks nothing; GitHub's required checks
+/// are the gate at landing.
 pub fn verify(client: &Client, dir: &Path) -> anyhow::Result<Report> {
-    let local = open(client, dir)?;
-    let reason = "verify is not built yet: checks read from the base tree arrive with BRO-3254";
+    let mut local = open(client, dir)?;
+    let flush = local.flush(client);
+    if let Some(e) = flush.error {
+        bail!(
+            "{} snapshot(s) are still queued, so nothing was verified: {e}",
+            flush.pending
+        );
+    }
+    let f = client.fork(&local.state.fork)?;
+    let ours = local.state.published.git_tree_id();
+    if f.head != ours {
+        bail!(
+            "the fork's head is {}, not this checkout's last snapshot {ours}; nothing was verified",
+            f.head
+        );
+    }
+    let Some((id, _)) = f.head_changeset else {
+        bail!("{} has no draft to verify", f.name);
+    };
+
+    let (base, main) = client.location_tree(&f.location)?;
+    let manifest_bytes = match main.get(MANIFEST_PATH) {
+        None => None,
+        Some(Entry::File(oid) | Entry::Executable(oid)) => Some(
+            client
+                .location_blob(&f.location, *oid)?
+                .with_context(|| format!("the main of {} moved while it was read", f.location))?,
+        ),
+        Some(_) => bail!(
+            "{MANIFEST_PATH} in the base {base} of {} is not a regular file",
+            f.location
+        ),
+    };
+    let manifest = match &manifest_bytes {
+        None => Manifest::default(),
+        Some(bytes) => {
+            Manifest::parse(bytes).with_context(|| format!("the base {base} of {}", f.location))?
+        }
+    };
+
+    // The candidate as the authority has it, in a directory of this verify's own.
+    let scratch = tempfile::Builder::new()
+        .prefix("cuenca-verify-")
+        .tempdir()?;
+    let root = scratch.path().join("candidate");
+    let (head, tree) = client.fork_tree(&f.name)?;
+    if head != f.head {
+        bail!("{} moved while it was read; nothing was verified", f.name);
+    }
+    let source = Remote {
+        client,
+        fork: &f.name,
+    };
+    cuenca_fs::checkout(&tree, &root, &source)?;
+    let ran: Vec<run::Ran> = manifest
+        .checks
+        .iter()
+        .map(|c| run::check(c, &root))
+        .collect();
+    drop(scratch);
+
+    let runs: Vec<CheckRun> = ran.iter().map(|r| r.run.clone()).collect();
+    // A refused or failed record (the head moved, a takeover, a revoked key, the
+    // authority gone) must not cost the caller the run: the results are still reported,
+    // marked unrecorded, with exit 3.
+    let recorded = client.verdict(&f.name, local.state.epoch, id, base, &runs);
+    let passed = runs
+        .iter()
+        .filter(|r| r.status == CheckStatus::Passed)
+        .count();
+    let all = passed == runs.len();
+    let (offset, manifest_id, record_error) = match &recorded {
+        Ok((offset, m)) => (Some(*offset), *m, None),
+        Err(e) => (
+            None,
+            manifest_bytes.as_deref().map(|b| ManifestId {
+                oid: GitOid::for_blob(b),
+                sha256: ContentHash::of(b),
+            }),
+            Some(e),
+        ),
+    };
+
+    let mut text = format!(
+        "verify of {id} on {}: {passed} of {} check(s) passed, judged by {}\n",
+        f.name,
+        runs.len(),
+        match &manifest_id {
+            Some(m) => format!("{MANIFEST_PATH} {} of base {base}", m.oid),
+            None => format!("base {base}, which declares no checks"),
+        }
+    );
+    let mut checks = Vec::new();
+    for r in &ran {
+        let c = &r.run;
+        let verdict = match c.status {
+            CheckStatus::Passed => "pass".to_string(),
+            CheckStatus::Failed => match c.exit_code {
+                Some(code) => format!("FAIL (exit {code})"),
+                None => "FAIL (killed by a signal)".to_string(),
+            },
+            CheckStatus::TimedOut => format!("FAIL (timed out after {} s)", c.check.timeout_secs),
+            CheckStatus::NotRun => "FAIL (not run)".to_string(),
+        };
+        text.push_str(&format!(
+            "  {verdict}  {}  {} ms\n",
+            c.check.name, c.duration_ms
+        ));
+        if c.status != CheckStatus::Passed {
+            for line in r.output.lines() {
+                text.push_str(&format!("      {line}\n"));
+            }
+        }
+        let mut v = serde_json::to_value(c)?;
+        v["output"] = json!(r.output);
+        checks.push(v);
+    }
+    match (offset, record_error) {
+        (Some(offset), _) => text.push_str(&format!(
+            "recorded at log offset {offset}; advisory, it blocks nothing\n"
+        )),
+        (None, Some(e)) => text.push_str(&format!(
+            "NOT recorded: the authority did not take the record of {id}: {e}\n"
+        )),
+        (None, None) => unreachable!("a verify is either recorded or has a record error"),
+    }
     Ok(Report {
-        json: json!({ "fork": local.state.fork, "status": "unavailable", "reason": reason }),
-        text: format!("{reason}\n"),
-        exit: 2,
+        json: json!({
+            "fork": f.name,
+            "changeset": id,
+            "candidate": f.head,
+            "base": base,
+            "manifest": manifest_id,
+            "checks": checks,
+            "passed": all,
+            "recorded": offset.is_some(),
+            "offset": offset,
+            "record_error": record_error.map(client_error),
+        }),
+        text,
+        exit: match (offset, all) {
+            (None, _) => 3,
+            (Some(_), all) => i32::from(!all),
+        },
     })
 }
 
-/// `cuenca land`: ask to land the checkout's fork at its head. Everything queued must be
-/// published first, and the authority's head must be the checkout's last snapshot, so
-/// what is asked to land is what the checkout holds. Landing itself (the PR, the gates)
-/// is the authority's (BRO-3255); this records the request.
-pub fn land(client: &Client, dir: &Path) -> anyhow::Result<Report> {
+/// A client error as structured JSON, the shape MCP tools report errors in.
+pub(crate) fn client_error(e: &ClientError) -> Value {
+    let mut v = json!({ "message": e.to_string() });
+    match e {
+        ClientError::Api { status, code, .. } => {
+            v["code"] = json!(code);
+            v["status"] = json!(status);
+        }
+        ClientError::Offline { .. } => v["offline"] = json!(true),
+        ClientError::Other(_) => {}
+    }
+    v
+}
+
+/// One line for a landing step (`{"step": .., ..}` as the authority serializes it).
+fn step_line(step: &Value) -> String {
+    match step["step"].as_str().unwrap_or("?") {
+        "requested" => "requested".to_string(),
+        "in_review" => format!(
+            "in review, pull request {} ({})",
+            step["pr"],
+            step["url"].as_str().unwrap_or("?")
+        ),
+        "landed" => format!("landed (main moved at record {})", step["offset"]),
+        "failed" => format!("failed: {}", step["reason"].as_str().unwrap_or("?")),
+        other => format!("{other} (the authority is exporting it)"),
+    }
+}
+
+/// `cuenca land`: ask to land the checkout's fork at its head, which must be verified
+/// against the location's main (`cuenca verify`; its result does not matter, GitHub's
+/// required checks or the owner decide). Everything queued must be published first,
+/// and the authority's head must be the checkout's last snapshot, so what is asked to
+/// land is what the checkout holds.
+///
+/// On a location with a git remote the authority exports the draft as a branch and a
+/// pull request; this waits up to `wait` for the pull request and reports it, or the
+/// step the landing has reached. On a location without one the request waits for the
+/// owner's `cuenca admin land`. Exits 1 if the landing failed.
+pub fn land(client: &Client, dir: &Path, wait: std::time::Duration) -> anyhow::Result<Report> {
     let mut local = open(client, dir)?;
     let flush = local.flush(client);
     if let Some(e) = flush.error {
@@ -766,11 +1001,117 @@ pub fn land(client: &Client, dir: &Path) -> anyhow::Result<Report> {
     let offset = client
         .landing(&f.name, local.state.epoch, id)
         .with_context(|| format!("asking to land {id}"))?;
-    Ok(Report::ok(
-        json!({ "fork": f.name, "changeset": id, "offset": offset, "status": "requested" }),
+    let deadline = std::time::Instant::now() + wait;
+    let state = loop {
+        let state = client.landing_state(&f.name)?;
+        let step = state["landing"]["step"]["step"].as_str().unwrap_or("");
+        let settled = state["landing"]["changeset"] != json!(id)
+            || matches!(step, "in_review" | "landed" | "failed")
+            || state["remote"] != true;
+        if settled || std::time::Instant::now() >= deadline {
+            break state;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(250));
+    };
+    Ok(landing_report(&f.name, id, offset, &state))
+}
+
+/// What `cuenca land` reports, from the authority's `GET /v1/forks/{fork}/landing`
+/// answer `state` after the request for `id` (recorded at `offset`).
+fn landing_report(fork: &ForkName, id: ChangesetId, offset: u64, state: &Value) -> Report {
+    let landing = &state["landing"];
+    // A takeover (or the holder's newer request) dropped this one while it waited: what
+    // the fork's landing says now is another request's, and is not reported as ours.
+    let ours = landing["changeset"] == json!(id);
+    let none = Value::Null;
+    let step = if ours { &landing["step"] } else { &none };
+    let status = if ours {
+        step["step"].as_str().unwrap_or("unknown").to_string()
+    } else {
+        "dropped".to_string()
+    };
+    let waiting_for = match status.as_str() {
+        "requested" if state["remote"] != true => Some("owner"),
+        "requested" | "exporting" | "exported" | "reviewing" => Some("authority"),
+        _ => None,
+    };
+    let mut text = if ours {
+        format!("asked to land {id} from {fork}: {}\n", step_line(step))
+    } else {
         format!(
-            "asked to land {id} from {}; landing itself arrives with BRO-3255\n",
-            f.name
+            "asked to land {id} from {fork}, but the request was dropped (the fork was taken over, or a newer request replaced it)\n"
+        )
+    };
+    match waiting_for {
+        Some("owner") => text.push_str(
+            "the location has no git remote: the owner lands it with `cuenca admin land`\n",
         ),
-    ))
+        Some(_) => text.push_str("the authority is still exporting it; see `cuenca status`\n"),
+        None => {}
+    }
+    let error = if ours { &state["error"] } else { &none };
+    if let Some(e) = error.as_str() {
+        text.push_str(&format!("the authority is retrying after: {e}\n"));
+    }
+    Report {
+        exit: if matches!(status.as_str(), "failed" | "dropped") {
+            1
+        } else {
+            0
+        },
+        json: json!({
+            "fork": fork,
+            "changeset": id,
+            "offset": offset,
+            "status": status,
+            "waiting_for": waiting_for,
+            "pr": step.get("pr"),
+            "url": step.get("url"),
+            "reason": step.get("reason"),
+            "retrying_after": error,
+        }),
+        text,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn id(n: u8) -> ChangesetId {
+        ChangesetId::from_hex(&format!("{n:02x}").repeat(32)).unwrap()
+    }
+
+    #[test]
+    fn a_landing_report_names_the_step_and_exits_1_on_failure_or_a_dropped_request() {
+        let fork = ForkName::new("f1").unwrap();
+        let state = |changeset: ChangesetId, step: Value, remote: bool| json!({ "landing": { "changeset": changeset, "step": step }, "remote": remote, "error": "e" });
+        let pr = json!({ "step": "in_review", "pr": 4, "url": "https://github.com/o/r/pull/4" });
+        let r = landing_report(&fork, id(1), 9, &state(id(1), pr.clone(), true));
+        assert_eq!(
+            (r.exit, &r.json["status"], &r.json["pr"]),
+            (0, &json!("in_review"), &json!(4))
+        );
+        let failed = json!({ "step": "failed", "reason": "no" });
+        let r = landing_report(&fork, id(1), 9, &state(id(1), failed, true));
+        assert_eq!((r.exit, &r.json["reason"]), (1, &json!("no")));
+        let r = landing_report(
+            &fork,
+            id(1),
+            9,
+            &state(id(1), json!({ "step": "requested" }), false),
+        );
+        assert_eq!((r.exit, &r.json["waiting_for"]), (0, &json!("owner")));
+        // Replaced by another request: dropped, and nothing of the other one is ours.
+        let r = landing_report(&fork, id(1), 9, &state(id(2), pr, true));
+        assert_eq!(r.exit, 1);
+        assert_eq!(r.json["status"], "dropped");
+        for field in ["pr", "url", "reason", "retrying_after", "waiting_for"] {
+            assert_eq!(r.json[field], Value::Null, "{field}");
+        }
+        assert!(r.text.contains("dropped"), "{}", r.text);
+        // No landing at all (a takeover cleared it): dropped too.
+        let r = landing_report(&fork, id(1), 9, &json!({ "landing": null, "remote": true }));
+        assert_eq!((r.exit, &r.json["status"]), (1, &json!("dropped")));
+    }
 }

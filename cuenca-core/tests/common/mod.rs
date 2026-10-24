@@ -57,6 +57,24 @@ pub fn holder(principal: &str, node: &str) -> Holder {
     )
 }
 
+/// Record a verify of `id`, the head of `fork`, by `writer`, against its location's
+/// main as it is now, which must declare no checks.
+pub fn verify(store: &Store, fork: &ForkName, writer: &Writer, id: cuenca_core::ChangesetId) {
+    let location = store.fork(fork).unwrap().unwrap().location;
+    let main = store.location(&location).unwrap().unwrap().main;
+    store
+        .record_verify(fork, writer, id, main, Vec::new())
+        .unwrap();
+}
+
+/// Verify `id`, ask to land it, and land it as the owner (a location without a remote):
+/// the offset of the move of main.
+pub fn land(store: &Store, fork: &ForkName, writer: &Writer, id: cuenca_core::ChangesetId) -> u64 {
+    verify(store, fork, writer, id);
+    ask_landing(store, fork, writer, id).unwrap();
+    store.advance_main(fork, id).unwrap()
+}
+
 /// The holder the tests create forks with.
 pub fn agent() -> Holder {
     holder("agent", "nAgentCNTRL")
@@ -67,8 +85,8 @@ pub fn w1() -> Writer {
     Writer::new(agent(), 1)
 }
 
-/// Record an agent's landing intent with no declarations; the offset of its record.
-pub fn land(
+/// Record an agent's landing request with no declarations; the offset of its record.
+pub fn ask_landing(
     store: &Store,
     fork: &ForkName,
     writer: &Writer,

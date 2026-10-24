@@ -31,6 +31,10 @@ pub struct Authority {
     /// Taken for reading by every agent write from its last check to its commit
     /// ([`Authority::guarded`]), and for writing by [`Authority::ban`].
     revocation: std::sync::RwLock<()>,
+    /// Bumped to wake the lander ([`Authority::wake_lander`]).
+    lander_wake: (Mutex<u64>, std::sync::Condvar),
+    /// The last error each landing hit, while it is retried.
+    pub(crate) landing_errors: crate::land::LandingErrors,
 }
 
 /// An authenticated request's principal, on the node Tailscale named.
@@ -73,6 +77,20 @@ impl Authority {
         std::fs::create_dir_all(dir)?;
         let store = Store::open(dir.join("store")).map_err(std::io::Error::other)?;
         let keys = KeyRing::open(dir.join("keys.json"))?;
+        // The volume's principal has no key (it holds owner forks); one on file was
+        // written by hand or by an older build, and is refused rather than honoured.
+        if keys
+            .list()
+            .iter()
+            .any(|k| k.principal.as_str() == cuenca_core::VOLUME_PRINCIPAL)
+        {
+            return Err(std::io::Error::other(format!(
+                "{}: holds a key for principal {:?}, which is the volume's and has no key; \
+                 remove it",
+                dir.join("keys.json").display(),
+                cuenca_core::VOLUME_PRINCIPAL
+            )));
+        }
         // Uploads a crash interrupted are never resumed.
         let staging = dir.join("staging");
         if staging.exists() {
@@ -88,7 +106,34 @@ impl Authority {
             possessed: Mutex::new(HashMap::new()),
             banned: Mutex::new(HashSet::new()),
             revocation: std::sync::RwLock::new(()),
+            lander_wake: (Mutex::new(0), std::sync::Condvar::new()),
+            landing_errors: Default::default(),
         })
+    }
+
+    /// Wake the lander: a landing was asked for.
+    pub fn wake_lander(&self) {
+        let (count, cv) = &self.lander_wake;
+        *count.lock().expect("lander lock") += 1;
+        cv.notify_all();
+    }
+
+    pub(crate) fn lander_generation(&self) -> u64 {
+        *self.lander_wake.0.lock().expect("lander lock")
+    }
+
+    /// Wait until woken after `seen`, or `timeout`; the generation now.
+    pub(crate) fn wait_lander(&self, seen: u64, timeout: std::time::Duration) -> u64 {
+        let (count, cv) = &self.lander_wake;
+        let guard = count.lock().expect("lander lock");
+        let (guard, _) = cv
+            .wait_timeout_while(guard, timeout, |n| *n == seen)
+            .expect("lander lock");
+        *guard
+    }
+
+    pub(crate) fn set_landing_error(&self, fork: &cuenca_core::ForkName, error: Option<String>) {
+        self.landing_errors.set(fork, error);
     }
 
     pub fn store(&self) -> &Store {

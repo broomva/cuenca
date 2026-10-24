@@ -91,5 +91,55 @@ mutate src/local.rs 'fn born_ns(_: &std::fs::Metadata) -> Option<u128> {
 }' 'fn born_ns(m: &std::fs::Metadata) -> Option<u128> {
     m.created().ok().and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok()).map(|d| d.as_nanos())
 }' --test cli an_old_mtime
+# Uploads go in batches within both limits (BRO-3416). Not mutated: the route a blob
+# over BATCH_BYTES takes, which is equivalent below the authority's 64 MiB batch cap.
+mutate src/local.rs 'Some(last) if last.len() < BATCH_BLOBS && bytes + len <= BATCH_BYTES =>' 'Some(last) if bytes + len <= BATCH_BYTES =>' --lib
+mutate src/local.rs 'Some(last) if last.len() < BATCH_BLOBS && bytes + len <= BATCH_BYTES =>' 'Some(last) if last.len() < BATCH_BLOBS =>' --lib
+mutate src/client.rs '                0 if !buf.is_empty() => {
+                    self.0.pop_front();
+                }' '                0 if !buf.is_empty() => return Ok(0),' --test cli a_thousand
+
+# P20 r1 (C): a batch body opens one file at a time, so a snapshot of more files than
+# the open-file limit publishes; an upload refused for any reason but a lost connection
+# reports that refusal.
+mutate src/client.rs '                    file: None,' '                    file: Some(std::fs::File::open(path).map_err(|e| ClientError::Other(e.to_string()))?.take(size)),' --test cli a_thousand
+mutate src/client.rs '            Err(e) => return Err(e),' '            Err(_) => return Ok(()),' --test cli a_refused_upload_batch
+
+# `cuenca mcp` (BRO-3253): the tools are the agent verbs only; arguments are pinned and
+# directories absolute; a refusal is an error result carrying the authority's answer;
+# every tool declares its output schema.
+mutate src/mcp.rs '            "forks" => {' '            "admin" | "forks" => {' --test mcp owner_acts
+mutate src/mcp.rs '#[serde(deny_unknown_fields)]
+struct ForkArgs {' 'struct ForkArgs {' --test mcp owner_acts
+mutate src/mcp.rs '    if dir.is_absolute() {' '    if true {' --test mcp owner_acts
+mutate src/mcp.rs '(Some(_), Some(_), None) | (None, None, Some(_)) => {}' '_ if true => {}' --test mcp owner_acts
+mutate src/mcp.rs '            let mut r = if report.exit == 0 {' '            let mut r = if report.exit < 2 {' --test mcp
+mutate src/verbs.rs '            v["status"] = json!(status);' '' --test mcp owner_acts
+mutate src/mcp.rs '                .with_raw_output_schema(object(output))' '' --test mcp an_mcp_client
+mutate src/verbs.rs '        ClientError::Offline { .. } => v["offline"] = json!(true),' '        ClientError::Offline { .. } => {}' --test mcp an_unreachable
+
+
+# `cuenca verify` (BRO-3254): the list run is the base's, from the location's main, never
+# the candidate's; a checkout behind its fork verifies nothing; a check past its limit
+# is killed with everything it started; the exit says whether every check passed.
+mutate src/verbs.rs '    let (base, main) = client.location_tree(&f.location)?;' '    let (base, _) = client.location_tree(&f.location)?;
+    let (_, main) = client.fork_tree(&f.name)?;' --test cli rewrites
+mutate src/verbs.rs '    if f.head != ours {
+        bail!(
+            "the fork'"'"'s head is {}, not this checkout'"'"'s last snapshot {ours}; nothing was verified",' '    if false {
+        bail!(
+            "the fork'"'"'s head is {}, not this checkout'"'"'s last snapshot {ours}; nothing was verified",' --test cli verify_refuses
+mutate src/verbs.rs '            (Some(_), all) => i32::from(!all),' '            (Some(_), _) => 0,' --test cli rewrites
+# A refused record keeps the run: it is reported, unrecorded, with its own exit status.
+mutate src/verbs.rs '            (None, _) => 3,' '            (None, _) => 1,' --test cli a_refused_record
+mutate src/verbs.rs '    let recorded = client.verdict(&f.name, local.state.epoch, id, base, &runs);' '    let recorded = Ok::<_, ClientError>(client.verdict(&f.name, local.state.epoch, id, base, &runs)?);' --test cli a_refused_record
+mutate src/verbs.rs '                oid: GitOid::for_blob(b),' '                oid: GitOid::for_blob(b"x"),' --test cli a_refused_record
+mutate src/run.rs '    let _ = rustix::process::kill_process_group(group, rustix::process::Signal::KILL);' '' --lib run::
+mutate src/run.rs '            Ok(None) if Instant::now() >= deadline => break None,' '' --lib run::
+mutate src/run.rs '            Some(0) => ended(CheckStatus::Passed, Some(0), output),' '            Some(_) => ended(CheckStatus::Passed, Some(0), output),' --lib run::
+
+# Landing: the request reports who it waits for and what the lander reached.
+mutate src/verbs.rs '"requested" if state["remote"] != true => Some("owner"),' '"requested" if false => Some("owner"),' --test cli every_agent_verb
+mutate src/verbs.rs '        exit: if matches!(status.as_str(), "failed" | "dropped") {' '        exit: if false {' --test cli land_reports_a_failed
 
 exit $survived

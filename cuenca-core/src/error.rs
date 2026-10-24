@@ -53,8 +53,12 @@ pub enum CoreError {
     WrongLocation { fork: String, location: String },
     #[error("changeset {changeset} is not the head of fork {fork:?}")]
     NotHead { fork: String, changeset: String },
-    #[error("fork name {0:?} contains \"-from\", which is kept for sibling forks")]
+    #[error(
+        "fork name {0:?} is kept: \"-from\" names sibling forks, and \"owner\" would give one an owner fork's name"
+    )]
     ReservedName(String),
+    #[error("{0}")]
+    OwnerFork(String),
     #[error("principal {0:?} is revoked")]
     Revoked(String),
     #[error("{holder} does not hold fork {fork:?} under epoch {epoch}")]
@@ -77,6 +81,39 @@ pub enum CoreError {
     },
     #[error("remote {0:?} is not a plausible git remote")]
     BadRemote(String),
+    #[error(
+        "the main of location {location:?} is at tree {main}, not {base}, the base the checks were read from"
+    )]
+    BaseMoved {
+        location: String,
+        main: GitOid,
+        base: GitOid,
+    },
+    #[error(transparent)]
+    BadManifest(#[from] crate::checks::ManifestError),
+    #[error("the checks reported are not the base's .cuenca/checks.toml: {0}")]
+    ManifestMismatch(String),
+    #[error("check {name:?}: {reason}")]
+    BadCheckRun { name: String, reason: String },
+    #[error(
+        "changeset {changeset} of fork {fork:?} has no verify against its location's main; run `cuenca verify` first"
+    )]
+    NotVerified { fork: String, changeset: String },
+    #[error("fork {fork:?} has no landing request for {changeset}")]
+    NoLanding { fork: String, changeset: String },
+    #[error("the landing of {changeset} from fork {fork:?} is {step}, not {want}")]
+    LandingStep {
+        fork: String,
+        changeset: String,
+        step: String,
+        want: String,
+    },
+    #[error(
+        "location {0:?} has a git remote: it lands through a pull request, never by moving main"
+    )]
+    HasRemote(String),
+    #[error("location {0:?} has no git remote: the owner lands it with `cuenca admin land`")]
+    NoRemote(String),
     #[error("landing request: {0}")]
     Declarations(String),
     #[error("main kept moving while the gates evaluated the landing request; try again")]

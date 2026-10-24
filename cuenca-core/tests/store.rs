@@ -55,6 +55,65 @@ fn a_held_blob_is_ingested_like_a_new_one() {
     assert_eq!(store.read_blob(oid).unwrap(), content);
 }
 
+/// A batch stores every blob it was given, in one commit.
+#[test]
+fn a_blob_batch_stores_all_of_its_blobs() {
+    let (_d, store) = store();
+    let blobs: Vec<Vec<u8>> = (0..5).map(|i| format!("blob {i}\n").into_bytes()).collect();
+    let mut batch = store.blob_batch();
+    assert!(batch.is_empty());
+    for b in &blobs {
+        let info = batch
+            .add(GitOid::for_blob(b), b.len() as u64, b.as_slice())
+            .unwrap();
+        assert_eq!(info.sha256, sha256(b));
+        // Staged is not stored.
+        assert_eq!(store.blob_info(GitOid::for_blob(b)).unwrap(), None);
+    }
+    assert_eq!(batch.len(), 5);
+    batch.commit().unwrap();
+    for b in &blobs {
+        let oid = GitOid::for_blob(b);
+        assert_eq!(store.blob_info(oid).unwrap().unwrap().sha256, sha256(b));
+        assert_eq!(store.read_blob(oid).unwrap(), *b);
+    }
+    // An empty batch commits nothing, and a blob twice in a batch is stored once.
+    store.blob_batch().commit().unwrap();
+    let mut batch = store.blob_batch();
+    for _ in 0..2 {
+        batch
+            .add(GitOid::for_blob(b"twice"), 5, &b"twice"[..])
+            .unwrap();
+    }
+    batch.commit().unwrap();
+    assert_eq!(
+        store.read_blob(GitOid::for_blob(b"twice")).unwrap(),
+        b"twice"
+    );
+}
+
+/// A batch dropped after a refused blob stores none of its blobs, and leaves no file.
+#[test]
+fn a_blob_batch_that_is_not_committed_stores_nothing() {
+    let (dir, store) = store();
+    let mut batch = store.blob_batch();
+    batch
+        .add(GitOid::for_blob(b"good"), 4, &b"good"[..])
+        .unwrap();
+    let wrong = GitOid::for_blob(b"claimed");
+    assert!(matches!(
+        batch.add(wrong, 5, &b"other"[..]),
+        Err(CoreError::OidMismatch { .. })
+    ));
+    drop(batch);
+    assert_eq!(store.blob_info(GitOid::for_blob(b"good")).unwrap(), None);
+    assert_eq!(store.blob_info(wrong).unwrap(), None);
+    assert_eq!(
+        files_under(&dir.path().join("blobs")),
+        Vec::<std::path::PathBuf>::new()
+    );
+}
+
 #[test]
 fn a_blob_that_does_not_hash_to_its_claim_is_refused_and_nothing_is_stored() {
     let (dir, store) = store();
@@ -252,11 +311,20 @@ fn main_advances_by_compare_and_swap() {
     let g1 = write(&store, &main, &[("a", b"g")]);
     let pf = store.publish_draft(&fork("f"), &w1(), &f1).unwrap();
     let pg = store.publish_draft(&fork("g"), &w1(), &g1).unwrap();
+    // Main moves only by a landing request.
+    assert!(matches!(
+        store.advance_main(&fork("f"), pf.id),
+        Err(CoreError::NoLanding { .. })
+    ));
+    for (f, id) in [("f", pf.id), ("g", pg.id)] {
+        verify(&store, &fork(f), &w1(), id);
+        ask_landing(&store, &fork(f), &w1(), id).unwrap();
+    }
 
-    // Only the fork's head can move main.
+    // Only the fork's own request can move main.
     assert!(matches!(
         store.advance_main(&fork("g"), pf.id),
-        Err(CoreError::NotHead { .. })
+        Err(CoreError::NoLanding { .. })
     ));
     let at = store.advance_main(&fork("f"), pf.id).unwrap();
     assert_eq!(store.main_tree(&loc("l")).unwrap().git_tree_id(), f1.target);
@@ -272,7 +340,7 @@ fn main_advances_by_compare_and_swap() {
     // Another fork asking for the move f made is not a retry of it.
     assert!(matches!(
         store.advance_main(&fork("g"), pf.id),
-        Err(CoreError::NotHead { .. })
+        Err(CoreError::NoLanding { .. })
     ));
     // Something else is appended; a retry still answers with the move's own offset.
     store.create_fork(&fork("h"), &loc("l"), &agent()).unwrap();
@@ -302,17 +370,24 @@ fn a_landing_intent_names_the_head_and_a_retry_appends_nothing() {
     let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
     let unknown = ChangesetId::of(&write(&store, &main, &[("z", b"z")]));
     assert!(matches!(
-        land(&store, &fork("f"), &w1(), unknown),
+        ask_landing(&store, &fork("f"), &w1(), unknown),
         Err(CoreError::NotHead { .. })
     ));
-    let at = land(&store, &fork("f"), &w1(), p.id).unwrap();
+    // The head must be verified against main first.
+    assert!(matches!(
+        ask_landing(&store, &fork("f"), &w1(), p.id),
+        Err(CoreError::NotVerified { .. })
+    ));
+    verify(&store, &fork("f"), &w1(), p.id);
+    let at = ask_landing(&store, &fork("f"), &w1(), p.id).unwrap();
     store.create_fork(&fork("g"), &loc("l"), &agent()).unwrap();
     let len = store.len().unwrap();
-    assert_eq!(land(&store, &fork("f"), &w1(), p.id).unwrap(), at);
+    assert_eq!(ask_landing(&store, &fork("f"), &w1(), p.id).unwrap(), at);
     assert_eq!(store.len().unwrap(), len);
+    let landing = store.fork(&fork("f")).unwrap().unwrap().landing.unwrap();
     assert_eq!(
-        store.fork(&fork("f")).unwrap().unwrap().landing_intent,
-        Some((p.id, at))
+        (landing.changeset, landing.offset, landing.step),
+        (p.id, at, cuenca_core::LandingStep::Requested)
     );
 }
 
@@ -354,8 +429,7 @@ fn state_survives_reopen_and_matches_a_replay_of_the_log() {
         )
         .unwrap();
         let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
-        land(&store, &fork("f"), &w1(), p.id).unwrap();
-        store.advance_main(&fork("f"), p.id).unwrap();
+        land(&store, &fork("f"), &w1(), p.id);
         (cs, p.id)
     };
     let store = Store::open(dir.path()).unwrap();
@@ -369,10 +443,10 @@ fn state_survives_reopen_and_matches_a_replay_of_the_log() {
             summary.forks,
             summary.changesets
         ),
-        (5, 1, 1, 1)
+        (6, 1, 1, 1)
     );
     let records = store.records(0, 100).unwrap();
-    assert_eq!(records.len(), 5);
+    assert_eq!(records.len(), 6);
     assert!(
         records
             .iter()
@@ -476,11 +550,11 @@ fn main_follows_a_fork_draft_by_draft() {
         let head = store.fork_head(&fork("f")).unwrap();
         let cs = write(&store, &head, &[("a", &[b'0' + n])]);
         let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
-        let at = store.advance_main(&fork("f"), p.id).unwrap();
-        assert_eq!(at, p.offset + 1, "draft {n} moved main");
+        let at = land(&store, &fork("f"), &w1(), p.id);
+        assert_eq!(at, p.offset + 3, "draft {n} moved main");
         assert_eq!(store.main_tree(&loc("l")).unwrap().git_tree_id(), cs.target);
     }
-    assert_eq!(store.replay_check().unwrap().records, 8);
+    assert_eq!(store.replay_check().unwrap().records, 14);
 }
 
 /// A snapshot keeps seeing the store as it was when it was taken, across later writes.

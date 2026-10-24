@@ -207,3 +207,152 @@ pub fn grant(locations: &[&str], forks: &[&str]) -> Grant {
             .collect(),
     }
 }
+
+/// Run git in `dir`, panicking with its stderr if it fails; its stdout.
+pub fn git(dir: &Path, args: &[&str]) -> String {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// A stand-in for a GitHub repository: `remote.git`, a bare repository with one commit
+/// on `main`, cloned from `work`; and a fake `gh` that keeps pull requests as files.
+pub struct Upstream {
+    pub dir: PathBuf,
+    /// The GitHub URL the location names; `git_config` points it at `remote.git`.
+    pub url: String,
+    pub remote: PathBuf,
+    pub work: PathBuf,
+    pub gh: PathBuf,
+    pub git_config: Vec<String>,
+}
+
+pub const UPSTREAM_URL: &str = "https://github.com/cuenca-test/land";
+
+impl Upstream {
+    pub fn new(dir: &Path, files: &[(&str, &str)]) -> Self {
+        let work = dir.join("work");
+        std::fs::create_dir_all(&work).unwrap();
+        git(&work, &["init", "-q", "-b", "main"]);
+        for (path, content) in files {
+            let p = work.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        }
+        git(&work, &["add", "-A"]);
+        git(&work, &["commit", "-q", "-m", "init"]);
+        let remote = dir.join("remote.git");
+        git(
+            dir,
+            &[
+                "clone",
+                "-q",
+                "--bare",
+                work.to_str().unwrap(),
+                "remote.git",
+            ],
+        );
+        let gh = dir.join("gh");
+        std::fs::write(
+            &gh,
+            format!(
+                r#"#!/bin/sh
+# A fake gh: one file per pull request under prs/, named by its head branch.
+DIR='{dir}'
+REMOTE='{remote}'
+cmd="$1 $2"
+shift 2
+repo= head= base=
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --repo) repo=$2; shift ;;
+    --head) head=$2; shift ;;
+    --base) base=$2; shift ;;
+  esac
+  shift
+done
+key=$(printf %s "$head" | tr / _)
+mkdir -p "$DIR/prs"
+case "$cmd" in
+  "pr list")
+    if [ -f "$DIR/prs/$key" ]; then
+      n=$(cat "$DIR/prs/$key")
+      oid=$(cat "$DIR/prs/$key.oid" 2>/dev/null || git --git-dir="$REMOTE" rev-parse "refs/heads/$head")
+      printf '[{{"number":%s,"url":"https://github.com/%s/pull/%s","headRefOid":"%s","headRefName":"%s"}}]\n' "$n" "$repo" "$n" "$oid" "$head"
+    else
+      echo '[]'
+    fi ;;
+  "pr create")
+    cat > "$DIR/body.$key"
+    n=$(( $(ls "$DIR/prs" | grep -cv '\.oid$') + 1 ))
+    echo "$n" > "$DIR/prs/$key"
+    echo "$head $base $repo" >> "$DIR/creates.log"
+    echo "https://github.com/$repo/pull/$n" ;;
+  *) echo "fake gh: no $cmd" >&2; exit 1 ;;
+esac
+"#,
+                dir = dir.display(),
+                remote = remote.display()
+            ),
+        )
+        .unwrap();
+        std::fs::set_permissions(&gh, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+        let git_config = vec![format!(
+            "url.file://{}.insteadOf={UPSTREAM_URL}",
+            remote.display()
+        )];
+        Self {
+            dir: dir.to_path_buf(),
+            url: UPSTREAM_URL.to_string(),
+            remote,
+            work,
+            gh,
+            git_config,
+        }
+    }
+
+    /// The pull requests `gh pr create` opened: `<head> <base> <repo>` each.
+    pub fn creates(&self) -> Vec<String> {
+        std::fs::read_to_string(self.dir.join("creates.log"))
+            .unwrap_or_default()
+            .lines()
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// A pull request's body.
+    pub fn body(&self, branch: &str) -> String {
+        std::fs::read_to_string(self.dir.join(format!("body.{}", branch.replace('/', "_"))))
+            .unwrap()
+    }
+
+    /// Run git on the remote.
+    pub fn git(&self, args: &[&str]) -> String {
+        git(&self.remote, args)
+    }
+
+    /// A lander configuration for this upstream.
+    pub fn land_config(&self, repos: PathBuf) -> cuenca_server::land::LandConfig {
+        let mut c = cuenca_server::land::LandConfig::new(repos, self.gh.clone());
+        c.git_config = self.git_config.clone();
+        c.poll = std::time::Duration::from_millis(100);
+        c
+    }
+}

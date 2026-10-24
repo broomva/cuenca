@@ -3,251 +3,15 @@
 //! through `cuenca admin`, and every agent verb through the binary, each client with its
 //! own config and state directory.
 
+mod common;
+
+use common::*;
 use std::os::unix::fs::PermissionsExt as _;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Output, Stdio};
+use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
 use serde_json::Value;
-
-const NODE: &str = "nMac11CNTRL";
-
-fn free_port() -> u16 {
-    std::net::TcpListener::bind("127.0.0.1:0")
-        .unwrap()
-        .local_addr()
-        .unwrap()
-        .port()
-}
-
-fn bin() -> &'static str {
-    env!("CARGO_BIN_EXE_cuenca")
-}
-
-/// A `cuenca serve` on a port of its own, restartable on the same state and port.
-struct Authority {
-    dir: tempfile::TempDir,
-    port: u16,
-    child: Option<Child>,
-}
-
-impl Authority {
-    fn start() -> Self {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o700)).unwrap();
-        let script = dir.path().join("tailscale");
-        std::fs::write(
-            &script,
-            format!(
-                "#!/bin/sh\ncase \"$1\" in\n  whois) echo '{{\"Node\":{{\"StableID\":\"{NODE}\"}}}}' ;;\n  status) echo '{{\"Self\":{{\"ID\":\"{NODE}\"}}}}' ;;\n  *) exit 1 ;;\nesac\n"
-            ),
-        )
-        .unwrap();
-        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let mut a = Self {
-            dir,
-            port: 0,
-            child: None,
-        };
-        // A port found free can be taken by a parallel test before the server binds it:
-        // then the server exits, and another port is tried.
-        for _ in 0..5 {
-            a.port = free_port();
-            if a.try_up().is_ok() {
-                return a;
-            }
-        }
-        panic!("cuenca serve did not come up: {}", a.log());
-    }
-
-    fn log(&self) -> String {
-        std::fs::read_to_string(self.dir.path().join("serve.log")).unwrap_or_default()
-    }
-
-    fn url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.port)
-    }
-
-    fn socket(&self) -> PathBuf {
-        self.dir.path().join("admin.sock")
-    }
-
-    fn up(&mut self) {
-        if let Err(e) = self.try_up() {
-            panic!("cuenca serve did not come up: {e}: {}", self.log());
-        }
-    }
-
-    fn try_up(&mut self) -> Result<(), String> {
-        let _ = std::fs::remove_file(self.socket());
-        let log = std::fs::File::options()
-            .create(true)
-            .append(true)
-            .open(self.dir.path().join("serve.log"))
-            .unwrap();
-        let mut child = Command::new(bin())
-            .args(["serve", "--unsafe-bind", "--bind"])
-            .arg(format!("127.0.0.1:{}", self.port))
-            .arg("--state")
-            .arg(self.dir.path().join("state"))
-            .arg("--admin-socket")
-            .arg(self.socket())
-            .arg("--tailscale")
-            .arg(self.dir.path().join("tailscale"))
-            .stdout(Stdio::null())
-            .stderr(log)
-            .spawn()
-            .unwrap();
-        let deadline = Instant::now() + Duration::from_secs(60);
-        while std::net::TcpStream::connect(("127.0.0.1", self.port)).is_err()
-            || !self.socket().exists()
-        {
-            if let Some(status) = child.try_wait().unwrap() {
-                return Err(format!("it exited ({status})"));
-            }
-            if Instant::now() > deadline {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("not up after 60 s".into());
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
-        self.child = Some(child);
-        Ok(())
-    }
-
-    /// Kill the authority without warning.
-    fn down(&mut self) {
-        if let Some(mut c) = self.child.take() {
-            c.kill().unwrap();
-            c.wait().unwrap();
-        }
-    }
-
-    fn admin(&self, args: &[&str]) -> Output {
-        let out = Command::new(bin())
-            .arg("admin")
-            .arg("--socket")
-            .arg(self.socket())
-            .args(args)
-            .output()
-            .unwrap();
-        assert!(out.status.success(), "admin {args:?}: {out:?}");
-        out
-    }
-
-    /// Mint an agent key and return its token.
-    fn mint(&self, principal: &str, extra: &[&str]) -> String {
-        let mut args = vec!["key", "mint", principal, "--kind", "agent", "--node", NODE];
-        args.extend_from_slice(extra);
-        let out = self.admin(&args);
-        String::from_utf8(out.stdout).unwrap().trim().to_string()
-    }
-}
-
-impl Drop for Authority {
-    fn drop(&mut self) {
-        self.down();
-    }
-}
-
-/// One principal's `cuenca`, with its own HOME, config and state.
-struct Agent {
-    home: tempfile::TempDir,
-}
-
-impl Agent {
-    fn login(a: &Authority, token: &str) -> Self {
-        let me = Self {
-            home: tempfile::tempdir().unwrap(),
-        };
-        let mut child = me
-            .cmd(&["login", "--url", &a.url(), "--token-stdin"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .unwrap();
-        use std::io::Write as _;
-        child
-            .stdin
-            .take()
-            .unwrap()
-            .write_all(token.as_bytes())
-            .unwrap();
-        let out = child.wait_with_output().unwrap();
-        assert!(out.status.success(), "login: {out:?}");
-        let mode = std::fs::metadata(me.home.path().join("config.json"))
-            .unwrap()
-            .permissions()
-            .mode();
-        assert_eq!(mode & 0o777, 0o600);
-        me
-    }
-
-    fn cmd(&self, args: &[&str]) -> Command {
-        let mut c = Command::new(bin());
-        c.args(args)
-            .env("HOME", self.home.path())
-            .env("CUENCA_CONFIG", self.home.path().join("config.json"))
-            .env("CUENCA_STATE_HOME", self.home.path().join("state"))
-            .env_remove("CUENCA_URL")
-            .env_remove("CUENCA_TOKEN");
-        c
-    }
-
-    /// Run a verb with `--json`: its exit status and its JSON.
-    fn run(&self, args: &[&str]) -> (i32, Value) {
-        let mut all = vec!["--json"];
-        all.extend_from_slice(args);
-        let out = self.cmd(&all).output().unwrap();
-        let text = String::from_utf8_lossy(&out.stdout);
-        let json = serde_json::from_str(text.trim())
-            .unwrap_or_else(|e| panic!("{args:?} printed {text:?}: {e}; stderr {:?}", out.stderr));
-        (out.status.code().unwrap(), json)
-    }
-
-    fn ok(&self, args: &[&str]) -> Value {
-        let (code, v) = self.run(args);
-        assert_eq!(code, 0, "{args:?}: {v}");
-        v
-    }
-
-    /// The fork's head as the authority has it.
-    fn head(&self, fork: &str) -> String {
-        let v = self.ok(&["forks"]);
-        v["forks"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .find(|f| f["name"] == fork)
-            .unwrap_or_else(|| panic!("{fork} not in {v}"))["head"]
-            .as_str()
-            .unwrap()
-            .to_string()
-    }
-}
-
-fn s(p: &Path) -> &str {
-    p.to_str().unwrap()
-}
-
-/// A plain directory (not a git repository) registered as location `site`.
-fn site(a: &Authority) -> tempfile::TempDir {
-    let site = tempfile::tempdir().unwrap();
-    std::fs::create_dir_all(site.path().join("docs")).unwrap();
-    std::fs::write(site.path().join("docs/index.md"), "# site\n").unwrap();
-    std::fs::write(site.path().join("run.sh"), "#!/bin/sh\necho hi\n").unwrap();
-    std::fs::set_permissions(
-        site.path().join("run.sh"),
-        std::fs::Permissions::from_mode(0o755),
-    )
-    .unwrap();
-    std::fs::write(site.path().join(".DS_Store"), "finder").unwrap();
-    assert!(!site.path().join(".git").exists());
-    a.admin(&["location", "add", "site", "--dir", s(site.path())]);
-    site
-}
 
 #[test]
 fn every_agent_verb_works_on_a_plain_directory() {
@@ -349,12 +113,31 @@ fn every_agent_verb_works_on_a_plain_directory() {
     let v = a1.ok(&["diff", "location:site", "f1"]);
     assert_eq!(v["changes"].as_array().unwrap().len(), 3, "{v}");
 
-    let (code, v) = a1.run(&[&["verify"][..], &dir].concat());
-    assert_eq!(code, 2, "{v}");
-    assert_eq!(v["status"], "unavailable");
+    // The site declares no checks: verify passes with zero, and is recorded.
+    let v = a1.ok(&[&["verify"][..], &dir].concat());
+    assert_eq!(v["passed"], true, "{v}");
+    assert_eq!(v["checks"].as_array().unwrap().len(), 0, "{v}");
+    assert_eq!(v["manifest"], Value::Null);
+    assert_eq!(v["candidate"], target.as_str());
 
     let v = a1.ok(&[&["land"][..], &dir].concat());
     assert_eq!(v["status"], "requested", "{v}");
+    assert_eq!(v["waiting_for"], "owner", "{v}");
+    // The location has no git remote: main moves only when the owner lands it.
+    let before = a1.head_of_location("site");
+    assert_ne!(before, a1.head("f1"));
+    let out = a.admin(&[
+        "land",
+        "f1",
+        "--changeset",
+        v["changeset"].as_str().unwrap(),
+    ]);
+    let landed: Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(landed["main"], a1.head("f1").as_str(), "{landed}");
+    assert_eq!(a1.head_of_location("site"), a1.head("f1"));
+    let v = a1.ok(&[&["status"][..], &dir].concat());
+    assert_eq!(v["authority"]["landing"]["step"]["step"], "landed", "{v}");
+    assert_eq!(a1.records("f1").last().unwrap(), "main_advanced");
 
     // The human output works too.
     let out = a1.cmd(&["status", "--dir", s(&co)]).output().unwrap();
@@ -710,14 +493,16 @@ fn owner_acts_have_no_agent_verb() {
     assert_eq!(out.status.code(), Some(1), "{out:?}");
 }
 
-/// Spec row R07: a 1,000-file snapshot is published within 5 s. Not met yet: 11 s on a
-/// Mac, because the authority makes a full sync per blob; batched ingest is BRO-3416.
+/// Spec row R07: a 1,000-file snapshot is published within 5 s. The blobs go up in
+/// batches, each one full sync and one log commit on the authority (BRO-3416).
 #[test]
-#[ignore = "R07 needs batched blob ingest (BRO-3416): 11 s today"]
 fn a_thousand_file_snapshot_publishes_within_5_s() {
-    let a = Authority::start();
+    // Both sides under a soft open-file limit below the stock macOS one (256): an
+    // upload batch must not hold a descriptor per blob, on either side.
+    let a = Authority::start_with(Some(FD_LIMIT));
     let _site = site(&a);
-    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    let mut a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.fd_limit = Some(FD_LIMIT);
     a1.ok(&["fork", "site", "--name", "f1"]);
     let work = tempfile::tempdir().unwrap();
     let co = work.path().join("f1");
@@ -735,6 +520,90 @@ fn a_thousand_file_snapshot_publishes_within_5_s() {
     assert_eq!(v["flush"]["published"].as_array().unwrap().len(), 1, "{v}");
     eprintln!("R07: 1,000-file snapshot published in {took:?}");
     assert!(took < Duration::from_secs(5), "took {took:?}");
+}
+
+/// The soft open-file limit the R07 test runs under, below a batch's 256 blobs.
+const FD_LIMIT: u32 = 128;
+
+/// An upload batch the authority refuses reports the authority's refusal, not success:
+/// a blob in the outbox that is not its oid is refused as `bad_blob`, and nothing of the
+/// batch publishes.
+#[test]
+fn a_refused_upload_batch_reports_its_refusal() {
+    let mut a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    let head = a1.head("f1");
+
+    a.down();
+    for i in 0..3 {
+        std::fs::write(co.join(format!("new-{i}.txt")), format!("new {i}\n")).unwrap();
+    }
+    let (code, v) = a1.run(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(code, 0, "{v}");
+    assert_eq!(v["flush"]["offline"], true, "{v}");
+    // Every queued object, rewritten with other bytes of the same length.
+    let mut corrupted = 0;
+    let mut dirs = vec![a1.checkout_state().join("objects")];
+    while let Some(dir) = dirs.pop() {
+        for e in std::fs::read_dir(dir).unwrap() {
+            let path = e.unwrap().path();
+            if path.is_dir() {
+                dirs.push(path);
+            } else {
+                let len = std::fs::metadata(&path).unwrap().len() as usize;
+                let mut perm = std::fs::metadata(&path).unwrap().permissions();
+                perm.set_mode(0o600);
+                std::fs::set_permissions(&path, perm).unwrap();
+                std::fs::write(&path, vec![b'x'; len]).unwrap();
+                corrupted += 1;
+            }
+        }
+    }
+    assert!(corrupted >= 3, "{corrupted}");
+
+    a.up();
+    let (code, v) = a1.run(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(code, 1, "{v}");
+    let error = v["flush"]["error"]
+        .as_str()
+        .unwrap_or_else(|| panic!("{v}"));
+    assert!(error.contains("bad_blob"), "{v}");
+    assert!(!error.contains("missing_blob"), "{v}");
+    assert_eq!(v["flush"]["offline"], false, "{v}");
+    assert_eq!(v["flush"]["pending"], 1, "{v}");
+    assert_eq!(a1.head("f1"), head);
+}
+
+/// A blob too large for an upload batch goes up alone, among small ones that are
+/// batched, and the checkout of the published fork has every byte.
+#[test]
+fn a_blob_larger_than_a_batch_is_uploaded_alone() {
+    let a = Authority::start();
+    let _site = site(&a);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "site"]));
+    a1.ok(&["fork", "site", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    let big: Vec<u8> = (0..17u32 << 20).map(|i| (i % 251) as u8).collect();
+    std::fs::write(co.join("big.bin"), &big).unwrap();
+    for i in 0..300 {
+        std::fs::write(co.join(format!("small{i}.txt")), format!("{i}\n")).unwrap();
+    }
+    let v = a1.ok(&["snapshot", "--dir", s(&co)]);
+    assert_eq!(v["flush"]["published"].as_array().unwrap().len(), 1, "{v}");
+    let again = work.path().join("again");
+    a1.ok(&["checkout", "f1", s(&again)]);
+    assert_eq!(std::fs::read(again.join("big.bin")).unwrap(), big);
+    assert_eq!(
+        std::fs::read_to_string(again.join("small299.txt")).unwrap(),
+        "299\n"
+    );
 }
 
 /// `dir`'s files, recursively, copied into `to`.
@@ -760,15 +629,6 @@ impl Agent {
             .collect();
         assert_eq!(all.len(), 1, "{all:?}");
         all[0].clone()
-    }
-
-    fn records(&self, fork: &str) -> Vec<String> {
-        self.ok(&["log", fork])["records"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|r| r["event"]["event"].as_str().unwrap().to_string())
-            .collect()
     }
 }
 
@@ -1058,4 +918,331 @@ fn a_git_location_with_ignored_paths_is_reported_not_broken() {
         ]
     );
     assert!(co.join("node_modules/dep.js").exists(), "left on disk");
+}
+
+/// A location whose main declares checks: `gate`, which fails, and `ok`, which passes.
+const GATED: &str = "[[check]]\nname = \"gate\"\nargv = [\"sh\", \"-c\", \"exit 3\"]\ntimeout_secs = 60\n\n[[check]]\nname = \"ok\"\nargv = [\"true\"]\n";
+
+fn gated_site(a: &Authority, name: &str, manifest: &str) -> tempfile::TempDir {
+    let site = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(site.path().join(".cuenca")).unwrap();
+    std::fs::write(site.path().join(".cuenca/checks.toml"), manifest).unwrap();
+    std::fs::write(site.path().join("README"), "gated\n").unwrap();
+    a.admin(&["location", "add", name, "--dir", s(site.path())]);
+    site
+}
+
+/// Spec rev 2.2 row "`cuenca land` on a fork whose candidate edits its own
+/// .cuenca/checks.toml to pass while breaking the base tree's check": verify runs the
+/// base's list, 10 of 10 variants, and the record names the base manifest's hash; on a
+/// location with a git remote, land then opens a pull request (GitHub's required checks
+/// gate its merge), whose body carries the base's failing result.
+#[test]
+fn a_candidate_that_rewrites_its_checks_is_judged_by_the_bases_10_of_10() {
+    let up = Upstream::new(&[(".cuenca/checks.toml", GATED), ("README", "gated\n")]);
+    let a = Authority::start_landing(&up);
+    a.admin(&[
+        "location",
+        "add",
+        "gated",
+        "--git",
+        s(&up.work),
+        "--remote",
+        UPSTREAM_URL,
+    ]);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "gated"]));
+    let base_manifest = cuenca_tree::GitOid::for_blob(GATED.as_bytes()).to_hex();
+    let passing = "[[check]]\nname = \"gate\"\nargv = [\"true\"]\n\n[[check]]\nname = \"ok\"\nargv = [\"true\"]\n";
+    type Edit = fn(&Path, &str);
+    let variants: [(&str, Edit); 10] = [
+        ("gate made `true`", |co, p| {
+            write(co, ".cuenca/checks.toml", p)
+        }),
+        ("manifest deleted", |co, _| {
+            std::fs::remove_file(co.join(".cuenca/checks.toml")).unwrap()
+        }),
+        ("manifest emptied", |co, _| {
+            write(co, ".cuenca/checks.toml", "")
+        }),
+        ("manifest made unparseable", |co, _| {
+            write(co, ".cuenca/checks.toml", "[[check]\n")
+        }),
+        ("gate renamed", |co, _| {
+            write(
+                co,
+                ".cuenca/checks.toml",
+                "[[check]]\nname = \"gate-old\"\nargv = [\"true\"]\n",
+            )
+        }),
+        ("only ok kept", |co, _| {
+            write(
+                co,
+                ".cuenca/checks.toml",
+                "[[check]]\nname = \"ok\"\nargv = [\"true\"]\n",
+            )
+        }),
+        ("manifest made a symlink to a passing one", |co, p| {
+            write(co, "passing.toml", p);
+            std::fs::remove_file(co.join(".cuenca/checks.toml")).unwrap();
+            std::os::unix::fs::symlink("../passing.toml", co.join(".cuenca/checks.toml")).unwrap();
+        }),
+        ("gate made `exit 0`", |co, _| {
+            write(
+                co,
+                ".cuenca/checks.toml",
+                &GATED.replace("exit 3", "exit 0"),
+            )
+        }),
+        ("manifest moved to the root", |co, p| {
+            std::fs::remove_dir_all(co.join(".cuenca")).unwrap();
+            write(co, "checks.toml", p);
+        }),
+        ("a passing gate declared first", |co, _| {
+            write(
+                co,
+                ".cuenca/checks.toml",
+                &format!("[[check]]\nname = \"gate\"\nargv = [\"true\"]\n\n{GATED}"),
+            )
+        }),
+    ];
+    let work = tempfile::tempdir().unwrap();
+    for (i, (what, edit)) in variants.iter().enumerate() {
+        let fork = format!("v{i}");
+        a1.ok(&["fork", "gated", "--name", &fork]);
+        let co = work.path().join(&fork);
+        a1.ok(&["checkout", &fork, s(&co)]);
+        edit(&co, passing);
+        let dir = ["--dir", s(&co)];
+        let v = a1.ok(&[&["snapshot"][..], &dir].concat());
+        assert_eq!(
+            v["flush"]["published"].as_array().unwrap().len(),
+            1,
+            "{what}: {v}"
+        );
+
+        let (code, v) = a1.run(&[&["verify"][..], &dir].concat());
+        assert_eq!(code, 1, "{what}: {v}");
+        assert_eq!(v["passed"], false, "{what}: {v}");
+        assert_eq!(v["manifest"]["oid"], base_manifest.as_str(), "{what}: {v}");
+        let ran: Vec<(&str, &str, Value)> = v["checks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| {
+                (
+                    c["name"].as_str().unwrap(),
+                    c["status"].as_str().unwrap(),
+                    c["exit_code"].clone(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            ran,
+            [
+                ("gate", "failed", Value::from(3)),
+                ("ok", "passed", Value::from(0))
+            ],
+            "{what}: {v}"
+        );
+        assert_eq!(v["candidate"], a1.head(&fork).as_str(), "{what}");
+        let records = a1.records(&fork);
+        assert_eq!(
+            records.last().unwrap(),
+            "verify_recorded",
+            "{what}: {records:?}"
+        );
+
+        // The verify failed, and land opens a pull request all the same.
+        let v = a1.ok(&[&["land"][..], &dir].concat());
+        assert_eq!(v["status"], "in_review", "{what}: {v}");
+        assert_eq!(v["pr"], i + 1, "{what}: {v}");
+        let branch = format!("cp/{}", v["changeset"].as_str().unwrap());
+        assert_eq!(
+            git(&up.remote, &["rev-parse", &format!("{branch}^{{tree}}")]),
+            a1.head(&fork),
+            "{what}: the PR's tree is the draft's"
+        );
+        let body = up.body(&branch);
+        assert!(
+            body.contains("`gate` failed, `ok` passed"),
+            "{what}: {body}"
+        );
+    }
+    assert_eq!(up.creates().len(), 10, "one pull request per fork");
+}
+
+fn write(root: &Path, path: &str, content: &str) {
+    std::fs::write(root.join(path), content).unwrap();
+}
+
+/// A base whose checks pass: verify exits 0, says so in its text, and a check that runs
+/// past its limit fails as `timed_out`.
+#[test]
+fn verify_passes_when_the_bases_checks_pass_and_times_a_check_out() {
+    let a = Authority::start();
+    let _ok = gated_site(
+        &a,
+        "fine",
+        "[[check]]\nname = \"ok\"\nargv = [\"sh\", \"-c\", \"test -f README\"]\n",
+    );
+    let _slow = gated_site(
+        &a,
+        "slow",
+        "[[check]]\nname = \"slow\"\nargv = [\"sleep\", \"30\"]\ntimeout_secs = 1\n",
+    );
+    let a1 = Agent::login(
+        &a,
+        &a.mint("a1", &["--location", "fine", "--location", "slow"]),
+    );
+    let work = tempfile::tempdir().unwrap();
+    for (location, fork) in [("fine", "f"), ("slow", "s")] {
+        a1.ok(&["fork", location, "--name", fork]);
+        a1.ok(&["checkout", fork, s(&work.path().join(fork))]);
+        write(&work.path().join(fork), "new.txt", "x\n");
+        a1.ok(&["snapshot", "--dir", s(&work.path().join(fork))]);
+    }
+    let dir = work.path().join("f");
+    let v = a1.ok(&["verify", "--dir", s(&dir)]);
+    assert_eq!(v["passed"], true, "{v}");
+    assert_eq!(v["checks"][0]["status"], "passed", "{v}");
+    let out = a1.cmd(&["verify", "--dir", s(&dir)]).output().unwrap();
+    assert!(out.status.success());
+    assert!(String::from_utf8_lossy(&out.stdout).contains("1 of 1 check(s) passed"));
+
+    let started = Instant::now();
+    let (code, v) = a1.run(&["verify", "--dir", s(&work.path().join("s"))]);
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["checks"][0]["status"], "timed_out", "{v}");
+    assert!(started.elapsed() < Duration::from_secs(20));
+}
+
+/// A record the authority refuses does not cost the run: when the fork's head moves while
+/// the checks run, verify still reports every check, marked unrecorded, and exits 3.
+#[test]
+fn a_refused_record_still_reports_the_checks_it_ran() {
+    let a = Authority::start();
+    let sync = tempfile::tempdir().unwrap();
+    let (started, go) = (sync.path().join("started"), sync.path().join("go"));
+    let manifest = format!(
+        "[[check]]\nname = \"gate\"\nargv = [\"sh\", \"-c\", \"touch '{}'; while [ ! -f '{}' ]; do sleep 0.05; done; echo gate-output; exit 3\"]\ntimeout_secs = 60\n",
+        started.display(),
+        go.display()
+    );
+    let _site = gated_site(&a, "gated", &manifest);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "gated"]));
+    a1.ok(&["fork", "gated", "--name", "f"]);
+    let work = tempfile::tempdir().unwrap();
+    let (one, two) = (work.path().join("one"), work.path().join("two"));
+    a1.ok(&["checkout", "f", s(&one)]);
+    write(&one, "a", "a\n");
+    a1.ok(&["snapshot", "--dir", s(&one)]);
+    a1.ok(&["checkout", "f", s(&two)]);
+
+    let verify = a1
+        .cmd(&["--json", "verify", "--dir", s(&one)])
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let deadline = Instant::now() + Duration::from_secs(30);
+    while !started.exists() {
+        assert!(Instant::now() < deadline, "the check never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    write(&two, "b", "b\n");
+    a1.ok(&["snapshot", "--dir", s(&two)]);
+    std::fs::write(&go, "").unwrap();
+
+    let out = verify.wait_with_output().unwrap();
+    let v: Value = serde_json::from_slice(&out.stdout)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&out.stdout)));
+    assert_eq!(out.status.code(), Some(3), "{v}");
+    assert_eq!(v["recorded"], false, "{v}");
+    assert_eq!(v["offset"], Value::Null, "{v}");
+    assert_eq!(v["record_error"]["code"], "not_head", "{v}");
+    assert_eq!(v["checks"][0]["status"], "failed", "{v}");
+    assert_eq!(v["checks"][0]["exit_code"], 3, "{v}");
+    assert!(
+        v["checks"][0]["output"]
+            .as_str()
+            .unwrap()
+            .contains("gate-output"),
+        "{v}"
+    );
+    assert_eq!(
+        v["manifest"]["oid"],
+        cuenca_tree::GitOid::for_blob(manifest.as_bytes()).to_hex(),
+        "{v}"
+    );
+    assert!(!a1.records("f").iter().any(|e| e == "verify_recorded"));
+}
+
+/// Verify judges the fork's head as the checkout last snapshotted it; a checkout whose
+/// fork moved on without it verifies nothing.
+#[test]
+fn verify_refuses_a_checkout_behind_its_fork_and_a_fork_with_no_draft() {
+    let a = Authority::start();
+    let _site = gated_site(&a, "gated", GATED);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "gated"]));
+    a1.ok(&["fork", "gated", "--name", "f"]);
+    let work = tempfile::tempdir().unwrap();
+    let (one, two) = (work.path().join("one"), work.path().join("two"));
+    a1.ok(&["checkout", "f", s(&one)]);
+    let (code, v) = a1.run(&["verify", "--dir", s(&one)]);
+    assert_eq!(code, 1, "{v}");
+    assert!(v["error"].as_str().unwrap().contains("no draft"), "{v}");
+
+    a1.ok(&["checkout", "f", s(&two)]);
+    write(&two, "x", "x\n");
+    a1.ok(&["snapshot", "--dir", s(&two)]);
+    let (code, v) = a1.run(&["verify", "--dir", s(&one)]);
+    assert_eq!(code, 1, "{v}");
+    assert!(
+        v["error"]
+            .as_str()
+            .unwrap()
+            .contains("nothing was verified"),
+        "{v}"
+    );
+    assert_eq!(a1.records("f").last().unwrap(), "draft_published");
+}
+
+/// A landing the authority cannot carry out (the location's main is a directory whose
+/// tree no commit of the remote has) is reported as failed, with its reason, and exits 1.
+#[test]
+fn land_reports_a_failed_landing_and_exits_1() {
+    let up = Upstream::new(&[("README", "upstream\n")]);
+    let a = Authority::start_landing(&up);
+    let site = tempfile::tempdir().unwrap();
+    std::fs::write(site.path().join("README"), "not upstream\n").unwrap();
+    a.admin(&[
+        "location",
+        "add",
+        "elsewhere",
+        "--dir",
+        s(site.path()),
+        "--remote",
+        UPSTREAM_URL,
+    ]);
+    let a1 = Agent::login(&a, &a.mint("a1", &["--location", "elsewhere"]));
+    a1.ok(&["fork", "elsewhere", "--name", "f1"]);
+    let work = tempfile::tempdir().unwrap();
+    let co = work.path().join("f1");
+    a1.ok(&["checkout", "f1", s(&co)]);
+    std::fs::write(co.join("README"), "edited\n").unwrap();
+    let dir = ["--dir", s(&co)];
+    a1.ok(&[&["snapshot"][..], &dir].concat());
+    // Not before a verify.
+    let (code, v) = a1.run(&[&["land"][..], &dir].concat());
+    assert_ne!(code, 0, "{v}");
+    assert!(v.to_string().contains("verify"), "{v}");
+    a1.ok(&[&["verify"][..], &dir].concat());
+    let (code, v) = a1.run(&[&["land"][..], &dir].concat());
+    assert_eq!(code, 1, "{v}");
+    assert_eq!(v["status"], "failed", "{v}");
+    assert!(
+        v["reason"].as_str().unwrap().contains("not on the remote"),
+        "{v}"
+    );
+    assert!(up.creates().is_empty());
 }

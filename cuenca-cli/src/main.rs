@@ -87,17 +87,26 @@ enum Verb {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Run the location's checks, read from the base tree, on the checkout's head
-    /// (BRO-3254; not built yet, exits 2).
+    /// Run the checks the location's main declares (`.cuenca/checks.toml`, never the
+    /// candidate's) on the fork's head, and record the result; exits 1 if any failed, 3 if
+    /// the authority did not take the record (the results are still printed).
     Verify {
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
-    /// Ask to land the checkout's fork at its head (publishes anything queued first).
+    /// Ask to land the checkout's fork at its head, verified first (publishes anything
+    /// queued first). On a location with a git remote, waits for the pull request.
     Land {
+        /// Seconds to wait for the pull request.
+        #[arg(long, default_value_t = 60)]
+        wait: u64,
         #[arg(long, default_value = ".")]
         dir: PathBuf,
     },
+    /// Serve the agent verbs as MCP tools on standard input and output, as the principal
+    /// whose key the config holds (`claude mcp add cuenca -- cuenca mcp`). No owner verb is
+    /// a tool.
+    Mcp,
     /// Owner acts, on the authority's local admin socket. No agent verb, HTTP route or MCP
     /// tool reaches these.
     Admin(admin::Admin),
@@ -118,6 +127,12 @@ enum Verb {
         /// The tailscale binary.
         #[arg(long, default_value = "tailscale")]
         tailscale: PathBuf,
+        /// The gh binary, logged in, that landing opens pull requests with.
+        #[arg(long, default_value = "gh")]
+        gh: PathBuf,
+        /// The volume to keep every location's main and fork's head in, for Samba to serve.
+        #[arg(long, env = "CUENCA_VOLUME")]
+        volume: Option<PathBuf>,
     },
 }
 
@@ -198,7 +213,22 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
         }
         Verb::Log { fork, dir } => verbs::log(&client()?, &dir, fork.as_deref())?,
         Verb::Verify { dir } => verbs::verify(&client()?, &dir)?,
-        Verb::Land { dir } => verbs::land(&client()?, &dir)?,
+        Verb::Land { dir, wait } => {
+            verbs::land(&client()?, &dir, std::time::Duration::from_secs(wait))?
+        }
+        Verb::Mcp => {
+            // Standard output is the MCP channel: a startup failure goes to stderr even
+            // under --json.
+            let config = match Config::load() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("cuenca mcp: {e:#}");
+                    return Ok(1);
+                }
+            };
+            tokio::runtime::Runtime::new()?.block_on(cuenca_cli::mcp::serve(config))?;
+            return Ok(0);
+        }
         Verb::Admin(a) => admin::run(a)?,
         Verb::Serve {
             state,
@@ -206,6 +236,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             admin_socket,
             unsafe_bind,
             tailscale,
+            gh,
+            volume,
         } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -220,6 +252,8 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     admin_socket,
                     unsafe_bind,
                     tailscale,
+                    gh,
+                    volume,
                 },
             ))?;
             return Ok(0);

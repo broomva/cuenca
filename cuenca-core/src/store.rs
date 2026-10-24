@@ -13,6 +13,7 @@ use redb::{
 use serde::{Deserialize, Serialize};
 
 use crate::blobs::BlobFiles;
+use crate::checks::{CheckRun, MANIFEST_PATH, Manifest, ManifestError, ManifestId};
 use crate::error::{CoreError, Result};
 use crate::event::{ChangesetId, Event, Record};
 use crate::gates::{
@@ -22,7 +23,8 @@ use crate::gates::{
 use crate::names::{ForkName, LocationName, PrincipalName};
 use crate::owner::{Holder, Writer};
 use crate::state::{
-    Applied, Fork, Location, Memory, View, apply, check_landing, check_writer, fenced_target,
+    Applied, Export, Fork, Location, MAX_LANDING_TEXT, Memory, View, apply, check_landing,
+    check_writer, fenced_target,
 };
 
 type Bytes = &'static [u8];
@@ -49,6 +51,72 @@ pub struct BlobInfo {
     /// Derived from the bytes the store verified, never from the sender.
     pub sha256: ContentHash,
     pub size: u64,
+}
+
+/// Blobs being ingested together: one full sync and one log commit for all of them.
+///
+/// Each [`BlobBatch::add`] hashes its bytes as git does (with SHA-1 collision
+/// detection); unless they are exactly `size` bytes hashing to the claim, the add fails
+/// and nothing of it is kept, and a caller that wants all or nothing drops the batch.
+/// The SHA-256 is derived from the same verified bytes. [`BlobBatch::commit`] moves the
+/// blobs into place, makes them durable, then indexes them in one redb transaction, so
+/// after a crash the store holds every blob of the batch or none of them. Dropping a
+/// batch stores nothing.
+///
+/// A blob the store already holds is ingested the same way, every byte read, verified,
+/// written and synced again: an ingest takes as long, and fails the same way, whether
+/// or not the store had the blob, so its outcome and timing do not say which (an
+/// authority that serves ingests to principals must not tell one what another stored).
+/// Blobs are never removed.
+#[must_use = "a batch stores nothing until it is committed"]
+pub struct BlobBatch<'s> {
+    store: &'s Store,
+    staged: Vec<crate::blobs::Staged>,
+}
+
+impl BlobBatch<'_> {
+    /// Verify and stage a blob that claims to be `claimed`, streaming `size` bytes from
+    /// `content`.
+    pub fn add(&mut self, claimed: GitOid, size: u64, content: impl Read) -> Result<BlobInfo> {
+        let staged = self.store.blobs.stage(claimed, size, content)?;
+        let info = BlobInfo {
+            sha256: staged.blob.sha256(),
+            size: staged.blob.size(),
+        };
+        self.staged.push(staged);
+        Ok(info)
+    }
+
+    /// How many blobs are staged.
+    pub fn len(&self) -> usize {
+        self.staged.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.staged.is_empty()
+    }
+
+    /// Store every staged blob: in place and durable first, then indexed in one commit.
+    pub fn commit(self) -> Result<()> {
+        if self.staged.is_empty() {
+            return Ok(());
+        }
+        let rows: Vec<([u8; 20], Vec<u8>)> = self
+            .staged
+            .iter()
+            .map(|s| (*s.blob.oid().as_bytes(), encode_blob(&s.blob)))
+            .collect();
+        self.store.blobs.place(self.staged)?;
+        let txn = self.store.begin()?;
+        {
+            let mut table = txn.open_table(BLOBS)?;
+            for (oid, row) in &rows {
+                table.insert(oid.as_slice(), row.as_slice())?;
+            }
+        }
+        txn.commit()?;
+        Ok(())
+    }
 }
 
 /// The result of a publish.
@@ -140,24 +208,21 @@ impl Store {
     // ---- blobs ------------------------------------------------------------------
 
     /// Ingest a blob that claims to be `claimed`, streaming `size` bytes from
-    /// `content`. The bytes are hashed as git does (with SHA-1 collision detection);
-    /// unless they are exactly `size` bytes hashing to `claimed`, nothing is stored.
-    /// The SHA-256 is derived from the same verified bytes. A blob the store already
-    /// holds is ingested the same way, every byte read, verified, written and synced
-    /// again: an ingest takes as long, and fails the same way, whether or not the store
-    /// had the blob, so its outcome and timing do not say which (an authority that
-    /// serves ingests to principals must not tell one what another stored). Blobs are
-    /// never removed.
+    /// `content`: a [`BlobBatch`] of one.
     pub fn ingest_blob(&self, claimed: GitOid, size: u64, content: impl Read) -> Result<BlobInfo> {
-        let blob = self.blobs.write(claimed, size, content)?;
-        let txn = self.begin()?;
-        txn.open_table(BLOBS)?
-            .insert(claimed.as_bytes().as_slice(), encode_blob(&blob).as_slice())?;
-        txn.commit()?;
-        Ok(BlobInfo {
-            sha256: blob.sha256(),
-            size: blob.size(),
-        })
+        let mut batch = self.blob_batch();
+        let info = batch.add(claimed, size, content)?;
+        batch.commit()?;
+        Ok(info)
+    }
+
+    /// Start ingesting a batch of blobs, which the store holds all of, or none, once
+    /// [`BlobBatch::commit`] returns.
+    pub fn blob_batch(&self) -> BlobBatch<'_> {
+        BlobBatch {
+            store: self,
+            staged: Vec::new(),
+        }
     }
 
     pub fn blob_info(&self, oid: GitOid) -> Result<Option<BlobInfo>> {
@@ -167,6 +232,14 @@ impl Store {
             .get(oid.as_bytes().as_slice())?
             .map(|v| decode_blob(oid, v.value()))
             .transpose()
+    }
+
+    /// The directory the store keeps blob content in, laid out as `<2 hex>/<38 hex>` of
+    /// the git id. Read-only to everyone but the store: a reader checks each file
+    /// against its id (as `cuenca_fs::ObjectDir` does), since nothing here vouches for
+    /// what it finds there.
+    pub fn object_dir(&self) -> &Path {
+        self.blobs.objects()
     }
 
     /// A blob's content, verified against its id on the way out.
@@ -233,7 +306,6 @@ impl Store {
                 forks: txn.open_table(FORKS)?,
                 changesets: txn.open_table(CHANGESETS)?,
                 revoked: txn.open_table(REVOKED)?,
-                log: &log,
             };
             let event = build(&view)?;
             if let Applied::Repeat(at) = apply(&mut view, offset, &event)? {
@@ -402,10 +474,12 @@ impl Store {
         Ok(self.record(event, |_| Ok(()))?.0)
     }
 
-    /// Record the holder's intent to land `id`, which must be the fork's head, with the
-    /// gates' verdict on it ([`crate::gates`], log-only: the intent is recorded whatever
-    /// the verdict). Recording the same intent again while it is the latest is a retry
-    /// and appends nothing; it returns the first request's verdict.
+    /// Record the holder's request to land `id`, which must be the fork's head and
+    /// verified against the location's main as it is now ([`Fork::verified`]; the
+    /// verify's result does not matter: GitHub's required checks, or the owner, decide),
+    /// with the gates' verdict on it ([`crate::gates`], log-only: the intent is recorded
+    /// whatever the verdict). Asking again for the fork's latest request is a retry and
+    /// appends nothing, whatever step it is at; it returns the first request's verdict.
     ///
     /// The gates run outside the write lock, on a snapshot, and the intent is appended
     /// only if main has not moved since that snapshot, so the journaled verdict is
@@ -442,6 +516,7 @@ impl Store {
             // the transition rules check them; a repeat returns the journaled verdict.
             let txn = self.db.begin_read()?;
             let view = ReadTables {
+                locations: txn.open_table(LOCATIONS)?,
                 forks: txn.open_table(FORKS)?,
                 revoked: txn.open_table(REVOKED)?,
             };
@@ -521,6 +596,7 @@ impl Store {
             .map_err(CoreError::Declarations)?;
         let txn = self.db.begin_read()?;
         let view = ReadTables {
+            locations: txn.open_table(LOCATIONS)?,
             forks: txn.open_table(FORKS)?,
             revoked: txn.open_table(REVOKED)?,
         };
@@ -611,10 +687,95 @@ impl Store {
         (Some(info.sha256), bytes)
     }
 
-    /// Move the main of `fork`'s location by `id`, the fork's head, as a
-    /// compare-and-swap: the changeset must start from the main the location has now.
-    /// Advancing by the changeset that last moved main is a retry: it appends nothing
-    /// and returns that move's offset.
+    /// Record a verify of `id`, the fork's head changeset, by its holder: `checks` is
+    /// how each check `base` declares ended, where `base` must be the main the fork's
+    /// location has now. The authority reads the manifest from `base` itself
+    /// ([`MANIFEST_PATH`]) and refuses the record unless `checks` names exactly that
+    /// manifest's checks, in order, so a candidate's own manifest can never be the
+    /// list that was run. Returns the record's offset and the manifest it was judged
+    /// by (`None`: the base declares no checks). Each verify is a new record.
+    pub fn record_verify(
+        &self,
+        fork: &ForkName,
+        writer: &Writer,
+        id: ChangesetId,
+        base: GitOid,
+        checks: Vec<CheckRun>,
+    ) -> Result<(u64, Option<ManifestId>)> {
+        let state = self
+            .fork(fork)?
+            .ok_or_else(|| CoreError::UnknownFork(fork.to_string()))?;
+        let main = self
+            .location(&state.location)?
+            .ok_or_else(|| CoreError::UnknownLocation(state.location.to_string()))?
+            .main;
+        // Checked again by the rules, inside the transaction; this keeps a base that is
+        // not a main away from the tree table.
+        if main != base {
+            return Err(CoreError::BaseMoved {
+                location: state.location.to_string(),
+                main,
+                base,
+            });
+        }
+        let (manifest, declared) = self.manifest(base)?;
+        let reported: Vec<_> = checks.iter().map(|r| &r.check).collect();
+        let expected: Vec<_> = declared.checks.iter().collect();
+        if reported != expected {
+            let names = |v: &[&crate::checks::Check]| -> Vec<String> {
+                v.iter().map(|c| c.name.clone()).collect()
+            };
+            return Err(CoreError::ManifestMismatch(format!(
+                "the base declares {:?}, the record runs {:?} (names, argv and timeouts must match)",
+                names(&expected),
+                names(&reported)
+            )));
+        }
+        let build = |view: &Tables<'_>| {
+            let candidate = view
+                .fork(fork)?
+                .ok_or_else(|| CoreError::UnknownFork(fork.to_string()))?
+                .head;
+            Ok(Event::VerifyRecorded {
+                fork: fork.clone(),
+                writer: writer.clone(),
+                changeset: id,
+                candidate,
+                base,
+                manifest,
+                checks: checks.clone(),
+            })
+        };
+        let (offset, _) = self.record_with(build, |_| Ok(()))?;
+        Ok((offset, manifest))
+    }
+
+    /// The manifest tree `base` declares, with its id; an absent one declares nothing.
+    fn manifest(&self, base: GitOid) -> Result<(Option<ManifestId>, Manifest)> {
+        let tree = self.tree(base)?;
+        let Some(entry) = tree.get(MANIFEST_PATH) else {
+            return Ok((None, Manifest::default()));
+        };
+        let oid = match entry {
+            Entry::File(oid) | Entry::Executable(oid) => *oid,
+            _ => return Err(ManifestError("is not a regular file".to_string()).into()),
+        };
+        let info = self.blob_info(oid)?.ok_or(CoreError::MissingBlob(oid))?;
+        let manifest = Manifest::parse(&self.read_blob(oid)?)?;
+        Ok((
+            Some(ManifestId {
+                oid,
+                sha256: info.sha256,
+            }),
+            manifest,
+        ))
+    }
+
+    /// The owner lands `id` on a location without a git remote: main moves by `id`, the
+    /// fork's head and its holder's live landing request, as a compare-and-swap (the
+    /// changeset must start from the main the location has now). Advancing by the
+    /// changeset that last moved main is a retry: it appends nothing and returns that
+    /// move's offset. The earlier main stays in the log.
     pub fn advance_main(&self, fork: &ForkName, id: ChangesetId) -> Result<u64> {
         let location = self
             .fork(fork)?
@@ -624,6 +785,80 @@ impl Store {
             location,
             fork: fork.clone(),
             changeset: id,
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record the authority's intent to push `export` for the landing of `id` (before
+    /// the push).
+    pub fn record_export_intent(
+        &self,
+        fork: &ForkName,
+        id: ChangesetId,
+        export: &Export,
+    ) -> Result<u64> {
+        let event = Event::ExportIntent {
+            fork: fork.clone(),
+            changeset: id,
+            commit: export.commit,
+            parent: export.parent,
+            branch: export.branch.clone(),
+            base_ref: export.base_ref.clone(),
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record that the export of `id` is on the remote (after the push).
+    pub fn record_exported(&self, fork: &ForkName, id: ChangesetId) -> Result<u64> {
+        let event = Event::Exported {
+            fork: fork.clone(),
+            changeset: id,
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record the authority's intent to open a pull request for `id`.
+    pub fn record_review_intent(&self, fork: &ForkName, id: ChangesetId) -> Result<u64> {
+        let event = Event::ReviewIntent {
+            fork: fork.clone(),
+            changeset: id,
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record that pull request `pr` at `url` is open for `id`.
+    pub fn record_in_review(
+        &self,
+        fork: &ForkName,
+        id: ChangesetId,
+        pr: u64,
+        url: &str,
+    ) -> Result<u64> {
+        let event = Event::InReview {
+            fork: fork.clone(),
+            changeset: id,
+            pr,
+            url: url.to_string(),
+        };
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Record that the landing of `id` cannot go on. A reason over
+    /// [`MAX_LANDING_TEXT`] bytes is cut there.
+    pub fn record_landing_failed(
+        &self,
+        fork: &ForkName,
+        id: ChangesetId,
+        reason: &str,
+    ) -> Result<u64> {
+        let mut end = reason.len().min(MAX_LANDING_TEXT);
+        while !reason.is_char_boundary(end) {
+            end -= 1;
+        }
+        let event = Event::LandingFailed {
+            fork: fork.clone(),
+            changeset: id,
+            reason: reason[..end].to_string(),
         };
         Ok(self.record(event, |_| Ok(()))?.0)
     }
@@ -701,6 +936,22 @@ impl Store {
     pub fn changeset(&self, id: ChangesetId) -> Result<Option<Changeset>> {
         let txn = self.db.begin_read()?;
         indexed_changeset(&txn.open_table(CHANGESETS)?, &txn.open_table(LOG)?, id)
+    }
+
+    /// When `id` was first recorded: the wall-clock time (ms) of the first draft that
+    /// carried it, the same for every fork and holder that publishes it.
+    pub fn changeset_first_at(&self, id: ChangesetId) -> Result<Option<u64>> {
+        let txn = self.db.begin_read()?;
+        let index = txn.open_table(CHANGESETS)?;
+        let Some(offset) = index.get(id.as_bytes().as_slice())?.map(|v| v.value()) else {
+            return Ok(None);
+        };
+        let log = txn.open_table(LOG)?;
+        let value = log.get(offset)?.ok_or(CoreError::CorruptLog {
+            offset,
+            reason: "the changeset index points past the log".into(),
+        })?;
+        Ok(Some(decode_record(offset, value.value())?.at_ms))
     }
 
     /// The number of records in the log.
@@ -838,7 +1089,6 @@ struct Tables<'t> {
     forks: redb::Table<'t, &'static str, Bytes>,
     changesets: redb::Table<'t, Bytes, u64>,
     revoked: redb::Table<'t, &'static str, u64>,
-    log: &'t redb::Table<'t, u64, Bytes>,
 }
 
 impl View for Tables<'_> {
@@ -857,10 +1107,6 @@ impl View for Tables<'_> {
     fn put_revoked(&mut self, principal: &PrincipalName, offset: u64) -> Result<()> {
         self.revoked.insert(principal.as_str(), offset)?;
         Ok(())
-    }
-
-    fn changeset(&self, id: ChangesetId) -> Result<Option<Changeset>> {
-        indexed_changeset(&self.changesets, self.log, id)
     }
 
     fn put_location(&mut self, location: &Location) -> Result<()> {
@@ -885,13 +1131,14 @@ impl View for Tables<'_> {
 
 /// The tables [`check_landing`] reads, read-only, for checks made before a write.
 struct ReadTables {
+    locations: redb::ReadOnlyTable<&'static str, Bytes>,
     forks: redb::ReadOnlyTable<&'static str, Bytes>,
     revoked: redb::ReadOnlyTable<&'static str, u64>,
 }
 
 impl View for ReadTables {
-    fn location(&self, _: &LocationName) -> Result<Option<Location>> {
-        Err(read_only())
+    fn location(&self, name: &LocationName) -> Result<Option<Location>> {
+        get_json(&self.locations, name.as_str())
     }
 
     fn fork(&self, name: &ForkName) -> Result<Option<Fork>> {
@@ -903,10 +1150,6 @@ impl View for ReadTables {
     }
 
     fn put_revoked(&mut self, _: &PrincipalName, _: u64) -> Result<()> {
-        Err(read_only())
-    }
-
-    fn changeset(&self, _: ChangesetId) -> Result<Option<Changeset>> {
         Err(read_only())
     }
 
@@ -924,7 +1167,9 @@ impl View for ReadTables {
 }
 
 fn read_only() -> CoreError {
-    CoreError::Inconsistent("a pre-write check read past the forks and revocations".into())
+    CoreError::Inconsistent(
+        "a pre-write check read past the locations, forks and revocations".into(),
+    )
 }
 
 fn indexed_changeset(
@@ -1207,6 +1452,25 @@ mod tests {
             .unwrap();
         assert_eq!(store.replay_check().unwrap().records, 4);
         (dir, store, cs)
+    }
+
+    /// Verify `id`, the head of `fork`, against main as it is now, with no checks.
+    fn verify_now(store: &Store, fork: &ForkName, id: ChangesetId) {
+        let location = store.fork(fork).unwrap().unwrap().location;
+        let main = store.location(&location).unwrap().unwrap().main;
+        store
+            .record_verify(fork, &w1(), id, main, Vec::new())
+            .unwrap();
+    }
+
+    /// Verify `id`, ask to land it as an agent, and move main by it.
+    fn land_now(store: &Store, fork: &ForkName, id: ChangesetId) -> u64 {
+        use crate::gates::{AuthorKind, LandingRequest};
+        verify_now(store, fork, id);
+        store
+            .record_landing_intent(fork, &w1(), id, &LandingRequest::new(AuthorKind::Agent))
+            .unwrap();
+        store.advance_main(fork, id).unwrap()
     }
 
     /// Write `record` into the log behind the rules' back.
@@ -1561,7 +1825,32 @@ mod tests {
                 holder: agent(),
             },
         );
-        assert!(corrupt(&store).contains("kept for sibling forks"));
+        assert!(corrupt(&store).contains("names sibling forks"));
+    }
+
+    /// A verify record names the head it judged and the main it read the checks from;
+    /// one that names any other tree does not replay.
+    #[test]
+    fn replay_refuses_a_verify_of_another_tree() {
+        let (_d, store, cs) = setup();
+        let (l, f) = ids();
+        let main = store.location(&l).unwrap().unwrap().main;
+        let verify = |candidate, base| Event::VerifyRecorded {
+            fork: f.clone(),
+            writer: w1(),
+            changeset: ChangesetId::of(&cs),
+            candidate,
+            base,
+            manifest: None,
+            checks: vec![],
+        };
+        inject_event(&store, 4, verify(main, main));
+        assert!(corrupt(&store).contains("names candidate"));
+        inject_event(&store, 4, verify(cs.target, cs.target));
+        assert!(corrupt(&store).contains("the base the checks were read from"));
+        // A valid verify is refused too, since the forks table does not show it.
+        inject_event(&store, 4, verify(cs.target, main));
+        assert!(inconsistent(&store).contains("forks differ"));
     }
 
     #[test]
@@ -1693,6 +1982,7 @@ mod tests {
         )
         .unwrap();
         let other_id = store.publish_draft(&g, &w1(), &other).unwrap().id;
+        verify_now(&store, &g, other_id);
         let request = LandingRequest::new(AuthorKind::Agent);
         let mut calls = 0;
         let landed = store
@@ -1700,7 +1990,9 @@ mod tests {
                 calls += 1;
                 let eval = s.evaluate_at(&g, other_id, &request, 0)?;
                 if calls == 1 {
-                    s.advance_main(&f, ChangesetId::of(&cs)).unwrap();
+                    // Main moves, and the agent verifies against the new main.
+                    land_now(s, &f, ChangesetId::of(&cs));
+                    verify_now(s, &g, other_id);
                 }
                 Ok(eval)
             })
@@ -1722,6 +2014,7 @@ mod tests {
         )
         .unwrap();
         let third_id = store.publish_draft(&g, &w1(), &third).unwrap().id;
+        verify_now(&store, &g, third_id);
         let len = store.len().unwrap();
         let mut stale = store.evaluate_at(&g, third_id, &request, 0).unwrap();
         stale.log_len = 0;
@@ -1760,7 +2053,7 @@ mod tests {
         )
         .unwrap();
         let other_id = store.publish_draft(&o, &w1(), &other).unwrap().id;
-        store.advance_main(&o, other_id).unwrap();
+        land_now(&store, &o, other_id);
         let main = store.main_tree(&l).unwrap();
         let h = ForkName::new("h").unwrap();
         store.create_fork(&h, &l, &agent()).unwrap();
@@ -1780,7 +2073,7 @@ mod tests {
         )
         .unwrap();
         let first_id = store.publish_draft(&f, &w1(), &first).unwrap().id;
-        store.advance_main(&f, first_id).unwrap();
+        land_now(&store, &f, first_id);
         let moved_at = store.records(store.len().unwrap() - 1, 1).unwrap()[0].at_ms;
 
         let g = ForkName::new("g").unwrap();
@@ -1872,7 +2165,7 @@ mod tests {
     fn history_tags_match_the_records_they_select() {
         let (_dir, store, cs) = setup();
         let (_, f) = ids();
-        store.advance_main(&f, ChangesetId::of(&cs)).unwrap();
+        land_now(&store, &f, ChangesetId::of(&cs));
         let records = store.records(0, 100).unwrap();
         for record in records {
             let bytes = to_json(&record);

@@ -1,10 +1,10 @@
 //! Owner acts, on a local Unix socket (spec section 0, "Owner acts are local").
 //!
-//! Minting and revoking keys, registering a location and taking a fork over have no
-//! HTTP route. They run here, on a socket the authority creates with mode 0600 and that
-//! answers only connections whose peer runs as the authority's own OS user (checked
-//! with the kernel's peer credentials on every connection). The owner reaches it over
-//! SSH as that user. In the first build that is not a boundary against agents on the
+//! Minting and revoking keys, registering a location, taking a fork over and landing
+//! on a location without a git remote have no HTTP route. They run here, on a socket
+//! the authority creates with mode 0600 and that answers only connections whose peer
+//! runs as the authority's own OS user (checked with the kernel's peer credentials on
+//! every connection). The owner reaches it over SSH as that user. In the first build that is not a boundary against agents on the
 //! same host (spec Drawbacks, BRO-3289); it keeps owner acts off the agent surface.
 //!
 //! The protocol: one JSON request per connection, one line; one JSON answer, one line,
@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 
 use std::sync::Arc;
 
-use cuenca_core::{ForkName, Holder, LocationName, NodeId, PrincipalName};
+use cuenca_core::{ChangesetId, ForkName, Holder, LocationName, NodeId, PrincipalName};
 use cuenca_tree::Tree;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -59,6 +59,21 @@ pub enum AdminRequest {
         git: Option<GitSource>,
         #[serde(default)]
         dir: Option<PathBuf>,
+    },
+    /// Land the fork's landing request on a location without a git remote: main moves
+    /// by its changeset. `changeset`, if given, must be the request's (the one the owner
+    /// read the diff and verify of).
+    Land {
+        fork: ForkName,
+        #[serde(default)]
+        changeset: Option<ChangesetId>,
+    },
+    /// Create the owner fork `fork` (named `owner-*`) of `location`, held by the volume:
+    /// the materialiser shows it writable at `forks/<fork>/` and snapshots what Finder
+    /// writes there into its drafts (spec section 2a). One per device, by convention.
+    OwnerFork {
+        location: LocationName,
+        fork: ForkName,
     },
     /// Move a fork to `holder` by compare-and-swap on its epoch.
     TakeOver {
@@ -187,6 +202,7 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             node,
             grant,
         } => {
+            volume_is_nobody(&principal)?;
             if a.is_banned(&principal) || a.store.revoked(&principal).map_err(|e| s(&e))?.is_some()
             {
                 return Err(format!(
@@ -199,7 +215,10 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
                 .map_err(|e| s(&e))?;
             Ok(json!({ "key": record, "token": token }))
         }
-        AdminRequest::KeyRevoke { principal } => revoke(a, &principal, |p| a.store.revoke(p)),
+        AdminRequest::KeyRevoke { principal } => {
+            volume_is_nobody(&principal)?;
+            revoke(a, &principal, |p| a.store.revoke(p))
+        }
         AdminRequest::KeyList => Ok(json!({ "keys": a.keys.list() })),
         AdminRequest::LocationAdd {
             name,
@@ -228,6 +247,40 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
                 .map_err(|e| s(&e))?;
             Ok(json!({ "offset": offset, "main": tree.git_tree_id().to_hex() }))
         }
+        AdminRequest::Land { fork, changeset } => {
+            let state = a
+                .store
+                .fork(&fork)
+                .map_err(|e| s(&e))?
+                .ok_or_else(|| format!("no fork {fork:?}"))?;
+            let requested = state
+                .landing
+                .as_ref()
+                .map(|l| l.changeset)
+                .ok_or_else(|| format!("fork {fork:?} has no landing request"))?;
+            if let Some(expected) = changeset
+                && expected != requested
+            {
+                return Err(format!(
+                    "fork {fork:?} asks to land {requested}, not {expected}"
+                ));
+            }
+            let offset = a.store.advance_main(&fork, requested).map_err(|e| s(&e))?;
+            let main = a
+                .store
+                .location(&state.location)
+                .map_err(|e| s(&e))?
+                .map(|l| l.main.to_hex());
+            Ok(json!({ "offset": offset, "changeset": requested, "main": main }))
+        }
+        AdminRequest::OwnerFork { location, fork } => {
+            ignored_in_main(a, &location)?;
+            let offset = a
+                .store
+                .create_fork(&fork, &location, &Holder::volume())
+                .map_err(|e| s(&e))?;
+            Ok(json!({ "offset": offset, "fork": fork }))
+        }
         AdminRequest::TakeOver {
             fork,
             expected_epoch,
@@ -242,6 +295,48 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             Ok(json!({ "epoch": epoch }))
         }
     }
+}
+
+/// Refuse an owner fork of a location whose main tracks paths its own rules name
+/// (its `.forkignore`, or the defaults): the first show would write them into the
+/// fork, and every snapshot of it would then fail, since a snapshot never holds such a
+/// path and leaving it out would delete it. Remove them from main first.
+fn ignored_in_main(a: &Authority, location: &LocationName) -> Result<(), String> {
+    let s = |e: &dyn std::fmt::Display| e.to_string();
+    let main = a.store.main_tree(location).map_err(|e| s(&e))?;
+    let rules = match main.get(cuenca_fs::FORKIGNORE) {
+        Some(entry) => {
+            let text = a.store.read_blob(entry.oid()).map_err(|e| s(&e))?;
+            cuenca_fs::ForkIgnore::parse(&String::from_utf8_lossy(&text)).map_err(|e| s(&e))?
+        }
+        None => cuenca_fs::ForkIgnore::defaults(),
+    };
+    let named: Vec<&str> = main
+        .entries()
+        .map(|(p, _)| p.as_str())
+        .filter(|p| rules.excludes(p))
+        .collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "main of {location:?} tracks {} path(s) its .forkignore names (first: {:?}); an \
+         owner fork of it could never be snapshotted. Remove them from main first",
+        named.len(),
+        &named[..named.len().min(10)]
+    ))
+}
+
+/// The volume's principal has no key and is never revoked: minting one would let a
+/// request write owner forks as the volume, and revoking it would stop every owner
+/// fork's snapshots for good.
+fn volume_is_nobody(principal: &PrincipalName) -> Result<(), String> {
+    if principal.as_str() == cuenca_core::VOLUME_PRINCIPAL {
+        return Err(format!(
+            "principal {principal:?} is the volume's, which holds owner forks; it has no key"
+        ));
+    }
+    Ok(())
 }
 
 /// Snapshot `dir` against an empty tree and ingest every blob it names. The store
@@ -327,5 +422,77 @@ mod tests {
         );
         assert!(a.is_banned(&p));
         assert!(a.store.revoked(&p).unwrap().is_none());
+    }
+
+    fn location(a: &Authority, name: &str, files: &[(&str, &[u8])]) -> LocationName {
+        use cuenca_tree::{Entry, GitOid, RepoPath};
+        let tree = Tree::from_entries(files.iter().map(|(p, c)| {
+            let oid = GitOid::for_blob(c);
+            a.store.ingest_blob(oid, c.len() as u64, *c).unwrap();
+            (RepoPath::new(*p).unwrap(), Entry::File(oid))
+        }))
+        .unwrap();
+        let name = LocationName::new(name).unwrap();
+        a.store.add_location(&name, None, &tree).unwrap();
+        name
+    }
+
+    /// An owner fork of a main that tracks paths its rules name is refused up front,
+    /// naming them, and nothing is appended: its snapshots could never succeed.
+    #[test]
+    fn an_owner_fork_of_a_main_tracking_ignored_paths_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Authority::open(dir.path(), Arc::new(Nobody)).unwrap();
+        let req = |l: &LocationName| AdminRequest::OwnerFork {
+            location: l.clone(),
+            fork: ForkName::new("owner-mac").unwrap(),
+        };
+        // The defaults name .env and anything under node_modules/.
+        let env = location(&a, "env", &[("README", b"r"), (".env", b"SECRET=1")]);
+        let deps = location(&a, "deps", &[("node_modules/x/i.js", b"x")]);
+        // A location's own .forkignore replaces the defaults.
+        let own = location(
+            &a,
+            "own",
+            &[
+                (".forkignore", b"*.log\n"),
+                ("a.log", b"l"),
+                (".env", b"ok"),
+            ],
+        );
+        let len = a.store.len().unwrap();
+        for (l, path) in [
+            (&env, ".env"),
+            (&deps, "node_modules/x/i.js"),
+            (&own, "a.log"),
+        ] {
+            let err = handle(&a, req(l)).unwrap_err();
+            assert!(err.contains(path), "{err}");
+        }
+        assert_eq!(a.store.len().unwrap(), len);
+        let clean = location(
+            &a,
+            "clean",
+            &[("README", b"r"), (".forkignore", b"*.log\n")],
+        );
+        handle(&a, req(&clean)).unwrap();
+    }
+
+    /// A key on file for the volume's principal stops the authority from starting.
+    #[test]
+    fn a_volume_key_on_file_is_refused_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Authority::open(dir.path(), Arc::new(Nobody)).unwrap();
+        a.keys
+            .mint(
+                PrincipalName::new("volume").unwrap(),
+                PrincipalKind::Agent,
+                NodeId::new("nVolCNTRL").unwrap(),
+                Grant::default(),
+            )
+            .unwrap();
+        drop(a);
+        let err = Authority::open(dir.path(), Arc::new(Nobody)).err().unwrap();
+        assert!(err.to_string().contains("volume"), "{err}");
     }
 }

@@ -13,10 +13,11 @@ use std::collections::{BTreeMap, HashMap};
 use cuenca_tree::{Changeset, GitOid};
 use serde::{Deserialize, Serialize};
 
+use crate::checks::{CheckRun, CheckStatus};
 use crate::error::{CoreError, Result};
 use crate::event::{ChangesetId, Event};
 use crate::names::{ForkName, LocationName, PrincipalName};
-use crate::owner::{Holder, Writer, sibling_name};
+use crate::owner::{Holder, OWNER_FORK_PREFIX, Writer, is_owner_fork, sibling_name};
 
 /// A location as the log has it now. Fields added later are `#[serde(default)]`, so
 /// rows written by this version still decode.
@@ -67,8 +68,124 @@ pub struct Fork {
     pub head: GitOid,
     /// The latest draft's changeset and the offset of its record.
     pub head_changeset: Option<(ChangesetId, u64)>,
-    /// The latest landing intent's changeset and the offset of its record.
-    pub landing_intent: Option<(ChangesetId, u64)>,
+    /// The latest verify of the fork: which changeset, against which main.
+    pub verified: Option<Verified>,
+    /// The holder's latest landing request and where it is.
+    pub landing: Option<Landing>,
+}
+
+/// A fork's latest verify record ([`Event::VerifyRecorded`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Verified {
+    pub changeset: ChangesetId,
+    /// The location's main the checks were read from.
+    pub base: GitOid,
+    /// The offset of the record.
+    pub offset: u64,
+}
+
+/// A landing request ([`Event::LandingIntent`]) and where it is.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Landing {
+    pub changeset: ChangesetId,
+    /// The offset of the request's record.
+    pub offset: u64,
+    /// The location's main the request's verify was judged against: what the head is
+    /// landed onto.
+    pub main: GitOid,
+    /// The offset of the record that moved it to `step`.
+    pub moved: u64,
+    pub step: LandingStep,
+}
+
+impl Export {
+    /// The export of `id`: `commit` onto `parent`, pushed to [`export_branch`].
+    pub fn new(id: ChangesetId, commit: GitOid, parent: GitOid, base_ref: &str) -> Self {
+        Self {
+            commit,
+            parent,
+            branch: export_branch(id),
+            base_ref: base_ref.to_string(),
+        }
+    }
+}
+
+/// The branch a landing of `id` is pushed to (spec section 6: `cp/<changeset-id>`).
+pub fn export_branch(id: ChangesetId) -> String {
+    format!("cp/{id}")
+}
+
+/// Longest reason a failed landing records, and longest pull request URL.
+pub const MAX_LANDING_TEXT: usize = 4096;
+
+/// Where a landing request is (spec section 6's state machine, up to "in review" for
+/// a location with a git remote; GitHub's gates merge from there). Each move is one
+/// record, and every call to the remote has an intent recorded before it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "step", rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum LandingStep {
+    /// Asked for. On a location with a remote the authority exports it next; on one
+    /// without, it waits for the owner's `cuenca admin land`.
+    Requested,
+    /// The commit is built and about to be pushed ([`Event::ExportIntent`]).
+    Exporting { export: Export },
+    /// The remote's branch is at the commit.
+    Exported { export: Export },
+    /// A pull request is about to be opened.
+    Reviewing { export: Export },
+    /// A pull request is open.
+    InReview {
+        export: Export,
+        pr: u64,
+        url: String,
+    },
+    /// The owner landed it: main moved, by the record at `offset`.
+    Landed { offset: u64 },
+    /// It cannot go on.
+    Failed { reason: String },
+}
+
+impl LandingStep {
+    /// The step's name, as serialized.
+    pub fn name(&self) -> &'static str {
+        match self {
+            Self::Requested => "requested",
+            Self::Exporting { .. } => "exporting",
+            Self::Exported { .. } => "exported",
+            Self::Reviewing { .. } => "reviewing",
+            Self::InReview { .. } => "in_review",
+            Self::Landed { .. } => "landed",
+            Self::Failed { .. } => "failed",
+        }
+    }
+
+    /// The export, from the export intent on.
+    pub fn export(&self) -> Option<&Export> {
+        match self {
+            Self::Exporting { export }
+            | Self::Exported { export }
+            | Self::Reviewing { export }
+            | Self::InReview { export, .. } => Some(export),
+            _ => None,
+        }
+    }
+}
+
+/// What a landing exports to the location's remote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct Export {
+    /// The commit: the changeset's target tree, with `parent` as its one parent.
+    pub commit: GitOid,
+    /// A commit of the remote's `base_ref` whose tree is the changeset's base.
+    pub parent: GitOid,
+    /// The branch it is pushed to, `cp/<changeset id>`.
+    pub branch: String,
+    /// The branch the pull request asks to merge into.
+    pub base_ref: String,
 }
 
 impl Fork {
@@ -113,8 +230,6 @@ pub(crate) trait View {
     /// The offset of the record that revoked `principal`, if one did.
     fn revoked(&self, principal: &PrincipalName) -> Result<Option<u64>>;
     fn put_revoked(&mut self, principal: &PrincipalName, offset: u64) -> Result<()>;
-    /// A changeset some draft recorded.
-    fn changeset(&self, id: ChangesetId) -> Result<Option<Changeset>>;
     fn put_location(&mut self, location: &Location) -> Result<()>;
     fn put_fork(&mut self, fork: &Fork) -> Result<()>;
     /// Index a draft's changeset under its id, unless an earlier draft already did.
@@ -164,12 +279,22 @@ pub(crate) fn check_landing(
             changeset: id.to_hex(),
         });
     }
-    if let Some((last, at)) = state.landing_intent
-        && last == id
+    if let Some(l) = &state.landing
+        && l.changeset == id
     {
-        return Ok(Some(at));
+        return Ok(Some(l.offset));
     }
-    Ok(None)
+    // A new request needs a verify of this head against the location's main as it
+    // is now (its result does not matter: GitHub's required checks, or the owner,
+    // decide).
+    let loc = location(view, &state.location)?;
+    match &state.verified {
+        Some(v) if v.changeset == id && v.base == loc.main => Ok(None),
+        _ => Err(CoreError::NotVerified {
+            fork: name.to_string(),
+            changeset: id.to_hex(),
+        }),
+    }
 }
 
 /// Whether `writer` may write `state` now. A writer whose principal is revoked is
@@ -226,6 +351,19 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             if name.as_str().contains("-from") {
                 return Err(CoreError::ReservedName(name.to_string()));
             }
+            // A sibling of a fork named `owner` would be named `owner-from-…`: an owner
+            // fork's name, held by its stale holder. So `owner` itself is kept.
+            if name.as_str() == OWNER_FORK_PREFIX.trim_end_matches('-') {
+                return Err(CoreError::ReservedName(name.to_string()));
+            }
+            if is_owner_fork(name) != holder.is_volume()
+                || (holder.is_volume() && *holder != Holder::volume())
+            {
+                return Err(CoreError::OwnerFork(format!(
+                    "fork {name:?}: a fork named {OWNER_FORK_PREFIX}* is an owner fork, held by \
+                     the volume, and the volume holds nothing else (holder {holder})"
+                )));
+            }
             if view.fork(name)?.is_some() {
                 return Err(CoreError::ForkExists(name.to_string()));
             }
@@ -246,7 +384,8 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
                 base: *base,
                 head: *base,
                 head_changeset: None,
-                landing_intent: None,
+                verified: None,
+                landing: None,
             })?;
         }
         Event::DraftPublished {
@@ -295,6 +434,14 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
         } => {
             not_revoked(view, &holder.principal)?;
             let mut state = fork(view, name)?;
+            // Owner forks never move (spec section 2a): there is no fence for Finder to
+            // cross. And the volume takes nothing over.
+            if is_owner_fork(name) || holder.is_volume() {
+                return Err(CoreError::OwnerFork(format!(
+                    "fork {name:?} cannot move to {holder}: owner forks never move, and the \
+                     volume holds only owner forks"
+                )));
+            }
             if state.epoch() != *expected_epoch {
                 return Err(CoreError::EpochMismatch {
                     fork: name.to_string(),
@@ -304,8 +451,8 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             }
             state.released.push(state.head);
             state.holders.push(holder.clone());
-            // A landing intent is the old holder's request; it does not pass to the new one.
-            state.landing_intent = None;
+            // A landing request is the old holder's; it does not pass to the new one.
+            state.landing = None;
             view.put_fork(&state)?;
         }
         Event::PrincipalRevoked { principal } => {
@@ -319,7 +466,7 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             fork: from,
             changeset: id,
         } => {
-            let state = fork(view, from)?;
+            let mut state = fork(view, from)?;
             if state.location != *at {
                 return Err(CoreError::WrongLocation {
                     fork: from.to_string(),
@@ -333,29 +480,48 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             {
                 return Ok(Applied::Repeat(last.offset));
             }
+            // A location with a remote lands through GitHub, never around it.
+            if loc.remote.is_some() {
+                return Err(CoreError::HasRemote(at.to_string()));
+            }
+            let mut landing = landing_of(&state, id)?;
+            if landing.step != LandingStep::Requested {
+                return Err(step_error(&state, &landing, "requested"));
+            }
             if state.head_changeset.map(|(head, _)| head) != Some(*id) {
                 return Err(CoreError::NotHead {
                     fork: from.to_string(),
                     changeset: id.to_hex(),
                 });
             }
-            let changeset = view
-                .changeset(*id)?
-                .ok_or_else(|| CoreError::UnknownChangeset(id.to_hex()))?;
-            if changeset.base != loc.main {
+            // The request is live (a takeover drops it); its holder must not be revoked.
+            if let Some(holder) = state.holder() {
+                not_revoked(view, &holder.principal)?;
+            }
+            // Drafts chain, so the head is the fork's whole work since its base. It lands
+            // only onto a main that is still that base, or that this fork moved last (to
+            // an earlier draft of the same chain): anything else would drop what landed
+            // in between.
+            let ours =
+                loc.main == state.base || loc.main_moved.as_ref().is_some_and(|m| m.fork == *from);
+            if !ours {
                 return Err(CoreError::NotAtBase {
                     what: format!("main of {at:?}"),
                     head: loc.main,
-                    base: changeset.base,
+                    base: state.base,
                 });
             }
-            loc.main = changeset.target;
+            loc.main = state.head;
             loc.main_moved = Some(MainMove {
                 changeset: *id,
                 fork: from.clone(),
                 offset,
             });
             view.put_location(&loc)?;
+            landing.moved = offset;
+            landing.step = LandingStep::Landed { offset };
+            state.landing = Some(landing);
+            view.put_fork(&state)?;
         }
         Event::LandingIntent {
             fork: name,
@@ -367,11 +533,239 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
                 return Ok(Applied::Repeat(at));
             }
             let mut state = fork(view, name)?;
-            state.landing_intent = Some((*id, offset));
+            let loc = location(view, &state.location)?;
+            state.landing = Some(Landing {
+                changeset: *id,
+                offset,
+                main: loc.main,
+                moved: offset,
+                step: LandingStep::Requested,
+            });
+            view.put_fork(&state)?;
+        }
+        Event::ExportIntent {
+            fork: name,
+            changeset: id,
+            commit,
+            parent,
+            branch,
+            base_ref,
+        } => {
+            let export = Export {
+                commit: *commit,
+                parent: *parent,
+                branch: branch.clone(),
+                base_ref: base_ref.clone(),
+            };
+            if *branch != export_branch(*id) || base_ref.is_empty() || base_ref.len() > 255 {
+                return Err(CoreError::Inconsistent(format!(
+                    "export of {id} names branch {branch:?} onto {base_ref:?}"
+                )));
+            }
+            let (state, landing) = remote_landing(view, name, id)?;
+            match &landing.step {
+                LandingStep::Exporting { export: e } if *e == export => {
+                    return Ok(Applied::Repeat(landing.moved));
+                }
+                LandingStep::Requested => {}
+                _ => return Err(step_error(&state, &landing, "requested")),
+            }
+            holder_not_revoked(view, &state)?;
+            set_step(
+                view,
+                state,
+                landing,
+                offset,
+                LandingStep::Exporting { export },
+            )?;
+        }
+        Event::Exported {
+            fork: name,
+            changeset: id,
+        } => {
+            let (state, landing) = remote_landing(view, name, id)?;
+            let export = match &landing.step {
+                LandingStep::Exported { .. } => return Ok(Applied::Repeat(landing.moved)),
+                LandingStep::Exporting { export } => export.clone(),
+                _ => return Err(step_error(&state, &landing, "exporting")),
+            };
+            set_step(
+                view,
+                state,
+                landing,
+                offset,
+                LandingStep::Exported { export },
+            )?;
+        }
+        Event::ReviewIntent {
+            fork: name,
+            changeset: id,
+        } => {
+            let (state, landing) = remote_landing(view, name, id)?;
+            let export = match &landing.step {
+                LandingStep::Reviewing { .. } => return Ok(Applied::Repeat(landing.moved)),
+                LandingStep::Exported { export } => export.clone(),
+                _ => return Err(step_error(&state, &landing, "exported")),
+            };
+            holder_not_revoked(view, &state)?;
+            set_step(
+                view,
+                state,
+                landing,
+                offset,
+                LandingStep::Reviewing { export },
+            )?;
+        }
+        Event::InReview {
+            fork: name,
+            changeset: id,
+            pr,
+            url,
+        } => {
+            if *pr == 0 || url.is_empty() || url.len() > MAX_LANDING_TEXT {
+                return Err(CoreError::Inconsistent(format!(
+                    "pull request {pr} at {url:?} for {id}"
+                )));
+            }
+            let (state, landing) = remote_landing(view, name, id)?;
+            let export = match &landing.step {
+                LandingStep::InReview { pr: p, url: u, .. } if p == pr && u == url => {
+                    return Ok(Applied::Repeat(landing.moved));
+                }
+                LandingStep::Reviewing { export } => export.clone(),
+                _ => return Err(step_error(&state, &landing, "reviewing")),
+            };
+            let step = LandingStep::InReview {
+                export,
+                pr: *pr,
+                url: url.clone(),
+            };
+            set_step(view, state, landing, offset, step)?;
+        }
+        Event::LandingFailed {
+            fork: name,
+            changeset: id,
+            reason,
+        } => {
+            if reason.len() > MAX_LANDING_TEXT {
+                return Err(CoreError::Inconsistent(format!(
+                    "the reason {id} failed is over {MAX_LANDING_TEXT} bytes"
+                )));
+            }
+            let state = fork(view, name)?;
+            let landing = landing_of(&state, id)?;
+            match &landing.step {
+                LandingStep::Failed { reason: r } if r == reason => {
+                    return Ok(Applied::Repeat(landing.moved));
+                }
+                LandingStep::Requested
+                | LandingStep::Exporting { .. }
+                | LandingStep::Exported { .. }
+                | LandingStep::Reviewing { .. } => {}
+                _ => return Err(step_error(&state, &landing, "in flight")),
+            }
+            let step = LandingStep::Failed {
+                reason: reason.clone(),
+            };
+            set_step(view, state, landing, offset, step)?;
+        }
+        Event::VerifyRecorded {
+            fork: name,
+            writer,
+            changeset: id,
+            candidate,
+            base,
+            manifest: _,
+            checks,
+        } => {
+            let mut state = fork(view, name)?;
+            check_writer(view, &state, writer)?;
+            if state.head_changeset.map(|(head, _)| head) != Some(*id) {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {
+                return Err(CoreError::Inconsistent(format!(
+                    "verify of {id} names candidate {candidate}, but the fork's head is {}",
+                    state.head
+                )));
+            }
+            let loc = location(view, &state.location)?;
+            if loc.main != *base {
+                return Err(CoreError::BaseMoved {
+                    location: loc.name.to_string(),
+                    main: loc.main,
+                    base: *base,
+                });
+            }
+            checks.iter().try_for_each(check_run)?;
+            state.verified = Some(Verified {
+                changeset: *id,
+                base: *base,
+                offset,
+            });
             view.put_fork(&state)?;
         }
     }
     Ok(Applied::Fresh)
+}
+
+/// The fork's landing request for `id`.
+fn landing_of(state: &Fork, id: &ChangesetId) -> Result<Landing> {
+    match &state.landing {
+        Some(l) if l.changeset == *id => Ok(l.clone()),
+        _ => Err(CoreError::NoLanding {
+            fork: state.name.to_string(),
+            changeset: id.to_hex(),
+        }),
+    }
+}
+
+/// The fork and its landing request for `id`, on a location with a git remote: the
+/// authority's export steps.
+fn remote_landing(view: &impl View, name: &ForkName, id: &ChangesetId) -> Result<(Fork, Landing)> {
+    let state = fork(view, name)?;
+    if location(view, &state.location)?.remote.is_none() {
+        return Err(CoreError::NoRemote(state.location.to_string()));
+    }
+    let landing = landing_of(&state, id)?;
+    Ok((state, landing))
+}
+
+/// The fork's holder, who asked for the landing, is not revoked: checked before each
+/// call to the remote.
+fn holder_not_revoked(view: &impl View, state: &Fork) -> Result<()> {
+    match state.holder() {
+        Some(holder) => not_revoked(view, &holder.principal),
+        None => Err(CoreError::Inconsistent(format!(
+            "fork {:?} has no holder",
+            state.name
+        ))),
+    }
+}
+
+fn step_error(state: &Fork, landing: &Landing, want: &str) -> CoreError {
+    CoreError::LandingStep {
+        fork: state.name.to_string(),
+        changeset: landing.changeset.to_hex(),
+        step: landing.step.name().to_string(),
+        want: want.to_string(),
+    }
+}
+
+fn set_step(
+    view: &mut impl View,
+    mut state: Fork,
+    mut landing: Landing,
+    offset: u64,
+    step: LandingStep,
+) -> Result<()> {
+    landing.moved = offset;
+    landing.step = step;
+    state.landing = Some(landing);
+    view.put_fork(&state)
 }
 
 /// The fork a draft fenced from `parent` (written by `writer` under one of `parent`'s
@@ -415,7 +809,8 @@ pub(crate) fn fenced_target(
                 base,
                 head: base,
                 head_changeset: None,
-                landing_intent: None,
+                verified: None,
+                landing: None,
             });
         };
         // Only this rule creates a fork under a sibling's name (fork creation refuses
@@ -431,6 +826,27 @@ pub(crate) fn fenced_target(
             return Ok(sibling);
         }
         (at, epoch) = (sibling, 1);
+    }
+}
+
+/// A run's status and exit code agree: `passed` exited 0, `failed` exited otherwise or
+/// by a signal, and a check that timed out or never started has no exit code.
+fn check_run(run: &CheckRun) -> Result<()> {
+    let ok = match run.status {
+        CheckStatus::Passed => run.exit_code == Some(0),
+        CheckStatus::Failed => run.exit_code != Some(0),
+        CheckStatus::TimedOut | CheckStatus::NotRun => run.exit_code.is_none(),
+    };
+    if ok {
+        Ok(())
+    } else {
+        Err(CoreError::BadCheckRun {
+            name: run.check.name.clone(),
+            reason: format!(
+                "status {:?} does not go with exit code {:?}",
+                run.status, run.exit_code
+            ),
+        })
     }
 }
 
@@ -496,10 +912,6 @@ impl View for Memory {
     fn put_revoked(&mut self, principal: &PrincipalName, offset: u64) -> Result<()> {
         self.revoked.insert(principal.clone(), offset);
         Ok(())
-    }
-
-    fn changeset(&self, id: ChangesetId) -> Result<Option<Changeset>> {
-        Ok(self.changesets.get(&id).map(|(_, c)| c.clone()))
     }
 
     fn put_location(&mut self, location: &Location) -> Result<()> {

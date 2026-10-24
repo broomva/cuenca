@@ -45,8 +45,14 @@ fn child_writer() {
     loop {
         // Land the head, every time: after a restart these are retries of what the
         // killed child may already have recorded, and must append nothing.
-        if let Some((head, _)) = store.fork(&fork("f")).unwrap().unwrap().head_changeset {
-            land(&store, &fork("f"), &w1(), head).unwrap();
+        let state = store.fork(&fork("f")).unwrap().unwrap();
+        if let Some((head, _)) = state.head_changeset {
+            // A verify after a restart is a new record, not a retry: only before the
+            // request does it go in.
+            if state.landing.map(|l| l.changeset) != Some(head) {
+                verify(&store, &fork("f"), &w1(), head);
+            }
+            ask_landing(&store, &fork("f"), &w1(), head).unwrap();
             store.advance_main(&fork("f"), head).unwrap();
         }
         let head = store.fork_head(&fork("f")).unwrap();

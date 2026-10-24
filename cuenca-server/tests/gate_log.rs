@@ -8,6 +8,7 @@ mod common;
 use std::collections::BTreeSet;
 
 use common::*;
+use cuenca_core::checks::{CheckRun, CheckStatus, MANIFEST_PATH, Manifest};
 use cuenca_core::gates::{AuthorKind, Evaluation};
 use cuenca_core::{ChangesetId, Event, ForkName, LocationName};
 use cuenca_server::PrincipalKind::{Agent, OwnerDevice};
@@ -46,7 +47,7 @@ cuenca:
 "#;
 
 /// The base's check manifest.
-const CHECKS: &str = "[checks.test]\nargv = [\"make\", \"test\"]\n";
+const CHECKS: &str = "[[check]]\nname = \"test\"\nargv = [\"make\", \"test\"]\n";
 
 /// Secrets the candidates add, one per built-in pattern family. Written here in pieces
 /// so this file does not itself trip a scanner.
@@ -184,6 +185,7 @@ impl Bed {
         declarations: &Value,
         dry: bool,
     ) -> Value {
+        self.verify(token, fork, id);
         self.who(token);
         let path = if dry {
             format!("/v1/forks/{fork}/landing/dry-run")
@@ -204,6 +206,43 @@ impl Bed {
             );
         }
         serde_json::from_str(&text).unwrap()
+    }
+
+    /// Record a verify of `id` against main as it is now, as a landing request needs,
+    /// unless `id` is not the fork's head or already has one against this main: every
+    /// check the base declares, reported passed.
+    fn verify(&self, token: &str, fork: &str, id: ChangesetId) {
+        let store = self.s.authority.store();
+        let state = store.fork(&ForkName::new(fork).unwrap()).unwrap().unwrap();
+        let main = store.location(&state.location).unwrap().unwrap().main;
+        if state.head_changeset.map(|(head, _)| head) != Some(id)
+            || state
+                .verified
+                .is_some_and(|v| v.changeset == id && v.base == main)
+        {
+            return;
+        }
+        let manifest = match store.tree(main).unwrap().get(MANIFEST_PATH) {
+            Some(entry) => Manifest::parse(&store.read_blob(entry.oid()).unwrap()).unwrap(),
+            None => Manifest::default(),
+        };
+        let checks: Vec<CheckRun> = manifest
+            .checks
+            .into_iter()
+            .map(|check| CheckRun {
+                check,
+                status: CheckStatus::Passed,
+                exit_code: Some(0),
+                duration_ms: 1,
+            })
+            .collect();
+        self.who(token);
+        let r = self.s.post(
+            token,
+            &format!("/v1/forks/{fork}/verdicts"),
+            json!({ "epoch": 1, "changeset": id.to_hex(), "base": main.to_hex(), "checks": checks }),
+        );
+        assert_eq!(r.status(), 200, "{}", r.text().unwrap());
     }
 
     /// The landing intent journaled for `fork`, read back from the log.
@@ -301,7 +340,7 @@ fn a_change_that_weakens_a_gate_and_adds_a_secret_is_judged_by_the_base_policy_1
             "src/settings.py"
         };
         // The candidate rewrites the check manifest too: its hash must stay the base's.
-        let checks = format!("[checks.weak{i}]\nargv = [\"true\"]\n");
+        let checks = format!("[[check]]\nname = \"weak{i}\"\nargv = [\"true\"]\n");
         let ops = vec![
             policy_op,
             bed.put(&bed.a1, secret_path, secret.as_bytes()),
@@ -345,7 +384,7 @@ fn a_change_that_weakens_a_gate_and_adds_a_secret_is_judged_by_the_base_policy_1
             .fork(&ForkName::new(&fork).unwrap())
             .unwrap()
             .unwrap();
-        assert_eq!(state.landing_intent.map(|(c, _)| c), Some(id));
+        assert_eq!(state.landing.map(|l| l.changeset), Some(id));
         failed += 1;
     }
     assert_eq!(failed, 10);
@@ -740,6 +779,46 @@ fn only_the_holder_gets_a_verdict() {
         json!({ "epoch": 1, "changeset": id.to_hex(), "bypass": true }),
     );
     assert_eq!(r.status(), 400);
+}
+
+/// A head with no verify against main as it is now gets no verdict: a dry run answers
+/// what the landing request would (409 `not_verified`), and nothing is recorded. Once
+/// verified it is judged; once main moves, the verify is stale again.
+#[test]
+fn an_unverified_head_gets_no_verdict() {
+    let bed = Bed::new();
+    let fork = bed.fork(&bed.a1, "l1");
+    let id = bed.publish(
+        &bed.a1,
+        &fork,
+        &bed.main("l1"),
+        vec![bed.put(&bed.a1, "README", b"v9\n")],
+    );
+    let len = bed.s.authority.store().len().unwrap();
+    bed.who(&bed.a1);
+    for path in ["landing", "landing/dry-run"] {
+        let r = bed.s.post(
+            &bed.a1,
+            &format!("/v1/forks/{fork}/{path}"),
+            json!({ "epoch": 1, "changeset": id.to_hex() }),
+        );
+        assert_eq!(r.status(), 409, "{path}");
+        assert_eq!(r.json::<Value>().unwrap()["error"], "not_verified");
+    }
+    assert_eq!(bed.s.authority.store().len().unwrap(), len);
+    // Verified (by the helper), it is judged.
+    let v = bed.request(&bed.a1, &fork, id, &json!({}), true);
+    assert_eq!(v["gates"]["mode"], "log_only");
+    // Main moves: the verify no longer matches main, so the head is unverified again.
+    bed.advance(&bed.a1, "l1", vec![bed.put(&bed.a1, "other", b"x\n")]);
+    bed.who(&bed.a1);
+    let r = bed.s.post(
+        &bed.a1,
+        &format!("/v1/forks/{fork}/landing/dry-run"),
+        json!({ "epoch": 1, "changeset": id.to_hex() }),
+    );
+    assert_eq!(r.status(), 409);
+    assert_eq!(r.json::<Value>().unwrap()["error"], "not_verified");
 }
 
 /// Declarations are journaled as asked, so they are bounded: too many, or one longer

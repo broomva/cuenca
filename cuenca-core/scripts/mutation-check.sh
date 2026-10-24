@@ -41,13 +41,37 @@ PY
 
 # Blob ingest: only bytes that hash to the claim, of exactly the announced size, and
 # the same path whether or not the store holds the blob.
-mutate src/store.rs '    pub fn ingest_blob(&self, claimed: GitOid, size: u64, content: impl Read) -> Result<BlobInfo> {
-        let blob' '    pub fn ingest_blob(&self, claimed: GitOid, size: u64, content: impl Read) -> Result<BlobInfo> {
-        if let Some(info) = self.blob_info(claimed)? {
+mutate src/store.rs '        let mut batch = self.blob_batch();
+        let info = batch.add(claimed, size, content)?;' '        if let Some(info) = self.blob_info(claimed)? {
             return Ok(info);
         }
-        let blob' --test store
+        let mut batch = self.blob_batch();
+        let info = batch.add(claimed, size, content)?;' --test store
+# A batch (BRO-3416): every blob indexed, in one commit, only after all are in place.
+mutate src/store.rs 'for (oid, row) in &rows {' 'for (oid, row) in rows.iter().take(1) {' --test store a_blob_batch_stores
+mutate src/store.rs '        self.store.blobs.place(self.staged)?;
+        let txn = self.store.begin()?;
+        {
+            let mut table = txn.open_table(BLOBS)?;
+            for (oid, row) in &rows {
+                table.insert(oid.as_slice(), row.as_slice())?;
+            }
+        }
+        txn.commit()?;' '        let txn = self.store.begin()?;
+        {
+            let mut table = txn.open_table(BLOBS)?;
+            for (oid, row) in &rows {
+                table.insert(oid.as_slice(), row.as_slice())?;
+            }
+        }
+        txn.commit()?;
+        self.store.blobs.place(self.staged)?;' --test batch_crash
+
 mutate src/blobs.rs 'if blob.oid() != claimed {' 'if false {' --test store
+# P20 r1 (C): a staged blob holds no open file, so a batch larger than the open-file
+# limit is stored (the mutant keeps one descriptor per staged blob).
+mutate src/blobs.rs '        fsync(tmp.as_file())?;' '        fsync(tmp.as_file())?;
+        std::mem::forget(tmp.reopen()?);' --test batch_fds
 mutate src/blobs.rs 'content.take(size + 1)' 'content.take(size)' --test store
 mutate src/blobs.rs 'if size > MAX_BLOB_BYTES {' 'if false {' --test store
 mutate src/blobs.rs 'Some(blob) if blob.oid() == oid => Ok(bytes),' 'Some(_) => Ok(bytes),' --test store
@@ -71,6 +95,14 @@ mutate src/store.rs 'let target = changeset.apply(&load_tree(&trees, changeset.b
 # The transition rules (one copy, used by the writer and by replay).
 mutate src/state.rs 'if view.location(name)?.is_some() {' 'if false {' --test store
 mutate src/state.rs 'if view.fork(name)?.is_some() {' 'if false {' --test store
+mutate src/state.rs 'if is_owner_fork(name) != holder.is_volume()
+                ||' 'if false
+                ||' --test forks only_the_volume
+mutate src/state.rs '                || (holder.is_volume() && *holder != Holder::volume())' '' --test forks only_the_volume
+mutate src/state.rs 'if name.as_str() == OWNER_FORK_PREFIX.trim_end_matches(' 'if false && name.as_str() == OWNER_FORK_PREFIX.trim_end_matches(' --test forks a_fork_cannot_take_a_name
+mutate src/state.rs 'if is_owner_fork(name) || holder.is_volume() {' 'if holder.is_volume() {' --test forks never_taken_over
+mutate src/state.rs 'if is_owner_fork(name) || holder.is_volume() {' 'if is_owner_fork(name) {' --test forks never_taken_over
+mutate src/owner.rs 'fork.as_str().starts_with(OWNER_FORK_PREFIX)' 'fork.as_str().contains(OWNER_FORK_PREFIX)' --test forks only_the_volume
 mutate src/state.rs 'if *base != loc.main {' 'if false {' --lib
 mutate src/state.rs 'if ChangesetId::of(changeset) != *id {' 'if false {' --lib
 mutate src/state.rs '&& head == *id' '&& false' --test store
@@ -82,12 +114,61 @@ mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(*id) 
                 return Err(CoreError::NotHead {
                     fork: from.to_string(),' 'if false {
                 return Err(CoreError::NotHead {
-                    fork: from.to_string(),' --test store
-mutate src/state.rs 'if changeset.base != loc.main {' 'if false {' --test store
-mutate src/state.rs 'state.landing_intent
-        && last == id' 'state.landing_intent
+                    fork: from.to_string(),' --test land
+mutate src/state.rs '            let ours =
+                loc.main == state.base || loc.main_moved.as_ref().is_some_and(|m| m.fork == *from);' '            let ours = true;' --test land
+mutate src/state.rs '            let ours =
+                loc.main == state.base || loc.main_moved.as_ref().is_some_and(|m| m.fork == *from);' '            let ours = loc.main == state.base;' --test land
+mutate src/state.rs '            loc.main = state.head;' '            loc.main = state.base;' --test land
+mutate src/state.rs 'if let Some(l) = &state.landing
+        && l.changeset == id' 'if let Some(l) = &state.landing
         && false' --test store
 mutate src/state.rs 'if state.head_changeset.map(|(head, _)| head) != Some(id) {' 'if false {' --lib
+# Landing: verified first, each step after its predecessor, a remote decides the path.
+mutate src/state.rs 'Some(v) if v.changeset == id && v.base == loc.main => Ok(None),' 'Some(v) if v.changeset == id => Ok(None),' --test land
+mutate src/state.rs 'Some(v) if v.changeset == id && v.base == loc.main => Ok(None),' 'Some(v) if v.base == loc.main => Ok(None),' --test land
+mutate src/state.rs '            if loc.remote.is_some() {
+                return Err(CoreError::HasRemote(at.to_string()));' '            if false {
+                return Err(CoreError::HasRemote(at.to_string()));' --test land
+mutate src/state.rs 'if landing.step != LandingStep::Requested {' 'if false {' --test land
+mutate src/state.rs '            if let Some(holder) = state.holder() {
+                not_revoked(view, &holder.principal)?;
+            }' '' --test land
+mutate src/state.rs 'if location(view, &state.location)?.remote.is_none() {' 'if false {' --test land
+mutate src/state.rs 'if *branch != export_branch(*id) || base_ref.is_empty()' 'if base_ref.is_empty()' --test land
+mutate src/state.rs '                _ => return Err(step_error(&state, &landing, "requested")),
+            }
+            holder_not_revoked(view, &state)?;' '                _ => {}
+            }
+            holder_not_revoked(view, &state)?;' --test land
+mutate src/state.rs '                _ => return Err(step_error(&state, &landing, "requested")),
+            }
+            holder_not_revoked(view, &state)?;' '                _ => return Err(step_error(&state, &landing, "requested")),
+            }' --test land
+mutate src/state.rs '            holder_not_revoked(view, &state)?;
+            set_step(
+                view,
+                state,
+                landing,
+                offset,
+                LandingStep::Reviewing { export },' '            set_step(
+                view,
+                state,
+                landing,
+                offset,
+                LandingStep::Reviewing { export },' --test land
+mutate src/state.rs 'LandingStep::Exported { .. } => return Ok(Applied::Repeat(landing.moved)),' '' --test land
+mutate src/state.rs 'if *pr == 0 || url.is_empty() || url.len() > MAX_LANDING_TEXT {' 'if url.is_empty() {' --test land
+mutate src/state.rs '                | LandingStep::Reviewing { .. } => {}
+                _ => return Err(step_error(&state, &landing, "in flight")),' '                | LandingStep::Reviewing { .. } => {}
+                _ => {}' --test land
+mutate src/state.rs '            state.verified = Some(Verified {
+                changeset: *id,
+                base: *base,
+                offset,
+            });
+            view.put_fork(&state)?;' '' --test land
+mutate src/store.rs 'while !reason.is_char_boundary(end) {' 'while false {' --test land
 # One writer per fork: holders, fencing epochs, takeover, sibling forks, revocation.
 mutate src/state.rs 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {
     not_revoked(view, &writer.holder.principal)?;' 'fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> Result<()> {' --test forks
@@ -133,7 +214,7 @@ mutate src/state.rs 'if sibling.epoch() == 1 {' 'if true {' --test forks
 mutate src/state.rs '(at, epoch) = (sibling, 1);' '(at, epoch) = (sibling, epoch + 1);' --test forks
 mutate src/state.rs 'head: base,' 'head: at.head,' --test forks
 mutate src/state.rs 'if name.as_str().contains("-from") {' 'if false {' --test forks
-mutate src/state.rs 'state.landing_intent = None;' '' --test forks
+mutate src/state.rs 'state.landing = None;' '' --test forks
 mutate src/store.rs 'placed = (sibling.name.clone(), sibling.epoch(), true);' '' --test forks
 # Sibling names: every (parent, epoch) its own name, and one that fits.
 mutate src/owner.rs '&& s.len() <= MAX_NODE_BYTES' '' --lib
@@ -181,7 +262,8 @@ mutate src/blobs.rs 'fs::remove_file(path)?;' '' --test store
 mutate src/store.rs 'let (Some(sha), Some(size)) = (bytes.get(..32), bytes.get(32..40)) else {
         return Err(CoreError::CorruptBlob(oid));
     };' 'let (sha, size) = (Some(&bytes[..32]).unwrap(), Some(&bytes[32..40]).unwrap());' --lib
-# Not covered, by design: the fsyncs of blob files and directories. A SIGKILL keeps the
+# Not covered, by design: the fsyncs of blob files and directories, and a batch's one
+# full sync before its index commit. A SIGKILL keeps the
 # page cache, so no test here can tell a missing fsync; power-loss durability of blobs
 # rests on reading the code. The redb commit's durability is covered (below).
 
@@ -257,5 +339,54 @@ mutate src/gates/policy.rs '                Event::Scalar(_, _, _, Some(_))
                 | Event::SequenceStart(_, Some(_))' '                Event::SequenceStart(_, Some(_))' --lib
 mutate src/gates/policy.rs '                | Event::MappingStart(_, Some(_)),' '                | Event::MappingStart(usize::MAX, Some(_)),' --lib
 mutate src/gates/policy.rs '.any(|p| p.is_empty() || super::builtin::try_glob(p).is_err())' '.any(|p| p.is_empty())' --lib
+
+# Verify records (BRO-3254): the checks run are the base's list, read by the store from
+# the location's main, exactly and in order; only the holder, on the head, against the
+# main of the moment; a run's status and exit code agree; the manifest parses strictly.
+# The rules' candidate and base checks hold the log at replay (the store builds the
+# candidate from the head, and checks the base early too). Not mutated: that early base
+# check alone, which the rules then catch; it keeps a non-main tree, and the check
+# names it holds, out of reach.
+mutate src/store.rs '        if reported != expected {' '        if false && reported != expected {' --test verify
+mutate src/store.rs '        let Some(entry) = tree.get(MANIFEST_PATH) else {' '        let Some(entry) = tree.get(MANIFEST_PATH).filter(|_| false) else {' --test verify
+mutate src/store.rs '            _ => return Err(ManifestError("is not a regular file".to_string()).into()),' '            other => other.oid(),' --test verify
+mutate src/store.rs '                sha256: info.sha256,' '                sha256: cuenca_tree::ContentHash::of(oid.as_bytes()),' --test verify
+mutate src/state.rs '            checks.iter().try_for_each(check_run)?;' '' --test verify
+mutate src/state.rs '        CheckStatus::Failed => run.exit_code != Some(0),' '        CheckStatus::Failed => true,' --test verify
+mutate src/state.rs '            if state.head != *candidate {' '            if false && state.head != *candidate {' --lib replay_refuses_a_verify
+mutate src/state.rs '            let loc = location(view, &state.location)?;
+            if loc.main != *base {' '            let loc = location(view, &state.location)?;
+            if false {' --lib replay_refuses_a_verify
+mutate src/state.rs '            if state.head_changeset.map(|(head, _)| head) != Some(*id) {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {' '            if false {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {' --test verify
+mutate src/state.rs '            check_writer(view, &state, writer)?;
+            if state.head_changeset.map(|(head, _)| head) != Some(*id) {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {' '            if state.head_changeset.map(|(head, _)| head) != Some(*id) {
+                return Err(CoreError::NotHead {
+                    fork: name.to_string(),
+                    changeset: id.to_hex(),
+                });
+            }
+            if state.head != *candidate {' --test verify
+mutate src/checks.rs '            if !names.insert(c.name.as_str()) {' '            if !names.insert(c.name.as_str()) && false {' --lib checks
+mutate src/checks.rs '            if c.timeout_secs == 0 || c.timeout_secs > MAX_TIMEOUT_SECS {' '            if c.timeout_secs > MAX_TIMEOUT_SECS {' --lib checks
+mutate src/checks.rs '#[serde(deny_unknown_fields)]
+pub struct Check {' 'pub struct Check {' --lib checks
 
 exit $survived
