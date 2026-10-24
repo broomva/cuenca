@@ -10,10 +10,10 @@
 #   CUENCA_MUT_BUDGET_MB   bytes one cargo test may leave under the run dir (default 4096)
 #   CUENCA_MUT_TIMEOUT     seconds one cargo test may run, build included (default 1800)
 #
-# A run dir is named run-<pid>. One whose process is gone (killed with SIGKILL, so its
-# EXIT trap never ran) is removed when the next run starts. If it died with a mutant in
-# place, .backup/path names the mutated file and .backup/file holds its original; that
-# backup is moved to rescued-<pid> and named on stderr, never deleted.
+# A run dir is named run-<pid> and holds .backup. When the next run starts, one whose
+# process is gone (SIGKILLed, so its EXIT trap never ran) is removed, unless it may have
+# left a mutant in the source (.backup/path) or a test group still running
+# (.backup/pgid): then the guard names both and refuses to start, deleting nothing.
 guard_repo=$(git rev-parse --show-toplevel)
 guard_root=${CUENCA_MUT_TMPDIR:-/tmp/cuenca-mut}
 case $guard_root in
@@ -22,34 +22,39 @@ case $guard_root in
 esac
 mkdir -p "$guard_root"
 for stale in "$guard_root"/run-*; do
-  [ -d "$stale" ] || continue
-  kill -0 "${stale##*/run-}" 2>/dev/null && continue
-  if [ -s "$stale/.backup/path" ]; then
-    mv "$stale/.backup" "$guard_root/rescued-${stale##*/run-}"
-    echo "mutation-guard: a killed run left a mutant in $(cat "$guard_root/rescued-${stale##*/run-}/path"); its original is $guard_root/rescued-${stale##*/run-}/file" >&2
+  pid=${stale##*/run-}
+  case $pid in '' | *[!0-9]*) continue ;; esac
+  [ -d "$stale/.backup" ] || continue
+  ps -p "$pid" >/dev/null 2>&1 && continue
+  if [ -s "$stale/.backup/path" ] || { [ -s "$stale/.backup/pgid" ] && pgrep -g "$(cat "$stale/.backup/pgid")" >/dev/null; }; then
+    echo "mutation-guard: run $pid was killed mid-mutant. Before running again:" >&2
+    [ -s "$stale/.backup/path" ] && echo "  restore $(cat "$stale/.backup/path") from $stale/.backup/file" >&2
+    [ -s "$stale/.backup/pgid" ] && echo "  check process group $(cat "$stale/.backup/pgid") is gone (pgrep -g)" >&2
+    echo "  then remove $stale" >&2
+    exit 2
   fi
   rm -rf "$stale"
 done
 guard_dir=$guard_root/run-$$
-if [ "${#guard_dir}" -gt 64 ]; then
-  echo "mutation-guard: run dir $guard_dir is ${#guard_dir} bytes; the tests' sockets need it at most 64 (set CUENCA_MUT_TMPDIR shorter)" >&2
+guard_len=$(printf %s "$guard_dir" | wc -c | tr -d ' ')
+if [ "$guard_len" -gt 64 ]; then
+  echo "mutation-guard: run dir $guard_dir is $guard_len bytes; the tests' sockets need it at most 64 (set CUENCA_MUT_TMPDIR shorter)" >&2
   exit 2
 fi
 # The script's own backups and logs sit in .backup, which bounded() keeps.
 guard_backup=$guard_dir/.backup
 mkdir -p "$guard_backup"
 export TMPDIR=$guard_dir
-# A group left behind by a SIGKILLed bounded.py is killed before its dir is removed.
-guard_cleanup() {
-  [ -s "$guard_backup/pgid" ] && kill -KILL -- "-$(cat "$guard_backup/pgid")" 2>/dev/null
-  rm -rf "$guard_dir"
-}
+# A group left behind by a SIGKILLed bounded.py. Call before restoring the source, so an
+# orphaned cargo cannot rewrite it afterwards.
+guard_kill() { [ -s "$guard_backup/pgid" ] && kill -KILL -- "-$(cat "$guard_backup/pgid")" 2>/dev/null; return 0; }
+guard_cleanup() { guard_kill; rm -rf "$guard_dir"; }
 
 # bounded COMMAND...: run COMMAND under the budget and the timeout. The run dir is
 # emptied first, so the budget applies to this command alone. Status 124 is a timeout
 # and 125 an exceeded budget; either one is reported on stderr.
 bounded() {
-  [ -s "$guard_backup/pgid" ] && kill -KILL -- "-$(cat "$guard_backup/pgid")" 2>/dev/null
+  guard_kill
   find "$guard_dir" -mindepth 1 -maxdepth 1 ! -name .backup -exec rm -rf {} +
   python3 "$guard_repo/scripts/bounded.py" --dir "$guard_dir" --pgid-file "$guard_backup/pgid" \
     --budget-mb "${CUENCA_MUT_BUDGET_MB:-4096}" --timeout "${CUENCA_MUT_TIMEOUT:-1800}" -- "$@"

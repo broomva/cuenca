@@ -8,12 +8,14 @@ make lands in DIR. Once a second the bytes allocated under DIR are summed; when 
 the budget, or the time limit passes, the whole process group is killed with SIGKILL.
 A fast writer can pass the budget by up to one poll's worth of writes before it dies.
 Exit status: the command's own, 128 + signal if it died of one, 124 on timeout, 125 on
-an exceeded budget. The reason goes to stderr.
+an exceeded budget. A command that exits on its own keeps its status; if it left more
+than the budget behind, that is only reported on stderr (the budget guards the disk, it
+is not a verdict).
 
 The command is outside our process group, so a Ctrl-C or a harness's kill would not reach
 it: SIGINT, SIGTERM and SIGHUP to this process kill the command's group first, then exit
-128 + signal. --pgid-file records the group while it runs, so a caller that outlives a
-SIGKILL of this process can still kill it.
+128 + signal. --pgid-file records the group while it runs, so the calling shell can still
+kill it if this process is SIGKILLed.
 
 Why: a mutant that turns a bounded write loop into an unbounded one filled the Mac's
 disk twice on 2026-10-24 (BRO-3455). A guard has to stop it, not the disk.
@@ -70,7 +72,13 @@ def main():
         signal.signal(signum, stop)
     # Held off until the child is started and recorded, so a signal can't miss it.
     signal.pthread_sigmask(signal.SIG_BLOCK, stops)
-    child = subprocess.Popen(command, env={**os.environ, "TMPDIR": a.dir}, start_new_session=True)
+    child = subprocess.Popen(
+        command,
+        env={**os.environ, "TMPDIR": a.dir},
+        start_new_session=True,
+        # The child would inherit the blocked mask; it runs with none, like plain cargo test.
+        preexec_fn=lambda: signal.pthread_sigmask(signal.SIG_UNBLOCK, stops),
+    )
     running.append(child)
     if a.pgid_file:
         with open(a.pgid_file, "w") as f:
@@ -113,8 +121,7 @@ def watch(a, child, command):
             kill_group(child)  # whatever the command left running in its group
             used = allocated(a.dir)  # an exit between two polls is still measured
             if used > budget:
-                print(f"bounded: {command[0]} exited after writing {used // (1024 * 1024)} MiB under {a.dir}, budget {a.budget_mb} MiB", file=sys.stderr)
-                return BUDGET
+                print(f"bounded: warning: {command[0]} exited leaving {used // (1024 * 1024)} MiB under {a.dir}, budget {a.budget_mb} MiB", file=sys.stderr)
             return status if status >= 0 else 128 - status
         except subprocess.TimeoutExpired:
             pass
