@@ -242,4 +242,12 @@ mutate src/materialise.rs '        swap_into_place(staged, &dest)?;' '        if
             swap_into_place(staged, &dest)?;
         }' --test materialise a_reader_never_sees
 
+# The record follows the swap: written first, a failed swap leaves it naming a tree
+# that is not shown.
+mutate src/materialise.rs '        swap_into_place(staged, &dest)?;
+        File::open(dest.parent().expect("main/ or forks/"))?.sync_all()?;
+        write_record(&self.state.join(what.rel()), tree)?;' '        write_record(&self.state.join(what.rel()), tree)?;
+        swap_into_place(staged, &dest)?;
+        File::open(dest.parent().expect("main/ or forks/"))?.sync_all()?;' --test materialise a_failed_swap_records_nothing
+
 exit $survived
