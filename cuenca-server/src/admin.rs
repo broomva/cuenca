@@ -274,6 +274,7 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             Ok(json!({ "offset": offset, "changeset": requested, "main": main }))
         }
         AdminRequest::OwnerFork { location, fork } => {
+            ignored_in_main(a, &location)?;
             let offset = a
                 .store
                 .create_fork(&fork, &location, &Holder::volume())
@@ -294,6 +295,36 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             Ok(json!({ "epoch": epoch }))
         }
     }
+}
+
+/// Refuse an owner fork of a location whose main tracks paths its own rules name
+/// (its `.forkignore`, or the defaults): the first show would write them into the
+/// fork, and every snapshot of it would then fail, since a snapshot never holds such a
+/// path and leaving it out would delete it. Remove them from main first.
+fn ignored_in_main(a: &Authority, location: &LocationName) -> Result<(), String> {
+    let s = |e: &dyn std::fmt::Display| e.to_string();
+    let main = a.store.main_tree(location).map_err(|e| s(&e))?;
+    let rules = match main.get(cuenca_fs::FORKIGNORE) {
+        Some(entry) => {
+            let text = a.store.read_blob(entry.oid()).map_err(|e| s(&e))?;
+            cuenca_fs::ForkIgnore::parse(&String::from_utf8_lossy(&text)).map_err(|e| s(&e))?
+        }
+        None => cuenca_fs::ForkIgnore::defaults(),
+    };
+    let named: Vec<&str> = main
+        .entries()
+        .map(|(p, _)| p.as_str())
+        .filter(|p| rules.excludes(p))
+        .collect();
+    if named.is_empty() {
+        return Ok(());
+    }
+    Err(format!(
+        "main of {location:?} tracks {} path(s) its .forkignore names (first: {:?}); an \
+         owner fork of it could never be snapshotted. Remove them from main first",
+        named.len(),
+        &named[..named.len().min(10)]
+    ))
 }
 
 /// The volume's principal has no key and is never revoked: minting one would let a
@@ -391,5 +422,77 @@ mod tests {
         );
         assert!(a.is_banned(&p));
         assert!(a.store.revoked(&p).unwrap().is_none());
+    }
+
+    fn location(a: &Authority, name: &str, files: &[(&str, &[u8])]) -> LocationName {
+        use cuenca_tree::{Entry, GitOid, RepoPath};
+        let tree = Tree::from_entries(files.iter().map(|(p, c)| {
+            let oid = GitOid::for_blob(c);
+            a.store.ingest_blob(oid, c.len() as u64, *c).unwrap();
+            (RepoPath::new(*p).unwrap(), Entry::File(oid))
+        }))
+        .unwrap();
+        let name = LocationName::new(name).unwrap();
+        a.store.add_location(&name, None, &tree).unwrap();
+        name
+    }
+
+    /// An owner fork of a main that tracks paths its rules name is refused up front,
+    /// naming them, and nothing is appended: its snapshots could never succeed.
+    #[test]
+    fn an_owner_fork_of_a_main_tracking_ignored_paths_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Authority::open(dir.path(), Arc::new(Nobody)).unwrap();
+        let req = |l: &LocationName| AdminRequest::OwnerFork {
+            location: l.clone(),
+            fork: ForkName::new("owner-mac").unwrap(),
+        };
+        // The defaults name .env and anything under node_modules/.
+        let env = location(&a, "env", &[("README", b"r"), (".env", b"SECRET=1")]);
+        let deps = location(&a, "deps", &[("node_modules/x/i.js", b"x")]);
+        // A location's own .forkignore replaces the defaults.
+        let own = location(
+            &a,
+            "own",
+            &[
+                (".forkignore", b"*.log\n"),
+                ("a.log", b"l"),
+                (".env", b"ok"),
+            ],
+        );
+        let len = a.store.len().unwrap();
+        for (l, path) in [
+            (&env, ".env"),
+            (&deps, "node_modules/x/i.js"),
+            (&own, "a.log"),
+        ] {
+            let err = handle(&a, req(l)).unwrap_err();
+            assert!(err.contains(path), "{err}");
+        }
+        assert_eq!(a.store.len().unwrap(), len);
+        let clean = location(
+            &a,
+            "clean",
+            &[("README", b"r"), (".forkignore", b"*.log\n")],
+        );
+        handle(&a, req(&clean)).unwrap();
+    }
+
+    /// A key on file for the volume's principal stops the authority from starting.
+    #[test]
+    fn a_volume_key_on_file_is_refused_at_start() {
+        let dir = tempfile::tempdir().unwrap();
+        let a = Authority::open(dir.path(), Arc::new(Nobody)).unwrap();
+        a.keys
+            .mint(
+                PrincipalName::new("volume").unwrap(),
+                PrincipalKind::Agent,
+                NodeId::new("nVolCNTRL").unwrap(),
+                Grant::default(),
+            )
+            .unwrap();
+        drop(a);
+        let err = Authority::open(dir.path(), Arc::new(Nobody)).err().unwrap();
+        assert!(err.to_string().contains("volume"), "{err}");
     }
 }

@@ -198,7 +198,7 @@ mutate src/materialise.rs '        cuenca_fs::checkout(&full, staged, &self.obje
         remove_any(&here)?;
         cuenca_fs::checkout(&full, &here, &self.objects)?;
         fs::rename(&here, staged)?;' --test materialise killed_while_materialising
-mutate src/materialise.rs '        set_modes(staged, what.modes())?;' '' --test materialise a_draft_is_shown
+mutate src/materialise.rs '        set_modes(staged, Modes::of(owner))?;' '' --test materialise a_draft_is_shown
 mutate src/materialise.rs 'const FILE_MODE: u32 = 0o640;' 'const FILE_MODE: u32 = 0o644;' --test materialise a_draft_is_shown
 mutate src/materialise.rs 'const DIR_MODE: u32 = 0o2750;' 'const DIR_MODE: u32 = 0o2755;' --test materialise a_draft_is_shown
 mutate src/materialise.rs '.permissions().mode() & 0o100 != 0;' '.permissions().mode() & 0o100 == 0;' --test materialise a_draft_is_shown
@@ -266,17 +266,24 @@ mutate src/materialise.rs '        forget_record(&record)?;
 mutate src/materialise.rs 'const OWNER_DIR_MODE: u32 = 0o2770;' 'const OWNER_DIR_MODE: u32 = 0o2750;' --test owner_forks shown_once
 mutate src/materialise.rs 'const OWNER_FILE_MODE: u32 = 0o660;' 'const OWNER_FILE_MODE: u32 = 0o640;' --test owner_forks shown_once
 mutate src/materialise.rs 'const OWNER_EXEC_MODE: u32 = 0o770;' 'const OWNER_EXEC_MODE: u32 = 0o660;' --test owner_forks shown_once
-mutate src/materialise.rs '            if what.is_owner() && self.owner_shown(&what, tree)? {' '            if false && self.owner_shown(&what, tree)? {' --test owner_forks shown_once
-mutate src/materialise.rs '        if what.is_owner() {
+mutate src/materialise.rs '            if owner && self.owner_shown(&what, tree)? {' '            if false && self.owner_shown(&what, tree)? {' --test owner_forks shown_once
+mutate src/materialise.rs '        if owner {
             // Shown once' '        if false {
-            // Shown once' --test owner_forks adopted
+            // Shown once' --lib an_owner_fork_is_never_exchanged
 mutate src/materialise.rs '        if !self.shown.contains_key(what) {
             write_record' '        if false {
             write_record' --test owner_forks adopted
-mutate src/materialise.rs '        if snap.is_clean() {' '        if false {' --test owner_forks shown_once
+mutate src/materialise.rs '    if snap.is_clean() {' '    if false {' --test owner_forks shown_once
 mutate src/materialise.rs '    let snap = cuenca_fs::snapshot(dir, &head, cache)' '    let snap = cuenca_fs::snapshot_with(dir, &head, cache, &cuenca_fs::SnapshotOptions { rules: Some(&cuenca_fs::ForkIgnore::parse("").unwrap()), drop_ignored: true })' --test owner_forks finder_metadata
 mutate src/admin.rs '    if principal.as_str() == cuenca_core::VOLUME_PRINCIPAL {' '    if false {' --test owner_forks keeps_the_volume_keyless
-mutate src/materialise.rs '            if !is_owner_fork(&fork.name) {' '            if is_owner_fork(&fork.name) {' --test owner_forks
+mutate src/http.rs '            CoreError::OwnerFork(_) => (S::FORBIDDEN, "owner_fork"),' '' --test owner_forks no_key_creates
+mutate src/admin.rs '            ignored_in_main(a, &location)?;' '' --lib an_owner_fork_of_a_main_tracking
+mutate src/admin.rs '        .filter(|p| rules.excludes(p))' '        .filter(|p| rules.is_ignored(p, false))' --lib an_owner_fork_of_a_main_tracking
+mutate src/admin.rs '        None => cuenca_fs::ForkIgnore::defaults(),' '        None => cuenca_fs::ForkIgnore::parse("").unwrap(),' --lib an_owner_fork_of_a_main_tracking
+mutate src/authority.rs '            .any(|k| k.principal.as_str() == cuenca_core::VOLUME_PRINCIPAL)' '            .any(|_| false)' --lib a_volume_key_on_file
+mutate src/materialise.rs 'rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK' 'rustix::fs::OFlags::NONBLOCK' --lib an_upload_opens_only
+mutate src/materialise.rs '    if !file.metadata().map_err(|e| fail(&e))?.is_file() {' '    if false {' --lib an_upload_opens_only
+mutate src/materialise.rs '            if !is_owner(&fork) {' '            if is_owner(&fork) {' --test owner_forks
 mutate src/materialise.rs '                if snapped_at.is_none_or(|t| t.elapsed() >= config.snapshot_interval) {' '                if snapped_at.is_none() {' --test owner_forks a_draft_within_60_s
 
 exit $survived

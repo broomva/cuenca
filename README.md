@@ -84,13 +84,13 @@ With `--volume` (or `CUENCA_VOLUME`), the authority keeps every location's main 
 cuenca admin owner-fork <location> owner-mac
 ```
 
-It is held by the volume itself, never by a key, and it never moves: it cannot be taken over, and the volume holds nothing but `owner-*` forks. The authority shows it once at `<dir>/forks/owner-mac/`, writable through the group: folders `2770`, files `0660`, executables `0770`. After that, the folder is never replaced or swapped, so an edit is never moved out from under Finder. Every 10 s the authority snapshots each owner fork under its location's `.forkignore`, so `.DS_Store`, `._*` and the other defaults are left out, and publishes the changes as a draft written by the volume. An edit is in the log well inside the spec's 60 s.
+It is held by the volume itself, never by a key, and it never moves: it cannot be taken over, and the volume holds nothing but `owner-*` forks. The authority shows it once at `<dir>/forks/owner-mac/`, writable through the group: folders `2770`, files `0660`, executables `0770`. After that, the folder is never replaced or swapped, so an edit is never moved out from under Finder. Every 10 s the authority snapshots each owner fork under the `.forkignore` the fork holds (the location's, until someone edits it in the fork), or the defaults when there is none. So `.DS_Store`, `._*` and the other defaults are left out, and publishes the changes as a draft written by the volume. An edit is in the log well inside the spec's 60 s.
 
 The snapshot records Finder's own conversions as changes:
 - a symlink saved as an XSym file becomes a change of kind;
 - a lost executable bit becomes a change of mode.
 
-`cuenca diff` shows both. A file the authority cannot read, or one that keeps changing, fails that fork's snapshot loudly, with the path in the log output. Nothing of the fork is published until a later pass succeeds. Forking an owner fork into a checkout comes next (BRO-3256 part 3).
+`cuenca diff` shows both. A file the authority cannot read, one that keeps changing while it is read, or a rule added to the fork's `.forkignore` that names a path the fork tracks, fails that fork's snapshot loudly, with the path in the log output. Nothing of the fork is published until a later pass succeeds. An owner fork is refused at creation if the location's main tracks a path its own rules name, such as a committed `.DS_Store` or `.env`, since such a fork could never be snapshotted; remove those paths from main first. Forking an owner fork into a checkout comes next (BRO-3256 part 3).
 
 More crates land as the plan's nodes do. Install, operate and recover sections arrive with the close-out node (BRO-3260).
 

@@ -26,14 +26,16 @@
 //!
 //! # Owner forks
 //!
-//! An owner fork (`forks/owner-<x>/`, held by the volume: [`cuenca_core::is_owner_fork`])
+//! An owner fork (`forks/owner-<x>/`, held by the volume: [`Holder::is_volume`]; the
+//! materialiser goes by the holder the log names, not by the name)
 //! is the other way round: the directory is what the owner's devices write through
 //! Samba, and the log follows it (spec section 2a). The materialiser shows it once, from
 //! the log, writable (folders `2770`, files `0660`, executables `0770`), by the same
 //! staged, exclusive rename, and never exchanges it afterwards, so nothing written from
 //! Finder is ever moved out. [`Volume::snapshot_owner_forks`] then scans each one with
-//! `cuenca-fs` under the location's `.forkignore` (so `.DS_Store`, `._*` and the other
-//! defaults never reach a changeset), and publishes what changed as a draft of the fork,
+//! `cuenca-fs` under the `.forkignore` the fork holds, or the defaults (so `.DS_Store`,
+//! `._*` and the other defaults never reach a changeset unless the fork's own rules let
+//! them), and publishes what changed as a draft of the fork,
 //! written by the volume; the [`Materialiser`] does it every
 //! [`VolumeConfig::snapshot_interval`] (10 s by default; the spec's row is 60 s). A file
 //! the authority cannot read, or one that keeps changing, fails that fork's snapshot
@@ -74,7 +76,9 @@
 //! checks them on every read. Nothing in the volume is trusted beyond that: the
 //! read-only trees are the materialiser's alone (their modes keep Samba's account out),
 //! owner forks are read as untrusted input (the scan never follows a link out of the
-//! fork, and the store hashes every blob it takes), and the volume's own records are
+//! fork; a file's upload reopens it by path, never through a final link or blocking on
+//! a FIFO, and the store hashes every blob it takes against the id the scan found, so
+//! anything swapped in meanwhile is refused), and the volume's own records are
 //! trusted only to skip work: a record that names the wrong tree leaves that tree shown
 //! until the log moves again, so nothing but the materialiser may write `.cuenca/`. One
 //! materialiser per volume is enforced by a lock on `.cuenca/lock`.
@@ -89,7 +93,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use cuenca_core::{ChangesetId, ForkName, Holder, LocationName, Store, Writer, is_owner_fork};
+use cuenca_core::{ChangesetId, Fork, ForkName, Holder, LocationName, Store, Writer};
 use cuenca_fs::ObjectDir;
 use cuenca_tree::GitOid;
 use rustix::fs::{CWD, FlockOperation, RenameFlags};
@@ -131,14 +135,12 @@ impl Shown {
             Shown::Fork(f) => Path::new("forks").join(f.as_str()),
         }
     }
+}
 
-    /// Whether it is an owner fork, which is shown once and then written from Finder.
-    fn is_owner(&self) -> bool {
-        matches!(self, Shown::Fork(f) if is_owner_fork(f))
-    }
-
-    fn modes(&self) -> Modes {
-        if self.is_owner() {
+impl Modes {
+    /// An owner fork's modes, or a read-only tree's.
+    fn of(owner: bool) -> Self {
+        if owner {
             Modes {
                 dir: OWNER_DIR_MODE,
                 file: OWNER_FILE_MODE,
@@ -152,6 +154,12 @@ impl Shown {
             }
         }
     }
+}
+
+/// Whether `fork` is an owner fork, by the holder the log names: shown once, then
+/// written from Finder and snapshotted.
+fn is_owner(fork: &Fork) -> bool {
+    fork.holder().is_some_and(Holder::is_volume)
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -286,14 +294,15 @@ impl Volume {
     pub fn converge(&mut self, store: &Store) -> cuenca_core::Result<Pass> {
         let mut want = Vec::new();
         for location in store.locations()? {
-            want.push((Shown::Main(location.name), location.main));
+            want.push((Shown::Main(location.name), location.main, false));
         }
         for fork in store.forks()? {
-            want.push((Shown::Fork(fork.name), fork.head));
+            let owner = is_owner(&fork);
+            want.push((Shown::Fork(fork.name), fork.head, owner));
         }
         let mut pass = Pass::default();
-        for (what, tree) in want {
-            if what.is_owner() && self.owner_shown(&what, tree)? {
+        for (what, tree, owner) in want {
+            if owner && self.owner_shown(&what, tree)? {
                 pass.unchanged += 1;
                 continue;
             }
@@ -310,7 +319,7 @@ impl Volume {
             {
                 continue;
             }
-            match self.show(store, &what, tree) {
+            match self.show(store, &what, tree, owner) {
                 Ok(()) => {
                     self.failed.remove(&what);
                     pass.built.push((what, tree));
@@ -341,11 +350,18 @@ impl Volume {
         Ok(true)
     }
 
-    /// Materialise `tree` and swap it into `what`'s place.
-    fn show(&mut self, store: &Store, what: &Shown, tree: GitOid) -> Result<(), ShowError> {
+    /// Materialise `tree` and swap it into `what`'s place (put it there, for an owner
+    /// fork, which is never exchanged).
+    fn show(
+        &mut self,
+        store: &Store,
+        what: &Shown,
+        tree: GitOid,
+        owner: bool,
+    ) -> Result<(), ShowError> {
         let staged = self.staging.join(self.next_staging.to_string());
         self.next_staging += 1;
-        let result = self.stage_and_swap(store, what, tree, &staged);
+        let result = self.stage_and_swap(store, what, tree, owner, &staged);
         // What is left at the staging path is the tree that was shown before (after a
         // swap) or a tree never shown (after a failure): either way, nobody's.
         if let Err(e) = remove_any(&staged) {
@@ -359,11 +375,12 @@ impl Volume {
         store: &Store,
         what: &Shown,
         tree: GitOid,
+        owner: bool,
         staged: &Path,
     ) -> Result<(), ShowError> {
         let full = store.tree(tree)?;
         cuenca_fs::checkout(&full, staged, &self.objects)?;
-        set_modes(staged, what.modes())?;
+        set_modes(staged, Modes::of(owner))?;
         flush(&self.staging)?;
         let dest = self.root.join(what.rel());
         let record = self.state.join(what.rel());
@@ -374,7 +391,7 @@ impl Volume {
         // apart; no test kills at that point.)
         self.shown.remove(what);
         forget_record(&record)?;
-        if what.is_owner() {
+        if owner {
             // Shown once, never exchanged: an owner fork already there is Finder's.
             rename_new(staged, &dest)?;
         } else {
@@ -395,7 +412,7 @@ impl Volume {
     pub fn snapshot_owner_forks(&mut self, store: &Store) -> cuenca_core::Result<Snapped> {
         let mut snapped = Snapped::default();
         for fork in store.forks()? {
-            if !is_owner_fork(&fork.name) {
+            if !is_owner(&fork) {
                 continue;
             }
             let what = Shown::Fork(fork.name.clone());
@@ -446,10 +463,7 @@ fn snapshot_one(
     let mut batch = store.blob_batch();
     for blob in &snap.new_blobs {
         let added = match &blob.content {
-            cuenca_fs::Content::File(path) => {
-                let file = File::open(path).map_err(|e| format!("{}: {e}", path.display()))?;
-                batch.add(blob.oid, blob.size, file)
-            }
+            cuenca_fs::Content::File(path) => batch.add(blob.oid, blob.size, open_regular(path)?),
             cuenca_fs::Content::Inline(bytes) => batch.add(blob.oid, blob.size, bytes.as_slice()),
         };
         // A file that changed since the scan hashes to another id: refused, and the
@@ -462,6 +476,26 @@ fn snapshot_one(
         .publish_draft(&fork.name, &writer, &snap.changeset)
         .map_err(|e| e.to_string())?;
     Ok((Some((published.id, published.offset)), snap.skipped))
+}
+
+/// Open a file the scan found, again by its path, for its upload: never through a
+/// final symlink and never blocking on a FIFO, and only if it is a regular file. A
+/// file swapped since the scan by anything else (a folder above it replaced by a link
+/// included) is read only to be refused, since the store hashes what it takes against
+/// the id the scan found.
+fn open_regular(path: &Path) -> Result<File, String> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let flags = rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK;
+    let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(flags.bits() as i32)
+        .open(path)
+        .map_err(|e| fail(&e))?;
+    if !file.metadata().map_err(|e| fail(&e))?.is_file() {
+        return Err(fail(&"no longer a regular file; snapshot again"));
+    }
+    Ok(file)
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -707,5 +741,68 @@ impl Drop for Materialiser {
         {
             tracing::error!("the materialiser thread panicked");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cuenca_tree::{Entry, RepoPath, Tree};
+
+    /// Below `converge`, which never shows an owner fork that is there already: if it
+    /// ever did, the folder Finder writes is refused, never exchanged out of place.
+    #[test]
+    fn an_owner_fork_is_never_exchanged() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let oid = GitOid::for_blob(b"main\n");
+        store.ingest_blob(oid, 5, &b"main\n"[..]).unwrap();
+        let main =
+            Tree::from_entries([(RepoPath::new("README").unwrap(), Entry::File(oid))]).unwrap();
+        let site = LocationName::new("site").unwrap();
+        store.add_location(&site, None, &main).unwrap();
+        let owner = ForkName::new("owner-mac").unwrap();
+        store.create_fork(&owner, &site, &Holder::volume()).unwrap();
+        let root = dir.path().join("volume");
+        let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+        let shown = root.join("forks/owner-mac");
+        fs::create_dir(&shown).unwrap();
+        fs::write(shown.join("edit.md"), b"from finder\n").unwrap();
+
+        let what = Shown::Fork(owner);
+        assert!(
+            volume
+                .show(&store, &what, main.git_tree_id(), true)
+                .is_err()
+        );
+        assert_eq!(fs::read(shown.join("edit.md")).unwrap(), b"from finder\n");
+        assert!(!shown.join("README").exists());
+        assert!(fs::read_dir(&volume.staging).unwrap().next().is_none());
+    }
+
+    /// An upload reopens only a regular file: a symlink or a FIFO swapped in since the
+    /// scan is refused at once, never followed and never waited on.
+    #[test]
+    fn an_upload_opens_only_a_regular_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("f");
+        fs::write(&file, b"x").unwrap();
+        assert!(open_regular(&file).is_ok());
+        let link = dir.path().join("l");
+        std::os::unix::fs::symlink(&file, &link).unwrap();
+        assert!(open_regular(&link).is_err(), "followed a symlink");
+        let fifo = dir.path().join("p");
+        let made = std::process::Command::new("mkfifo")
+            .arg(&fifo)
+            .status()
+            .unwrap();
+        assert!(made.success());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || tx.send(open_regular(&fifo).is_err()).unwrap());
+        assert!(
+            rx.recv_timeout(Duration::from_secs(5))
+                .expect("blocked on a FIFO"),
+            "opened a FIFO"
+        );
     }
 }

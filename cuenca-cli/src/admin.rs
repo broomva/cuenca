@@ -42,7 +42,8 @@ enum Act {
     },
     /// Create an owner fork (named `owner-<device>`) of a location, held by the volume:
     /// shown writable at `forks/<fork>/` for Finder, its edits snapshotted into drafts
-    /// within 60 s. One per device.
+    /// every 10 s. One per device. Refused if the location's main tracks paths its
+    /// `.forkignore` names.
     OwnerFork { location: String, fork: String },
     /// Move a fork to a new holder, by compare-and-swap on its epoch.
     TakeOver {

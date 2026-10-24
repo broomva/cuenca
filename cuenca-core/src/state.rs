@@ -312,7 +312,14 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             if name.as_str().contains("-from") {
                 return Err(CoreError::ReservedName(name.to_string()));
             }
-            if is_owner_fork(name) != holder.is_volume() {
+            // A sibling of a fork named `owner` would be named `owner-from-…`: an owner
+            // fork's name, held by its stale holder. So `owner` itself is kept.
+            if name.as_str() == OWNER_FORK_PREFIX.trim_end_matches('-') {
+                return Err(CoreError::ReservedName(name.to_string()));
+            }
+            if is_owner_fork(name) != holder.is_volume()
+                || (holder.is_volume() && *holder != Holder::volume())
+            {
                 return Err(CoreError::OwnerFork(format!(
                     "fork {name:?}: a fork named {OWNER_FORK_PREFIX}* is an owner fork, held by \
                      the volume, and the volume holds nothing else (holder {holder})"

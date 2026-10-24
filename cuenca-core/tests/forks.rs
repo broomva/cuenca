@@ -470,7 +470,7 @@ fn two_nodes_whose_ids_differ_only_in_case_are_each_kept() {
 #[test]
 fn a_fork_cannot_take_a_name_kept_for_siblings() {
     let (_d, store, _) = forked();
-    for name in ["f-from-nagentcntrl-e1", "x-from.00", "a-fromage"] {
+    for name in ["f-from-nagentcntrl-e1", "x-from.00", "a-fromage", "owner"] {
         assert!(matches!(
             store.create_fork(&fork(name), &loc("l"), &agent()),
             Err(CoreError::ReservedName(n)) if n == name
@@ -492,6 +492,7 @@ fn only_the_volume_holds_an_owner_fork_and_only_owner_forks() {
         ("owner-mac", owner()),
         ("mac", Holder::volume()),
         ("mac", holder("volume", "nOtherCNTRL")),
+        ("owner-mac", holder("volume", "nOtherCNTRL")),
         ("owners", Holder::volume()),
     ];
     for (name, who) in refused {

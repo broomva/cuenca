@@ -392,3 +392,28 @@ fn the_admin_socket_makes_owner_forks_and_keeps_the_volume_keyless() {
     assert_eq!(v["ok"], false, "{v}");
     s.stop();
 }
+
+/// Over HTTP, no key creates an owner fork: an agent's or an owner device's request is
+/// refused as forbidden, and nothing is appended.
+#[test]
+fn no_key_creates_an_owner_fork_over_http() {
+    let s = Server::start();
+    s.add_location("l1");
+    let a1 = s.mint("a1", Agent, "nA1CNTRL", grant(&["l1"], &[]));
+    s.whois.node("nA1CNTRL");
+    let r = s.post(
+        &a1,
+        "/v1/forks",
+        serde_json::json!({ "fork": "owner-a1", "location": "l1" }),
+    );
+    assert_eq!(r.status(), 403);
+    let body: serde_json::Value = r.json().unwrap();
+    assert_eq!(body["error"], "owner_fork", "{body}");
+    let r = s.post(
+        &a1,
+        "/v1/forks",
+        serde_json::json!({ "fork": "a1-work", "location": "l1" }),
+    );
+    assert_eq!(r.status(), 200);
+    s.stop();
+}
