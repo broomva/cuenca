@@ -313,4 +313,11 @@ mutate src/materialise.rs '    let size = file.metadata().map_err(|e| fail(&e))?
 mutate src/materialise.rs '        staged.insert(now);' '        staged.insert(oid);' --lib two_paths_share
 mutate src/materialise.rs '        rewritten = true;' '' --lib changed_after_the_scan
 mutate src/materialise.rs '        if head.get(path.as_str()) != Some(&entry) {' '        if true {' --lib changed_after_the_scan
+# A symlink's put is staged from its text; a path gone since the scan falls back to
+# where the scan listed its blob.
+mutate src/materialise.rs '        Entry::Symlink(_) => fs::read_link(path)' '        Entry::Symlink(_) if false => fs::read_link(path)' --lib symlink_sharing
+mutate src/materialise.rs '    if listed { Ok(oid) } else { Err(error) }' '    let _ = listed;
+    Err(error)' --lib gone_since_the_scan
+mutate src/materialise.rs '            Entry::Executable(_) => Entry::Executable(now),' '' --lib executable_changed
+mutate src/materialise.rs '        if now != oid && path.as_str() == cuenca_fs::FORKIGNORE {' '        if false {' --lib rules_changed_after
 exit $survived
