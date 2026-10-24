@@ -8,14 +8,19 @@ cd "$(dirname "$0")/.."
 . ../scripts/mutation-guard.sh
 backup=$guard_backup
 lock=$(git rev-parse --show-toplevel)/Cargo.lock
-cp "$lock" "$backup/Cargo.lock"
-# A failed copy back keeps the run dir, so .backup/path makes the next run refuse to start.
+# Checked byte for byte: a truncated copy (full scratch disk) would be copied back over the real lock.
+cp "$lock" "$backup/Cargo.lock" && cmp -s "$lock" "$backup/Cargo.lock" || { echo "cannot back up $lock"; exit 2; }
+# A failed copy back keeps the run dir, and .backup/path or .backup/lock-failed makes the
+# next run refuse to start. .backup/path goes only after the lock is back too.
 restore() {
   if [ -n "${current:-}" ] && ! cp "$backup/file" "$current"; then
     echo "restore failed: $current is still mutated; its original is $backup/file" >&2; trap - EXIT; exit 4
   fi
+  if ! cp "$backup/Cargo.lock" "$lock"; then
+    : >"$backup/lock-failed"
+    echo "restore failed: $lock; its original is $backup/Cargo.lock" >&2; trap - EXIT; exit 4
+  fi
   current=; rm -f "$backup/path"
-  cp "$backup/Cargo.lock" "$lock" || { echo "restore failed: $lock; its original is $backup/Cargo.lock" >&2; trap - EXIT; exit 4; }
 }
 trap 'guard_kill; restore; guard_cleanup' EXIT
 trap 'exit 130' INT TERM
