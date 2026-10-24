@@ -38,9 +38,14 @@ enum Verb {
     },
     /// List the locations and forks this key may read.
     Forks,
-    /// Fork a location: a new fork of its main, held by you.
+    /// Fork a location: a new fork of its main, held by you. With `--from`, fork a
+    /// fork instead: a new fork of its head (an owner fork is snapshotted first).
     Fork {
-        location: String,
+        #[arg(required_unless_present = "from", conflicts_with = "from")]
+        location: Option<String>,
+        /// The fork to fork, at its head, instead of a location's main.
+        #[arg(long)]
+        from: Option<String>,
         /// The fork's name (lowercase ASCII, digits, `.`, `_`, `-`); generated if absent.
         #[arg(long)]
         name: Option<String>,
@@ -178,7 +183,18 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             }
         }
         Verb::Forks => verbs::forks(&client()?)?,
-        Verb::Fork { location, name } => verbs::fork(&client()?, &location, name.as_deref())?,
+        Verb::Fork {
+            location,
+            from,
+            name,
+        } => {
+            let of = match (&location, &from) {
+                (_, Some(f)) => verbs::ForkOf::Fork(f),
+                (Some(l), None) => verbs::ForkOf::Location(l),
+                (None, None) => unreachable!("clap requires a location or --from"),
+            };
+            verbs::fork(&client()?, of, name.as_deref())?
+        }
         Verb::Checkout { fork, dir } => verbs::checkout(&client()?, &fork, &dir)?,
         Verb::Status { dir } => verbs::status(client().ok().as_ref(), &dir)?,
         Verb::Snapshot {

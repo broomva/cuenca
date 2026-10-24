@@ -172,6 +172,16 @@ impl Client {
         Ok(c.fork)
     }
 
+    /// A fork of the fork `from`, at its head (an owner fork is snapshotted first).
+    pub fn branch_fork(&self, fork: &ForkName, from: &ForkName) -> Result<Fork> {
+        #[derive(Deserialize)]
+        struct Created {
+            fork: Fork,
+        }
+        let c: Created = self.post("/v1/forks", json!({ "fork": fork, "from": from }))?;
+        Ok(c.fork)
+    }
+
     /// A fork's head tree, checked against its id.
     pub fn fork_tree(&self, name: &ForkName) -> Result<(GitOid, Tree)> {
         checked(self.get(&format!("/v1/forks/{name}/tree"))?)

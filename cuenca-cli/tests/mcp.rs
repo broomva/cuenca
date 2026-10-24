@@ -124,6 +124,10 @@ async fn an_mcp_client_lists_the_agent_verbs_and_forks_snapshots_and_diffs() {
         .await;
     assert_eq!(v["fork"]["name"], "m1");
     assert_eq!(v["fork"]["location"], "site");
+    let v = mcp
+        .ok("fork", json!({ "from": "m1", "name": "m1-copy" }))
+        .await;
+    assert_eq!(v["fork"]["from"], "m1", "{v}");
 
     let work = tempfile::tempdir().unwrap();
     let co = work.path().join("m1");
@@ -285,6 +289,7 @@ async fn owner_acts_are_no_tools_and_denials_are_structured_errors() {
     for (tool, args) in [
         ("fork", json!({ "location": "site", "nmae": "typo" })),
         ("fork", json!({})),
+        ("fork", json!({ "location": "site", "from": "m1" })),
         ("forks", json!({ "all": true })),
         ("status", json!({ "dir": "relative/path" })),
         ("status", json!({ "dir": 7 })),
@@ -298,9 +303,11 @@ async fn owner_acts_are_no_tools_and_denials_are_structured_errors() {
         let schema = Value::Object((*mcp1.tools[tool].input_schema).clone());
         let e = mcp1.try_call(tool, args.clone()).await.expect_err(tool);
         assert!(e.contains(tool), "{tool} {args}: {e}");
-        // The schema refuses it too, except diff's and log's forms, which only the
-        // server checks (no top-level oneOf/anyOf in a tool's input schema).
-        let forms = matches!(tool, "diff" | "log") && args.get("dir").is_none_or(|d| d.is_string());
+        // The schema refuses it too, except fork's, diff's and log's forms, which only
+        // the server checks (no top-level oneOf/anyOf in a tool's input schema).
+        let forms = matches!(tool, "fork" | "diff" | "log")
+            && args.get("dir").is_none_or(|d| d.is_string())
+            && args.get("nmae").is_none();
         assert!(
             !jsonschema::is_valid(&schema, &args) || forms,
             "{tool} {args}"

@@ -1,6 +1,7 @@
 //! `.forkignore`: the host-local paths a snapshot never publishes.
 
 use crate::error::{FsError, Result};
+use cuenca_tree::{Entry, GitOid, Tree};
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use rustix::fs::{CWD, Mode, OFlags, openat};
 use std::fs::File;
@@ -80,9 +81,31 @@ impl ForkIgnore {
         }
         let mut bytes = Vec::new();
         file.read_to_end(&mut bytes).map_err(FsError::io(&path))?;
-        let text = std::str::from_utf8(&bytes)
+        Ok((Self::from_bytes(&bytes)?, Some(bytes)))
+    }
+
+    /// Rules from the bytes of a `.forkignore`, which must be UTF-8.
+    fn from_bytes(bytes: &[u8]) -> Result<Self> {
+        let text = std::str::from_utf8(bytes)
             .map_err(|_| FsError::Ignore("the file is not UTF-8".into()))?;
-        Ok((Self::parse(text)?, Some(bytes)))
+        Self::parse(text)
+    }
+
+    /// The rules a snapshot of a directory holding `tree` follows, read the way a scan
+    /// reads them from disk: the `.forkignore` at its root, which must be a file (an
+    /// executable counts; a symlink or a folder does not) of UTF-8 text, or the
+    /// defaults when there is none. `read` gives a blob's bytes by its id.
+    pub fn for_tree(
+        tree: &Tree,
+        read: impl FnOnce(GitOid) -> std::result::Result<Vec<u8>, String>,
+    ) -> Result<Self> {
+        match tree.get(FORKIGNORE) {
+            None => Ok(Self::defaults()),
+            Some(Entry::File(oid) | Entry::Executable(oid)) => {
+                Self::from_bytes(&read(*oid).map_err(FsError::Ignore)?)
+            }
+            Some(_) => Err(not_a_file()),
+        }
     }
 
     /// Whether `path` (relative to the root) is ignored.
@@ -126,6 +149,29 @@ pub(crate) fn open_dir(root: &Path) -> Result<OwnedFd> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use cuenca_tree::RepoPath;
+
+    /// A stored tree's rules are read as a scan reads them from disk: a file or an
+    /// executable of UTF-8 text, or the defaults when there is none; a symlink or text
+    /// that is not UTF-8 is refused, never read loosely.
+    #[test]
+    fn rules_from_a_tree_are_read_as_strictly_as_from_disk() {
+        let rules = b"secret\n".to_vec();
+        let at = |entry: Entry| {
+            Tree::from_entries([(RepoPath::new(FORKIGNORE).unwrap(), entry)]).unwrap()
+        };
+        let oid = GitOid::for_blob(&rules);
+        let read = |bytes: Vec<u8>| move |_| Ok::<_, String>(bytes);
+        for entry in [Entry::File(oid), Entry::Executable(oid)] {
+            let got = ForkIgnore::for_tree(&at(entry), read(rules.clone())).unwrap();
+            assert!(got.excludes("secret") && !got.excludes(".env"));
+        }
+        let none = ForkIgnore::for_tree(&Tree::new(), read(vec![])).unwrap();
+        assert!(none.excludes(".env"));
+        assert!(ForkIgnore::for_tree(&at(Entry::Symlink(oid)), read(rules.clone())).is_err());
+        assert!(ForkIgnore::for_tree(&at(Entry::File(oid)), read(vec![b's', 0xff])).is_err());
+        assert!(ForkIgnore::for_tree(&at(Entry::File(oid)), |_| Err("gone".into())).is_err());
+    }
 
     #[test]
     fn the_defaults_cover_the_spec_list_at_any_depth() {
