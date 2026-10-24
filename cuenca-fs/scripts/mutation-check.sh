@@ -5,15 +5,23 @@
 # restored after each mutant, also on interrupt.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-backup=$(mktemp -d)
+. ../scripts/mutation-guard.sh
+backup=$guard_backup
 lock=$(git rev-parse --show-toplevel)/Cargo.lock
 cp "$lock" "$backup/Cargo.lock"
-restore() { [ -n "${current:-}" ] && cp "$backup/file" "$current"; current=; cp "$backup/Cargo.lock" "$lock"; }
-trap 'restore; rm -rf "$backup"' EXIT
+# A failed copy back keeps the run dir, so .backup/path makes the next run refuse to start.
+restore() {
+  if [ -n "${current:-}" ] && ! cp "$backup/file" "$current"; then
+    echo "restore failed: $current is still mutated; its original is $backup/file" >&2; trap - EXIT; exit 4
+  fi
+  current=; rm -f "$backup/path"
+  cp "$backup/Cargo.lock" "$lock" || { echo "restore failed: $lock; its original is $backup/Cargo.lock" >&2; trap - EXIT; exit 4; }
+}
+trap 'guard_kill; restore; guard_cleanup' EXIT
 trap 'exit 130' INT TERM
 
 # A mutant only counts as killed against a suite that passes unmutated.
-if ! cargo test -q -p cuenca-fs >"$backup/log" 2>&1; then
+if ! bounded cargo test -q -p cuenca-fs >"$backup/log" 2>&1; then
   echo "baseline is red: fix the suite before reading any mutant verdict"; cat "$backup/log"; exit 2
 fi
 echo "baseline  green"
@@ -21,7 +29,8 @@ echo "baseline  green"
 survived=0
 mutate() { # file, old, new, then the cargo test arguments that should catch it
   local file=$1 old=$2 new=$3; shift 3
-  current=$file; cp "$file" "$backup/file"
+  cp "$file" "$backup/file" && echo "$PWD/$file" >"$backup/path" || { echo "cannot back up $file"; exit 2; }
+  current=$file
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
@@ -29,7 +38,11 @@ if s.count(sys.argv[2]) != 1: sys.exit("anchor not unique: " + sys.argv[2])
 p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $file: $old"; survived=1; restore; return; fi
-  if cargo test -q -p cuenca-fs "$@" >"$backup/log" 2>&1; then
+  bounded cargo test -q -p cuenca-fs "$@" >"$backup/log" 2>&1; local status=$?
+  if [ "$status" -ge 128 ]; then
+    # The guard or the test run was itself killed by a signal: no verdict is possible.
+    echo "ABORTED   $file: $old (status $status)"; exit 3
+  elif [ "$status" -eq 0 ]; then
     if ! grep -qE 'test result: ok\. [1-9]' "$backup/log"; then
       echo "NO TESTS  $file: $old (the filter $* ran no test)"; survived=1
     else
@@ -37,6 +50,13 @@ PY
     fi
   elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' "$backup/log"; then
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; survived=1
+  elif [ "$status" -eq 124 ] || [ "$status" -eq 125 ]; then
+    # Stopped by the guard: a kill only if the tests had started, not mid-build.
+    if grep -qE '^running [0-9]+ tests?$' "$backup/log"; then
+      echo "killed    $file: $old ($(tail -n 1 "$backup/log"))"
+    else
+      echo "NO TEST   $file: $old (stopped before any test ran: $(tail -n 1 "$backup/log"))"; survived=1
+    fi
   else
     echo "killed    $file: $old"
   fi
