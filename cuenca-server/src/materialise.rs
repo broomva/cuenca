@@ -37,12 +37,9 @@
 //! `._*` and the other defaults never reach a changeset unless the fork's own rules let
 //! them), and publishes what changed as a draft of the fork,
 //! written by the volume; the [`Materialiser`] does it every
-//! [`VolumeConfig::snapshot_interval`] (10 s by default; the spec's row is 60 s). A
-//! snapshot takes only changes that have stood for [`VolumeConfig::settle`] (2 s by
-//! default, by inode change time), so a file still being written is never published
-//! torn; it goes with a later pass. A file the authority cannot read fails that fork's
-//! snapshot loudly, naming the path, and nothing of it is published until a later pass
-//! succeeds.
+//! [`VolumeConfig::snapshot_interval`] (10 s by default; the spec's row is 60 s). A file
+//! the authority cannot read, or one that keeps changing, fails that fork's snapshot
+//! loudly, naming the path, and nothing of it is published until a later pass succeeds.
 //!
 //! # Modes
 //!
@@ -74,6 +71,12 @@
 //! ([`Authority::branch_fork`]): the new fork holds every write the snapshot read, and
 //! what Finder writes later stays in the owner fork.
 //!
+//! A snapshot reads each file as it is at that moment. A file a client is still
+//! writing is taken as far as it has been written (as `git add` would take it): the
+//! draft, and a fork started from it, hold that partial file, and the owner fork's next
+//! snapshot holds the finished one, so nothing is lost. A snapshot that should wait for
+//! writes to settle is BRO-3450.
+//!
 //! # Trust
 //!
 //! Blob content comes from the store's object directory and is hashed against its id
@@ -88,7 +91,7 @@
 //! until the log moves again, so nothing but the materialiser may write `.cuenca/`. One
 //! materialiser per volume is enforced by a lock on `.cuenca/lock`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -96,11 +99,11 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use cuenca_core::{ChangesetId, Fork, ForkName, Holder, LocationName, Store, Writer};
 use cuenca_fs::ObjectDir;
-use cuenca_tree::{Changeset, GitOid, Op};
+use cuenca_tree::{Changeset, Entry, GitOid, Op};
 use rustix::fs::{CWD, FlockOperation, RenameFlags};
 
 use crate::Authority;
@@ -219,9 +222,6 @@ pub struct Volume {
     /// Trees that failed, and when; tried again after `retry_after`.
     failed: HashMap<Shown, (GitOid, Instant)>,
     retry_after: Duration,
-    /// How long a change to an owner fork must have stood before a snapshot takes it
-    /// ([`Volume::set_settle`]).
-    settle: Duration,
     /// Each owner fork's stat cache, so a snapshot reads only files that changed.
     caches: HashMap<ForkName, cuenca_fs::StatCache>,
     /// The lock that keeps this the volume's only materialiser, held while it lives.
@@ -271,7 +271,6 @@ impl Volume {
             shown,
             failed: HashMap::new(),
             retry_after: RETRY_AFTER,
-            settle: SETTLE,
             caches: HashMap::new(),
             _lock: lock,
             next_staging: 0,
@@ -292,19 +291,6 @@ impl Volume {
     /// default).
     pub fn set_retry_after(&mut self, wait: Duration) {
         self.retry_after = wait;
-    }
-
-    /// How long a change to an owner fork must have stood, by its inode change time,
-    /// before a snapshot takes it ([`SETTLE`] by default): a file changed more recently
-    /// may still be being written, and is left as the fork's head has it until a later
-    /// snapshot, so no snapshot holds a file torn in the middle of a write.
-    pub fn set_settle(&mut self, settle: Duration) {
-        self.settle = settle;
-    }
-
-    /// See [`Volume::set_settle`].
-    pub fn settle(&self) -> Duration {
-        self.settle
     }
 
     /// Whether a tree that failed is due to be tried again.
@@ -442,7 +428,7 @@ impl Volume {
             if !is_owner(&fork) {
                 continue;
             }
-            match self.snapshot_owner_fork(store, &fork, None) {
+            match self.snapshot_owner_fork(store, &fork) {
                 None => {}
                 Some(Ok((published, skipped))) => {
                     match published {
@@ -467,20 +453,10 @@ impl Volume {
     /// when the volume does not show it (nothing was written to it here, so the log's
     /// head is all of it), else what was published and what was left out, or why the
     /// snapshot failed (nothing of it was published).
-    ///
-    /// Only changes that last happened before `before` are taken, by the inode change
-    /// time (which a client cannot set), read after the scan: by default, the
-    /// snapshot's start less [`Volume::settle`]. A file changed since may still be being
-    /// written: it is left as the head has it, for a later snapshot, never torn into
-    /// this one. Deletions are always taken (a deletion is never torn). A `.forkignore`
-    /// changed since fails the snapshot, to be tried again. A fork of the owner fork
-    /// passes the moment it was asked for, having waited [`Volume::settle`] past it
-    /// ([`Authority::branch_fork`]).
     pub fn snapshot_owner_fork(
         &mut self,
         store: &Store,
         fork: &cuenca_core::Fork,
-        before: Option<SystemTime>,
     ) -> Option<Result<SnapshotOne, String>> {
         let what = Shown::Fork(fork.name.clone());
         let dir = self.root.join(what.rel());
@@ -490,44 +466,67 @@ impl Volume {
         {
             return None;
         }
-        let before = before.unwrap_or_else(|| SystemTime::now() - self.settle);
         let cache = self.caches.entry(fork.name.clone()).or_default();
-        Some(snapshot_one(store, fork, &dir, cache, before))
+        Some(snapshot_one(store, fork, &dir, cache))
     }
 }
-
-/// How long a change to an owner fork stands before a snapshot takes it, by default
-/// ([`Volume::set_settle`]): the stat cache's own margin for a settled file.
-pub const SETTLE: Duration = Duration::from_secs(2);
 
 /// The draft one snapshot published, if any, and what it left out.
 pub type SnapshotOne = (Option<(ChangesetId, u64)>, Vec<cuenca_fs::Skipped>);
 
 /// Snapshot one owner fork's directory against its head; publish the changes, if any,
-/// as the volume under the fork's epoch: only what last changed before `before`
-/// ([`Volume::snapshot_owner_fork`]).
+/// as the volume under the fork's epoch.
 fn snapshot_one(
     store: &Store,
     fork: &cuenca_core::Fork,
     dir: &Path,
     cache: &mut cuenca_fs::StatCache,
-    before: SystemTime,
 ) -> Result<SnapshotOne, String> {
     let head = store.tree(fork.head).map_err(|e| e.to_string())?;
     let mut snap = cuenca_fs::snapshot(dir, &head, cache).map_err(|e| e.to_string())?;
-    settled_before(&mut snap, &head, dir, before)?;
     if snap.is_clean() {
         return Ok((None, snap.skipped));
     }
     let mut batch = store.blob_batch();
+    // Files that changed between the scan and their upload, by path: what they hold
+    // now is taken instead (a write still in progress is taken as far as it has gone).
+    let mut changed: HashMap<PathBuf, GitOid> = HashMap::new();
     for blob in &snap.new_blobs {
-        let added = match &blob.content {
-            cuenca_fs::Content::File(path) => batch.add(blob.oid, blob.size, open_regular(path)?),
-            cuenca_fs::Content::Inline(bytes) => batch.add(blob.oid, blob.size, bytes.as_slice()),
-        };
-        // A file that changed since the scan hashes to another id: refused, and the
-        // next pass reads it again.
-        added.map_err(|e| e.to_string())?;
+        match &blob.content {
+            cuenca_fs::Content::File(path) => {
+                let now = upload_file(&mut batch, path, blob.oid, blob.size)?;
+                if now != blob.oid {
+                    changed.insert(path.clone(), now);
+                }
+            }
+            cuenca_fs::Content::Inline(bytes) => {
+                batch
+                    .add(blob.oid, blob.size, bytes.as_slice())
+                    .map_err(|e| e.to_string())?;
+            }
+        }
+    }
+    if !changed.is_empty() {
+        let ops = snap
+            .changeset
+            .ops
+            .iter()
+            .map(|op| match op {
+                Op::Put { path, entry } => match changed.get(&dir.join(path.as_str())) {
+                    Some(&oid) => Op::put(
+                        path.clone(),
+                        match entry {
+                            Entry::Executable(_) => Entry::Executable(oid),
+                            Entry::Symlink(_) => Entry::Symlink(oid),
+                            _ => Entry::File(oid),
+                        },
+                    ),
+                    None => op.clone(),
+                },
+                op => op.clone(),
+            })
+            .collect();
+        snap.changeset = Changeset::new(&head, ops).map_err(|e| e.to_string())?;
     }
     batch.commit().map_err(|e| e.to_string())?;
     let writer = Writer::new(Holder::volume(), fork.epoch());
@@ -537,54 +536,53 @@ fn snapshot_one(
     Ok((Some((published.id, published.offset)), snap.skipped))
 }
 
-/// Keep in `snap` only the puts whose path last changed before `at`, by its inode
-/// change time read after the scan (so a change made while the scan read it counts as
-/// after), and the blobs they name. A path whose change time cannot be read is left out
-/// too. Deletions stay.
-fn settled_before(
-    snap: &mut cuenca_fs::Snapshot,
-    head: &cuenca_tree::Tree,
-    dir: &Path,
-    at: SystemTime,
-) -> Result<(), String> {
-    use std::os::unix::fs::MetadataExt;
-    let at = at
-        .duration_since(SystemTime::UNIX_EPOCH)
-        .map_err(|e| e.to_string())?;
-    let at = (at.as_secs() as i64, i64::from(at.subsec_nanos()));
-    let before = |path: &str| {
-        fs::symlink_metadata(dir.join(path)).is_ok_and(|m| (m.ctime(), m.ctime_nsec()) < at)
-    };
-    let mut kept = Vec::new();
-    for op in &snap.changeset.ops {
-        match op {
-            Op::Put { path, .. } if !before(path.as_str()) => {
-                if path.as_str() == cuenca_fs::FORKIGNORE {
-                    return Err(format!(
-                        "{}: changed while the fork was taken; fork again",
-                        dir.join(path.as_str()).display()
-                    ));
-                }
+/// How many times a file that keeps changing between its hash and its upload is read
+/// again before the snapshot fails.
+const UPLOAD_ATTEMPTS: u32 = 5;
+
+/// Stage the file at `path`, which the scan found holding blob `oid` of `size` bytes:
+/// if it has changed since (the store hashes what it takes, and refuses a mismatch), hash
+/// what it holds now and stage that instead. The blob id staged. A file that keeps
+/// changing fails, naming it.
+fn upload_file(
+    batch: &mut cuenca_core::BlobBatch<'_>,
+    path: &Path,
+    mut oid: GitOid,
+    mut size: u64,
+) -> Result<GitOid, String> {
+    use cuenca_core::CoreError;
+    for _ in 0..UPLOAD_ATTEMPTS {
+        match batch.add(oid, size, open_regular(path)?) {
+            Ok(_) => return Ok(oid),
+            Err(CoreError::OidMismatch { .. } | CoreError::Hash(_)) => {
+                (oid, size) = hash_file(path)?;
             }
-            op => kept.push(op.clone()),
+            Err(e) => return Err(format!("{}: {e}", path.display())),
         }
     }
-    if kept.len() == snap.changeset.ops.len() {
-        return Ok(());
+    Err(format!(
+        "{}: kept changing while it was uploaded; snapshot again",
+        path.display()
+    ))
+}
+
+/// The blob id and size of what the file at `path` holds now.
+fn hash_file(path: &Path) -> Result<(GitOid, u64), String> {
+    use std::io::Read as _;
+    let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
+    let mut file = open_regular(path)?;
+    let size = file.metadata().map_err(|e| fail(&e))?.len();
+    let mut hasher = cuenca_tree::BlobHasher::new(size);
+    let mut buf = vec![0; 64 * 1024];
+    loop {
+        let n = file.read(&mut buf).map_err(|e| fail(&e))?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
     }
-    let changeset = Changeset::new(head, kept).map_err(|e| e.to_string())?;
-    let named: HashSet<GitOid> = changeset
-        .ops
-        .iter()
-        .filter_map(|op| match op {
-            Op::Put { entry, .. } => Some(entry.oid()),
-            _ => None,
-        })
-        .collect();
-    snap.new_blobs.retain(|b| named.contains(&b.oid));
-    snap.tree = changeset.apply(head).map_err(|e| e.to_string())?;
-    snap.changeset = changeset;
-    Ok(())
+    let blob = hasher.finish().map_err(|e| fail(&e))?;
+    Ok((blob.oid(), size))
 }
 
 /// Open a file the scan found, again by its path, for its upload: never through a
@@ -747,9 +745,6 @@ pub struct VolumeConfig {
     pub retry_after: Duration,
     /// How often owner forks are snapshotted.
     pub snapshot_interval: Duration,
-    /// How long a change to an owner fork stands before a snapshot takes it
-    /// ([`Volume::set_settle`]).
-    pub settle: Duration,
 }
 
 impl VolumeConfig {
@@ -759,7 +754,6 @@ impl VolumeConfig {
             interval: Duration::from_secs(1),
             retry_after: RETRY_AFTER,
             snapshot_interval: SNAPSHOT_INTERVAL,
-            settle: SETTLE,
         }
     }
 }
@@ -778,7 +772,6 @@ impl Materialiser {
     pub fn spawn(authority: Arc<Authority>, config: VolumeConfig) -> io::Result<Self> {
         let mut volume = Volume::open(&config.root, authority.store.object_dir())?;
         volume.set_retry_after(config.retry_after);
-        volume.set_settle(config.settle);
         let volume = Arc::new(Mutex::new(volume));
         // Forking an owner fork snapshots it under the same lock ([`Authority::branch_fork`]).
         authority.set_volume(volume.clone())?;
@@ -896,6 +889,26 @@ mod tests {
         assert_eq!(fs::read(shown.join("edit.md")).unwrap(), b"from finder\n");
         assert!(!shown.join("README").exists());
         assert!(fs::read_dir(&volume.staging).unwrap().next().is_none());
+    }
+
+    /// A file that changed between the scan and its upload is staged as it is now,
+    /// under its new id, never refused for the old one; a file that keeps changing (here,
+    /// one that is gone) fails, naming it.
+    #[test]
+    fn an_upload_takes_what_the_file_holds_now() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let file = dir.path().join("f");
+        fs::write(&file, b"written later\n").unwrap();
+        let scanned = GitOid::for_blob(b"scan\n");
+        let mut batch = store.blob_batch();
+        let got = upload_file(&mut batch, &file, scanned, 5).unwrap();
+        assert_eq!(got, GitOid::for_blob(b"written later\n"));
+        batch.commit().unwrap();
+        assert_eq!(store.read_blob(got).unwrap(), b"written later\n");
+        let mut batch = store.blob_batch();
+        let err = upload_file(&mut batch, &dir.path().join("gone"), scanned, 5).unwrap_err();
+        assert!(err.contains("gone"), "{err}");
     }
 
     /// An upload reopens only a regular file: a symlink or a FIFO swapped in since the

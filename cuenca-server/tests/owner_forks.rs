@@ -89,8 +89,6 @@ fn an_owner_fork_is_shown_once_writable_and_never_replaced() {
     let store = setup(dir.path());
     let root = dir.path().join("volume");
     let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    // Taken at once here; settling has tests of its own.
-    volume.set_settle(Duration::ZERO);
     let pass = volume.converge(&store).unwrap();
     assert_eq!(pass.built.len(), 2, "{pass:?}");
     let shown = root.join("forks/owner-mac");
@@ -145,8 +143,6 @@ fn an_owner_fork_without_a_record_is_adopted_not_rebuilt() {
     let store = setup(dir.path());
     let root = dir.path().join("volume");
     let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    // Taken at once here; settling has tests of its own.
-    volume.set_settle(Duration::ZERO);
     volume.converge(&store).unwrap();
     let shown = root.join("forks/owner-mac");
     std::fs::write(shown.join("edit.md"), b"kept\n").unwrap();
@@ -154,8 +150,6 @@ fn an_owner_fork_without_a_record_is_adopted_not_rebuilt() {
     std::fs::remove_file(root.join(".cuenca/state/forks/owner-mac")).unwrap();
 
     let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    // Taken at once here; settling has tests of its own.
-    volume.set_settle(Duration::ZERO);
     assert_eq!(volume.shown(&owner()), None);
     let pass = volume.converge(&store).unwrap();
     assert!(pass.built.is_empty() && pass.failed.is_empty(), "{pass:?}");
@@ -217,8 +211,6 @@ fn finder_metadata_never_reaches_a_changeset() {
     let store = setup(dir.path());
     let root = dir.path().join("volume");
     let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    // Taken at once here; settling has tests of its own.
-    volume.set_settle(Duration::ZERO);
     volume.converge(&store).unwrap();
     let shown = root.join("forks/owner-mac");
     for (p, c) in [
@@ -252,8 +244,6 @@ fn a_symlink_or_executable_overwritten_from_finder_is_recorded_10_of_10() {
     let store = setup(dir.path());
     let root = dir.path().join("volume");
     let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    // Taken at once here; settling has tests of its own.
-    volume.set_settle(Duration::ZERO);
     volume.converge(&store).unwrap();
     let shown = root.join("forks/owner-mac");
     for round in 0..10 {
@@ -299,8 +289,6 @@ fn an_unreadable_file_fails_the_snapshot_loudly() {
     let store = setup(dir.path());
     let root = dir.path().join("volume");
     let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    // Taken at once here; settling has tests of its own.
-    volume.set_settle(Duration::ZERO);
     volume.converge(&store).unwrap();
     let shown = root.join("forks/owner-mac");
     let len = store.len().unwrap();
@@ -352,8 +340,6 @@ fn owner_fork_drafts_are_the_volumes() {
     ));
     let root = dir.path().join("volume");
     let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    // Taken at once here; settling has tests of its own.
-    volume.set_settle(Duration::ZERO);
     volume.converge(&store).unwrap();
     std::fs::write(root.join("forks/owner-mac/x"), b"x").unwrap();
     volume.snapshot_owner_forks(&store).unwrap();
@@ -575,27 +561,15 @@ fn forking_an_owner_fork_while_it_is_written_loses_nothing_10_of_10() {
         assert_eq!(r.status(), 200, "{}", r.text().unwrap());
         let tree = s.fork_head(&mac, &format!("mac-{i}"));
         let all = (0..finished).all(|n| tree.get(&format!("w{n:04}.md")) == Some(&content(n)));
-        // Whatever else it holds is a write that finished, whole: never half a file.
-        let whole = tree
-            .entries()
-            .filter_map(|(p, e)| {
-                Some((
-                    p.as_str()
-                        .strip_prefix('w')?
-                        .strip_suffix(".md")?
-                        .parse::<usize>()
-                        .ok()?,
-                    e,
-                ))
-            })
-            .all(|(n, e)| *e == content(n));
-        if all && whole {
+        if all {
             held += 1;
         }
     }
     stop.store(true, Ordering::SeqCst);
     let written = writer.join().unwrap();
     assert_eq!(held, 10, "forks holding every finished write, whole");
+    // A write still in progress at a snapshot may be taken as far as it had gone (the
+    // stated limit, BRO-3450); its finished version is the owner fork's, checked below.
     // Every write reaches the owner fork: one more fork snapshots it first.
     assert_eq!(fork_from(&s, &mac, "mac-end", "owner-mac").status(), 200);
     let owner = s.fork_head(&mac, "owner-mac");
@@ -705,8 +679,6 @@ fn a_fork_rule_naming_a_tracked_path_fails_the_snapshot() {
     let store = setup(dir.path());
     let root = dir.path().join("volume");
     let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    // Taken at once here; settling has tests of its own.
-    volume.set_settle(Duration::ZERO);
     volume.converge(&store).unwrap();
     let shown = root.join("forks/owner-mac");
     let len = store.len().unwrap();
@@ -727,30 +699,28 @@ fn a_fork_rule_naming_a_tracked_path_fails_the_snapshot() {
     );
 }
 
-/// A file still being written when the fork is asked for is never torn into the fork:
-/// the fork leaves it out (it is a later write), and the owner fork's next snapshot
-/// has it whole.
+/// A file still being written when the fork is asked for is taken as far as it has
+/// been written (the stated limit; BRO-3450 makes snapshots wait for writes to
+/// settle), and nothing is lost: the owner fork's next snapshot, and the next fork,
+/// hold it whole.
 #[test]
-fn a_file_being_written_is_not_torn_into_a_fork() {
+fn a_file_being_written_while_forked_is_whole_in_the_next_snapshot() {
     use std::io::Write as _;
     let (s, mac, shown, _dir, materialiser) = forking_setup();
     let whole = vec![b'x'; 8192];
     let mut f = std::fs::File::create(shown.join("big.bin")).unwrap();
     f.write_all(&whole[..4096]).unwrap();
     f.sync_all().unwrap();
-    let finisher = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(500));
-        f.write_all(&whole[4096..]).unwrap();
-    });
     let r = fork_from(&s, &mac, "mac-1", "owner-mac");
     assert_eq!(r.status(), 200, "{}", r.text().unwrap());
-    finisher.join().unwrap();
+    f.write_all(&whole[4096..]).unwrap();
+    drop(f);
+    let half = Entry::File(GitOid::for_blob(&[b'x'; 4096]));
+    assert_eq!(s.fork_head(&mac, "mac-1").get("big.bin"), Some(&half));
     let big = Entry::File(GitOid::for_blob(&[b'x'; 8192]));
-    let held = s.fork_head(&mac, "mac-1").get("big.bin").copied();
-    assert!(held.is_none() || held == Some(big), "torn: {held:?}");
-    // The next fork takes it, whole.
     assert_eq!(fork_from(&s, &mac, "mac-2", "owner-mac").status(), 200);
     assert_eq!(s.fork_head(&mac, "mac-2").get("big.bin"), Some(&big));
+    assert_eq!(s.fork_head(&mac, "owner-mac").get("big.bin"), Some(&big));
     drop(materialiser);
     s.stop();
 }
@@ -778,12 +748,20 @@ fn a_refused_fork_of_an_owner_fork_snapshots_nothing() {
     s.stop();
 }
 
-/// Forking an owner fork holds no lock a revocation waits for while it settles and
-/// snapshots: revoking someone else meanwhile is immediate.
+/// Forking an owner fork holds no lock a revocation waits for while it snapshots:
+/// revoking someone else meanwhile is immediate.
 #[test]
 fn a_revocation_does_not_wait_for_a_fork() {
-    let (s, mac, _shown, _dir, materialiser) = forking_setup();
+    let (s, mac, shown, _dir, materialiser) = forking_setup();
     s.mint("other", Agent, "nOtherCNTRL", grant(&["l1"], &[]));
+    // A file the authority cannot read keeps the fork in its snapshot attempts (three,
+    // 200 ms apart) for a while, then refuses it.
+    std::fs::write(shown.join("secret.md"), b"locked\n").unwrap();
+    std::fs::set_permissions(
+        shown.join("secret.md"),
+        std::fs::Permissions::from_mode(0o000),
+    )
+    .unwrap();
     let url = s.url.clone();
     let forking = std::thread::spawn(move || {
         reqwest::blocking::Client::new()
@@ -794,7 +772,7 @@ fn a_revocation_does_not_wait_for_a_fork() {
             .unwrap()
             .status()
     });
-    std::thread::sleep(Duration::from_millis(500));
+    std::thread::sleep(Duration::from_millis(100));
     // On a thread with a deadline: a revocation stuck behind the fork fails the test
     // rather than hanging it.
     let (tx, rx) = std::sync::mpsc::channel();
@@ -810,53 +788,17 @@ fn a_revocation_does_not_wait_for_a_fork() {
         .unwrap();
         let _ = tx.send((v, start.elapsed()));
     });
-    let Ok((v, took)) = rx.recv_timeout(Duration::from_millis(500)) else {
+    let Ok((v, took)) = rx.recv_timeout(Duration::from_millis(200)) else {
         // Stuck behind the fork. Exit at once: a server whose locks are stuck cannot
         // shut down, so failing the test the usual way would hang it instead.
         eprintln!("the revocation waited for the fork");
         std::process::exit(101);
     };
     assert_eq!(v["ok"], true, "{v}");
-    eprintln!("revoked in {took:?} while a fork settled");
-    assert_eq!(forking.join().unwrap(), 200);
+    eprintln!("revoked in {took:?} while a fork was snapshotting");
+    assert_eq!(forking.join().unwrap(), 409);
     drop(materialiser);
     s.stop();
-}
-
-/// A change is taken only once it has stood for the settle time, by inode change time:
-/// a file still being written is left out of the snapshot, never published torn, and
-/// the next snapshot after it settles takes it whole.
-#[test]
-fn a_snapshot_takes_only_settled_changes() {
-    use std::io::Write as _;
-    let dir = tempfile::tempdir().unwrap();
-    let store = setup(dir.path());
-    let root = dir.path().join("volume");
-    let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    assert_eq!(volume.settle(), Duration::from_secs(2), "the default");
-    volume.set_settle(Duration::from_millis(400));
-    volume.converge(&store).unwrap();
-    let shown = root.join("forks/owner-mac");
-    let mut f = std::fs::File::create(shown.join("big.bin")).unwrap();
-    f.write_all(&[b'x'; 4096]).unwrap();
-    f.sync_all().unwrap();
-    let len = store.len().unwrap();
-    let snapped = volume.snapshot_owner_forks(&store).unwrap();
-    assert!(
-        snapped.published.is_empty(),
-        "half a file published: {snapped:?}"
-    );
-    assert_eq!(store.len().unwrap(), len);
-    f.write_all(&[b'x'; 4096]).unwrap();
-    drop(f);
-    std::thread::sleep(Duration::from_millis(600));
-    let snapped = volume.snapshot_owner_forks(&store).unwrap();
-    assert_eq!(snapped.published.len(), 1, "{snapped:?}");
-    let head = store.fork_head(&fork("owner-mac")).unwrap();
-    assert_eq!(
-        head.get("big.bin"),
-        Some(&Entry::File(GitOid::for_blob(&[b'x'; 8192])))
-    );
 }
 
 /// A snapshot that fails is tried again before the fork is refused: a file unreadable
@@ -867,16 +809,15 @@ fn a_snapshot_failing_once_is_tried_again() {
     let secret = shown.join("secret.md");
     std::fs::write(&secret, b"locked\n").unwrap();
     std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
-    // Readable again after the settle (2 s) and the first attempt, before the last.
+    // Readable again after the first attempt, before the last (200 ms apart).
     let unlock = std::thread::spawn(move || {
-        std::thread::sleep(Duration::from_millis(2250));
+        std::thread::sleep(Duration::from_millis(250));
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o660)).unwrap();
     });
     let r = fork_from(&s, &mac, "mac-1", "owner-mac");
     unlock.join().unwrap();
     assert_eq!(r.status(), 200, "{}", r.text().unwrap());
-    // Its mode changed after the request, so it is a later change: the owner fork's.
-    assert!(s.fork_head(&mac, "mac-1").get("secret.md").is_none());
+    assert!(s.fork_head(&mac, "mac-1").get("secret.md").is_some());
     drop(materialiser);
     s.stop();
 }
