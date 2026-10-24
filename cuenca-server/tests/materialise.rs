@@ -316,6 +316,8 @@ fn a_reader_never_sees_a_shown_tree_missing() {
                 if !shown.is_dir() {
                     gaps += 1;
                 }
+                // Not a busy spin: the suite's other tests run beside this one.
+                std::thread::yield_now();
             }
             (looks, gaps)
         })
@@ -400,7 +402,7 @@ fn a_published_draft_is_in_the_volume_within_15_s() {
 const DIR_ENV: &str = "CUENCA_MATERIALISE_CRASH_DIR";
 const KILLS: usize = 10;
 /// Kills tried at most, to get [`KILLS`] inside a materialisation.
-const ATTEMPTS: usize = 40;
+const ATTEMPTS: usize = 100;
 /// Files each draft rewrites, so a checkout takes long enough to be killed inside.
 const FILES: usize = 1500;
 
