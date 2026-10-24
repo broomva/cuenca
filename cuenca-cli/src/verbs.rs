@@ -221,10 +221,27 @@ pub fn forks(client: &Client) -> anyhow::Result<Report> {
     ))
 }
 
+/// What a new fork starts from.
+pub enum ForkOf<'a> {
+    /// A location's main.
+    Location(&'a str),
+    /// A fork's head; an owner fork is snapshotted first, by the authority.
+    Fork(&'a str),
+}
+
 /// `cuenca fork <location> [--name]`: a new fork of the location's main, held by the
-/// caller under epoch 1. Without a name, `<location>-<principal>-<6 hex>`.
-pub fn fork(client: &Client, location: &str, name: Option<&str>) -> anyhow::Result<Report> {
-    let location = location_name(location)?;
+/// caller under epoch 1; `cuenca fork --from <fork> [--name]`: a new fork of a fork's
+/// head, in its location (an owner fork is snapshotted first, so the new fork holds
+/// every write that reached the volume). Without a name,
+/// `<location>-<principal>-<6 hex>`.
+pub fn fork(client: &Client, of: ForkOf<'_>, name: Option<&str>) -> anyhow::Result<Report> {
+    let (location, from) = match of {
+        ForkOf::Location(l) => (location_name(l)?, None),
+        ForkOf::Fork(f) => {
+            let from = fork_name(f)?;
+            (client.fork(&from)?.location, Some(from))
+        }
+    };
     let name = match name {
         Some(n) => fork_name(n)?,
         None => {
@@ -237,10 +254,16 @@ pub fn fork(client: &Client, location: &str, name: Option<&str>) -> anyhow::Resu
             ))?
         }
     };
-    let f = client.create_fork(&name, &location)?;
+    let f = match &from {
+        None => client.create_fork(&name, &location)?,
+        Some(from) => client.branch_fork(&name, from)?,
+    };
+    let of = match &from {
+        None => f.location.to_string(),
+        Some(from) => format!("{from} (of {})", f.location),
+    };
     let text = format!(
-        "forked {} as {} (epoch {}, head {})\n",
-        f.location,
+        "forked {of} as {} (epoch {}, head {})\n",
         f.name,
         f.epoch(),
         f.head
@@ -682,6 +705,14 @@ fn summarise(record: &cuenca_core::Record) -> (Value, String) {
             ..
         } => {
             format!("fork {fork} of {location} created, held by {holder}")
+        }
+        Event::ForkBranched {
+            fork,
+            from,
+            base,
+            holder,
+        } => {
+            format!("fork {fork} of {from} created at its head {base}, held by {holder}")
         }
         Event::DraftPublished {
             fork,

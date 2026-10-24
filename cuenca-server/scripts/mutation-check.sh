@@ -277,13 +277,24 @@ mutate src/materialise.rs '    if snap.is_clean() {' '    if false {' --test own
 mutate src/materialise.rs '    let snap = cuenca_fs::snapshot(dir, &head, cache)' '    let snap = cuenca_fs::snapshot_with(dir, &head, cache, &cuenca_fs::SnapshotOptions { rules: Some(&cuenca_fs::ForkIgnore::parse("").unwrap()), drop_ignored: true })' --test owner_forks finder_metadata
 mutate src/admin.rs '    if principal.as_str() == cuenca_core::VOLUME_PRINCIPAL {' '    if false {' --test owner_forks keeps_the_volume_keyless
 mutate src/http.rs '            CoreError::OwnerFork(_) => (S::FORBIDDEN, "owner_fork"),' '' --test owner_forks no_key_creates
-mutate src/admin.rs '            ignored_in_main(a, &location)?;' '' --lib an_owner_fork_of_a_main_tracking
+mutate src/admin.rs '            let main = ignored_in_main(a, &location)?;' '            let main = a.store.main_tree(&location).map_err(|e| s(&e))?.git_tree_id();' --lib an_owner_fork_of_a_main_tracking
 mutate src/admin.rs '        .filter(|p| rules.excludes(p))' '        .filter(|p| rules.is_ignored(p, false))' --lib an_owner_fork_of_a_main_tracking
-mutate src/admin.rs '        None => cuenca_fs::ForkIgnore::defaults(),' '        None => cuenca_fs::ForkIgnore::parse("").unwrap(),' --lib an_owner_fork_of_a_main_tracking
 mutate src/authority.rs '            .any(|k| k.principal.as_str() == cuenca_core::VOLUME_PRINCIPAL)' '            .any(|_| false)' --lib a_volume_key_on_file
 mutate src/materialise.rs 'rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK' 'rustix::fs::OFlags::NONBLOCK' --lib an_upload_opens_only
 mutate src/materialise.rs '    if !file.metadata().map_err(|e| fail(&e))?.is_file() {' '    if false {' --lib an_upload_opens_only
 mutate src/materialise.rs '            if !is_owner(&fork) {' '            if is_owner(&fork) {' --test owner_forks
 mutate src/materialise.rs '                if snapped_at.is_none_or(|t| t.elapsed() >= config.snapshot_interval) {' '                if snapped_at.is_none() {' --test owner_forks a_draft_within_60_s
+
+
+# Forking an owner fork (part 3): it is snapshotted first, under the volume's lock, and
+# a snapshot that keeps failing refuses the fork; only a fork the caller reads is forked;
+# an owner fork's main and its rules are checked strictly, and the fork starts from that
+# main.
+mutate src/authority.rs '            match volume.snapshot_owner_fork(&self.store, &source) {' '            match None::<Result<crate::materialise::SnapshotOne, String>> {' --test owner_forks unsnapshotted_edits
+mutate src/authority.rs '            .filter(|_| source.holder().is_some_and(Holder::is_volume))' '            .filter(|_| false)' --test owner_forks unsnapshotted_edits
+mutate src/authority.rs '                Some(Err(error)) if attempt >= SNAPSHOT_ATTEMPTS => {' '                Some(Err(_)) if attempt >= SNAPSHOT_ATTEMPTS => break,
+                Some(Err(error)) if false => {' --test owner_forks cannot_be_snapshotted
+mutate src/http.rs '                let source = visible_fork(a, &c, &from)?;' '                let source = a.store.fork(&from)?.ok_or_else(ApiError::not_found)?;' --test owner_forks needs_reading
+mutate src/admin.rs 'cuenca_fs::ForkIgnore::for_tree(&main, |oid|' 'cuenca_fs::ForkIgnore::for_tree(&Tree::new(), |oid|' --lib an_owner_fork_of_a_main_tracking
 
 exit $survived

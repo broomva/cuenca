@@ -337,14 +337,46 @@ impl Store {
             .location(location)?
             .ok_or_else(|| CoreError::UnknownLocation(location.to_string()))?
             .main;
+        // Main may move between the read above and the transaction; the rules then
+        // refuse the fork rather than start it from a stale main.
+        self.create_fork_at(fork, location, main, holder)
+    }
+
+    /// Fork `location` at `main`, which must still be its main when the fork is
+    /// recorded (anything else is `NotAtBase`): for a caller that checked that main
+    /// before forking it.
+    pub fn create_fork_at(
+        &self,
+        fork: &ForkName,
+        location: &LocationName,
+        main: GitOid,
+        holder: &Holder,
+    ) -> Result<u64> {
         let event = Event::ForkCreated {
             fork: fork.clone(),
             location: location.clone(),
             base: main,
             holder: holder.clone(),
         };
-        // Main may move between the read above and the transaction; the rules then
-        // refuse the fork rather than start it from a stale main.
+        Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Fork the fork `from` at its current head, held by `holder` under epoch 1, in
+    /// `from`'s location ([`Event::ForkBranched`]). The new fork holds `from`'s
+    /// published head and nothing else: an owner fork's caller snapshots it first
+    /// (spec section 2a). A head that moves between the read and the transaction makes
+    /// the rules refuse the fork (`NotAtBase`) rather than start it from a stale head.
+    pub fn branch_fork(&self, fork: &ForkName, from: &ForkName, holder: &Holder) -> Result<u64> {
+        let head = self
+            .fork(from)?
+            .ok_or_else(|| CoreError::UnknownFork(from.to_string()))?
+            .head;
+        let event = Event::ForkBranched {
+            fork: fork.clone(),
+            from: from.clone(),
+            base: head,
+            holder: holder.clone(),
+        };
         Ok(self.record(event, |_| Ok(()))?.0)
     }
 
@@ -1247,6 +1279,22 @@ mod tests {
             fork: ForkName::new("h").unwrap(),
             location: l,
             base: cs.target,
+            holder: agent(),
+        };
+        inject_event(&store, 4, event);
+        assert!(corrupt(&store).contains("starts from"));
+    }
+
+    /// A fork of a fork starts from that fork's head and nowhere else: one recorded
+    /// from an earlier tree of it does not replay.
+    #[test]
+    fn replay_refuses_a_branch_that_does_not_start_at_the_head() {
+        let (_d, store, cs) = setup();
+        let (_, f) = ids();
+        let event = Event::ForkBranched {
+            fork: ForkName::new("h").unwrap(),
+            from: f,
+            base: cs.base,
             holder: agent(),
         };
         inject_event(&store, 4, event);

@@ -326,4 +326,12 @@ mutate src/checks.rs '            if c.timeout_secs == 0 || c.timeout_secs > MAX
 mutate src/checks.rs '#[serde(deny_unknown_fields)]
 pub struct Check {' 'pub struct Check {' --lib checks
 
+
+# A fork of a fork: from its source's head only, under every new fork's rules, and
+# it remembers its source.
+mutate src/state.rs '            if *base != source.head {' '            if false {' --lib branch_that_does_not_start
+mutate src/state.rs '            new_fork(view, name, holder)?;
+            let source = fork(view, from)?;' '            let source = fork(view, from)?;' --test forks rules_of_a_new_fork
+mutate src/state.rs '                from: Some(from.clone()),' '                from: None,' --test forks fork_of_a_fork
+
 exit $survived

@@ -3,13 +3,14 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use cuenca_core::{CoreError, Fork, Holder, Location, PrincipalName, Store};
+use cuenca_core::{CoreError, Fork, ForkName, Holder, Location, PrincipalName, Store};
 use cuenca_tree::{Changeset, GitOid, Op};
 
 use crate::identity::Whois;
 use crate::keys::{KeyRecord, KeyRing, PrincipalKind};
+use crate::materialise::Volume;
 
 /// Trees whose blob sets are kept in memory for read checks. Trees never change, so
 /// an entry is never stale; the cache is only cleared to bound its size.
@@ -35,6 +36,23 @@ pub struct Authority {
     lander_wake: (Mutex<u64>, std::sync::Condvar),
     /// The last error each landing hit, while it is retried.
     pub(crate) landing_errors: crate::land::LandingErrors,
+    /// The volume, once a materialiser keeps it: shared so that forking an owner fork
+    /// snapshots it first, with no materialiser pass in between.
+    volume: OnceLock<Arc<Mutex<Volume>>>,
+}
+
+/// How many times forking an owner fork tries to snapshot it before refusing.
+const SNAPSHOT_ATTEMPTS: u32 = 3;
+
+/// Why forking a fork was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum BranchError {
+    #[error(transparent)]
+    Core(#[from] CoreError),
+    /// The owner fork could not be snapshotted, so it was not forked: a fork of it
+    /// would lack what the owner wrote since its last snapshot.
+    #[error("owner fork {fork} could not be snapshotted first, so it was not forked: {error}")]
+    Snapshot { fork: String, error: String },
 }
 
 /// An authenticated request's principal, on the node Tailscale named.
@@ -108,6 +126,7 @@ impl Authority {
             revocation: std::sync::RwLock::new(()),
             lander_wake: (Mutex::new(0), std::sync::Condvar::new()),
             landing_errors: Default::default(),
+            volume: OnceLock::new(),
         })
     }
 
@@ -134,6 +153,72 @@ impl Authority {
 
     pub(crate) fn set_landing_error(&self, fork: &cuenca_core::ForkName, error: Option<String>) {
         self.landing_errors.set(fork, error);
+    }
+
+    /// Share the volume a materialiser keeps ([`crate::materialise::Materialiser`]).
+    /// One per authority: a second is refused.
+    pub(crate) fn set_volume(&self, volume: Arc<Mutex<Volume>>) -> std::io::Result<()> {
+        self.volume
+            .set(volume)
+            .map_err(|_| std::io::Error::other("the authority already has a volume"))
+    }
+
+    /// The shared volume, locked: a pass that panicked leaves it as consistent as a
+    /// failed one (each pass starts from what is on disk), so a poisoned lock is taken.
+    pub(crate) fn lock_volume(volume: &Mutex<Volume>) -> std::sync::MutexGuard<'_, Volume> {
+        volume.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Fork the fork `from` into `fork`, held by `holder`, at `from`'s head
+    /// ([`Store::branch_fork`]). An owner fork the volume shows is snapshotted first
+    /// (spec section 2a: "the authority snapshots it, and the new fork starts from that
+    /// snapshot"), with the volume locked from the snapshot to the fork, so its head
+    /// cannot move in between: the new fork holds every write the snapshot read, and
+    /// anything written later stays in `from`. A snapshot that fails (a file that keeps
+    /// changing, one the authority cannot read) is tried again, then refused, and no
+    /// fork is made.
+    pub fn branch_fork(
+        &self,
+        fork: &ForkName,
+        from: &ForkName,
+        holder: &Holder,
+    ) -> Result<u64, BranchError> {
+        let source = self
+            .store
+            .fork(from)?
+            .ok_or_else(|| CoreError::UnknownFork(from.to_string()))?;
+        let Some(volume) = self
+            .volume
+            .get()
+            .filter(|_| source.holder().is_some_and(Holder::is_volume))
+        else {
+            return Ok(self.store.branch_fork(fork, from, holder)?);
+        };
+        let mut volume = Self::lock_volume(volume);
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            // Read under the lock: only the volume moves an owner fork's head.
+            let source = self
+                .store
+                .fork(from)?
+                .ok_or_else(|| CoreError::UnknownFork(from.to_string()))?;
+            match volume.snapshot_owner_fork(&self.store, &source) {
+                None | Some(Ok(_)) => break,
+                Some(Err(error)) if attempt >= SNAPSHOT_ATTEMPTS => {
+                    tracing::error!(fork = %from, error, "owner fork snapshot failed; not forked");
+                    return Err(BranchError::Snapshot {
+                        fork: from.to_string(),
+                        error,
+                    });
+                }
+                Some(Err(error)) => {
+                    tracing::warn!(fork = %from, error, attempt, "owner fork snapshot failed; trying again");
+                    std::thread::sleep(std::time::Duration::from_millis(200));
+                }
+            }
+        }
+        Ok(self.store.branch_fork(fork, from, holder)?)
     }
 
     pub fn store(&self) -> &Store {

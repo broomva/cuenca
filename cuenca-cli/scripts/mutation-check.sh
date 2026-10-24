@@ -142,4 +142,9 @@ mutate src/run.rs '            Some(0) => ended(CheckStatus::Passed, Some(0), ou
 mutate src/verbs.rs '"requested" if state["remote"] != true => Some("owner"),' '"requested" if false => Some("owner"),' --test cli every_agent_verb
 mutate src/verbs.rs '        exit: if matches!(status.as_str(), "failed" | "dropped") {' '        exit: if false {' --test cli land_reports_a_failed
 
+
+# Forking a fork: --from forks the fork, and MCP takes exactly one of location and from.
+mutate src/verbs.rs '        Some(from) => client.branch_fork(&name, from)?,' '        Some(_) => client.create_fork(&name, &location)?,' --test cli every_agent_verb
+mutate src/mcp.rs '            Self::Fork(f) if f.location.is_some() == f.from.is_some() => {' '            Self::Fork(f) if false && f.location.is_some() == f.from.is_some() => {' --test mcp owner_acts_are_no_tools
+
 exit $survived

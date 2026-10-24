@@ -66,8 +66,10 @@
 //! "Whole" is per lookup: a reader that opens `forks/<fork>/` after a swap sees the new
 //! tree, one that opened it before keeps the old one, which is then removed beneath it.
 //!
-//! Forking an owner fork into a checkout (snapshot first, spec section 2a) is not here
-//! yet (BRO-3256 part 3).
+//! Forking an owner fork (spec section 2a) snapshots it first, through
+//! [`Volume::snapshot_owner_fork`] with the volume locked from the snapshot to the fork
+//! ([`Authority::branch_fork`]): the new fork holds every write the snapshot read, and
+//! what Finder writes later stays in the owner fork.
 //!
 //! # Trust
 //!
@@ -89,8 +91,8 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cuenca_core::{ChangesetId, Fork, ForkName, Holder, LocationName, Store, Writer};
@@ -415,16 +417,9 @@ impl Volume {
             if !is_owner(&fork) {
                 continue;
             }
-            let what = Shown::Fork(fork.name.clone());
-            let dir = self.root.join(what.rel());
-            if !self.shown.contains_key(&what)
-                || !fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir())
-            {
-                continue;
-            }
-            let cache = self.caches.entry(fork.name.clone()).or_default();
-            match snapshot_one(store, &fork, &dir, cache) {
-                Ok((published, skipped)) => {
+            match self.snapshot_owner_fork(store, &fork) {
+                None => {}
+                Some(Ok((published, skipped))) => {
                     match published {
                         Some((id, offset)) => {
                             snapped.published.push((fork.name.clone(), id, offset))
@@ -437,15 +432,36 @@ impl Volume {
                             .map(|s| (fork.name.clone(), s.path, s.reason)),
                     );
                 }
-                Err(e) => snapped.failed.push((fork.name.clone(), e)),
+                Some(Err(e)) => snapped.failed.push((fork.name.clone(), e)),
             }
         }
         Ok(snapped)
     }
+
+    /// Snapshot one owner fork, as [`Volume::snapshot_owner_forks`] does each: `None`
+    /// when the volume does not show it (nothing was written to it here, so the log's
+    /// head is all of it), else what was published and what was left out, or why the
+    /// snapshot failed (nothing of it was published).
+    pub fn snapshot_owner_fork(
+        &mut self,
+        store: &Store,
+        fork: &cuenca_core::Fork,
+    ) -> Option<Result<SnapshotOne, String>> {
+        let what = Shown::Fork(fork.name.clone());
+        let dir = self.root.join(what.rel());
+        if !is_owner(fork)
+            || !self.shown.contains_key(&what)
+            || !fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir())
+        {
+            return None;
+        }
+        let cache = self.caches.entry(fork.name.clone()).or_default();
+        Some(snapshot_one(store, fork, &dir, cache))
+    }
 }
 
 /// The draft one snapshot published, if any, and what it left out.
-type SnapshotOne = (Option<(ChangesetId, u64)>, Vec<cuenca_fs::Skipped>);
+pub type SnapshotOne = (Option<(ChangesetId, u64)>, Vec<cuenca_fs::Skipped>);
 
 /// Snapshot one owner fork's directory against its head; publish the changes, if any,
 /// as the volume under the fork's epoch.
@@ -665,6 +681,9 @@ impl Materialiser {
     pub fn spawn(authority: Arc<Authority>, config: VolumeConfig) -> io::Result<Self> {
         let mut volume = Volume::open(&config.root, authority.store.object_dir())?;
         volume.set_retry_after(config.retry_after);
+        let volume = Arc::new(Mutex::new(volume));
+        // Forking an owner fork snapshots it under the same lock ([`Authority::branch_fork`]).
+        authority.set_volume(volume.clone())?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
@@ -675,6 +694,7 @@ impl Materialiser {
                     let mut snapped_at: Option<Instant> = None;
                     while !stop.load(Ordering::SeqCst) {
                         let ran = catch_unwind(AssertUnwindSafe(|| {
+                            let mut volume = Authority::lock_volume(&volume);
                             if snapped_at.is_none_or(|t| t.elapsed() >= config.snapshot_interval) {
                                 snapped_at = Some(Instant::now());
                                 match volume.snapshot_owner_forks(&authority.store) {

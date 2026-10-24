@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
-use serde_json::Value;
+use serde_json::{Value, json};
 
 #[test]
 fn every_agent_verb_works_on_a_plain_directory() {
@@ -31,6 +31,24 @@ fn every_agent_verb_works_on_a_plain_directory() {
             .starts_with("site-a1-"),
         "{generated}"
     );
+    // A fork of a fork, at its head, in its location; generated names follow the
+    // location, never the fork forked.
+    let v = a1.ok(&["fork", "--from", "f1", "--name", "f1-copy"]);
+    assert_eq!(
+        (&v["fork"]["from"], &v["fork"]["location"]),
+        (&json!("f1"), &json!("site")),
+        "{v}"
+    );
+    let v = a1.ok(&["fork", "--from", "f1"]);
+    assert!(
+        v["fork"]["name"].as_str().unwrap().starts_with("site-a1-"),
+        "{v}"
+    );
+    // Exactly one of the two, refused as a usage error before any request.
+    for args in [&["fork"][..], &["fork", "site", "--from", "f1"]] {
+        let out = cuenca(None).args(args).output().unwrap();
+        assert_eq!(out.status.code(), Some(2), "{args:?}");
+    }
 
     let work = tempfile::tempdir().unwrap();
     let co = work.path().join("f1");

@@ -17,7 +17,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use cuenca_core::{ChangesetId, ForkName, Holder, LocationName, NodeId, PrincipalName};
-use cuenca_tree::Tree;
+use cuenca_tree::{GitOid, Tree};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -274,10 +274,12 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             Ok(json!({ "offset": offset, "changeset": requested, "main": main }))
         }
         AdminRequest::OwnerFork { location, fork } => {
-            ignored_in_main(a, &location)?;
+            // The fork starts from the main that was checked, or not at all: a main
+            // that moves in between (a landing that adds `.env`) refuses it.
+            let main = ignored_in_main(a, &location)?;
             let offset = a
                 .store
-                .create_fork(&fork, &location, &Holder::volume())
+                .create_fork_at(&fork, &location, main, &Holder::volume())
                 .map_err(|e| s(&e))?;
             Ok(json!({ "offset": offset, "fork": fork }))
         }
@@ -298,30 +300,30 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
 }
 
 /// Refuse an owner fork of a location whose main tracks paths its own rules name
-/// (its `.forkignore`, or the defaults): the first show would write them into the
-/// fork, and every snapshot of it would then fail, since a snapshot never holds such a
-/// path and leaving it out would delete it. Remove them from main first.
-fn ignored_in_main(a: &Authority, location: &LocationName) -> Result<(), String> {
+/// (its `.forkignore`, or the defaults), and one whose `.forkignore` a scan would refuse
+/// (not a file, not UTF-8): the first show would write them into the fork, and every
+/// snapshot of it would then fail, since a snapshot never holds such a path and leaving
+/// it out would delete it. Fix main first (or delete the file from the fork in Finder).
+/// The rules are read by the scan's own loader, so the two cannot drift. Returns the
+/// main that was checked.
+fn ignored_in_main(a: &Authority, location: &LocationName) -> Result<GitOid, String> {
     let s = |e: &dyn std::fmt::Display| e.to_string();
     let main = a.store.main_tree(location).map_err(|e| s(&e))?;
-    let rules = match main.get(cuenca_fs::FORKIGNORE) {
-        Some(entry) => {
-            let text = a.store.read_blob(entry.oid()).map_err(|e| s(&e))?;
-            cuenca_fs::ForkIgnore::parse(&String::from_utf8_lossy(&text)).map_err(|e| s(&e))?
-        }
-        None => cuenca_fs::ForkIgnore::defaults(),
-    };
+    let rules =
+        cuenca_fs::ForkIgnore::for_tree(&main, |oid| a.store.read_blob(oid).map_err(|e| s(&e)))
+            .map_err(|e| format!("main of {location:?}: {}: {e}", cuenca_fs::FORKIGNORE))?;
     let named: Vec<&str> = main
         .entries()
         .map(|(p, _)| p.as_str())
         .filter(|p| rules.excludes(p))
         .collect();
     if named.is_empty() {
-        return Ok(());
+        return Ok(main.git_tree_id());
     }
     Err(format!(
-        "main of {location:?} tracks {} path(s) its .forkignore names (first: {:?}); an \
-         owner fork of it could never be snapshotted. Remove them from main first",
+        "main of {location:?} tracks {} path(s) its .forkignore names (first: {:?}); every \
+         snapshot of an owner fork of it would fail until they are deleted from the fork. \
+         Remove them from main first",
         named.len(),
         &named[..named.len().min(10)]
     ))
@@ -468,6 +470,26 @@ mod tests {
         ] {
             let err = handle(&a, req(l)).unwrap_err();
             assert!(err.contains(path), "{err}");
+        }
+        // Rules a scan would refuse are refused here too, never read loosely: text
+        // that is not UTF-8, and a symlink in the file's place.
+        let latin = location(&a, "latin", &[(".forkignore", b"caf\xe9\n")]);
+        let linked = {
+            use cuenca_tree::{Entry, GitOid, RepoPath};
+            let target = b"elsewhere";
+            let oid = GitOid::for_blob(target);
+            a.store.ingest_blob(oid, 9, &target[..]).unwrap();
+            let tree =
+                Tree::from_entries([(RepoPath::new(".forkignore").unwrap(), Entry::Symlink(oid))])
+                    .unwrap();
+            let name = LocationName::new("linked").unwrap();
+            a.store.add_location(&name, None, &tree).unwrap();
+            name
+        };
+        let len = len + 2;
+        for l in [&latin, &linked] {
+            let err = handle(&a, req(l)).unwrap_err();
+            assert!(err.contains(".forkignore"), "{err}");
         }
         assert_eq!(a.store.len().unwrap(), len);
         let clean = location(

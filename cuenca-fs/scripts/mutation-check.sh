@@ -135,4 +135,12 @@ mutate src/checkout.rs '    let fd = match openat(
         dest,' --test fs parent_swapped
 mutate src/checkout.rs '            too_large(&abs, bytes.len() as u64)?;' '' --test fs larger_than_a_snapshot
 
+
+# Rules read from a stored tree: as strict as from disk, with the defaults when absent.
+mutate src/ignore.rs '            Some(_) => Err(not_a_file()),' '            Some(e) => Self::from_bytes(&read(e.oid()).map_err(FsError::Ignore)?),' --lib rules_from_a_tree
+mutate src/ignore.rs '        let text = std::str::from_utf8(bytes)
+            .map_err(|_| FsError::Ignore("the file is not UTF-8".into()))?;
+        Self::parse(text)' '        Self::parse(&String::from_utf8_lossy(bytes))' --lib rules_from_a_tree
+mutate src/ignore.rs '            None => Ok(Self::defaults()),' '            None => Self::parse(""),' --lib rules_from_a_tree
+
 exit $survived

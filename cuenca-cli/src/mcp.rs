@@ -120,7 +120,8 @@ struct NoArgs {}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ForkArgs {
-    location: String,
+    location: Option<String>,
+    from: Option<String>,
     name: Option<String>,
 }
 
@@ -206,6 +207,12 @@ impl Call {
             | Self::Snapshot(SnapshotArgs { dir, .. })
             | Self::Verify(DirArgs { dir })
             | Self::Land(DirArgs { dir }) => absolute(tool, dir)?,
+            Self::Fork(f) if f.location.is_some() == f.from.is_some() => {
+                return Err(ErrorData::invalid_params(
+                    "fork: give location (fork its main) or from (fork a fork), not both",
+                    None,
+                ));
+            }
             Self::Diff(d) => {
                 match (&d.a, &d.b, &d.dir) {
                     (Some(_), Some(_), None) | (None, None, Some(_)) => {}
@@ -241,7 +248,14 @@ impl Call {
         let client = Client::new(config)?;
         match self {
             Self::Forks => verbs::forks(&client),
-            Self::Fork(a) => verbs::fork(&client, &a.location, a.name.as_deref()),
+            Self::Fork(a) => {
+                // `parse` let through exactly one of the two.
+                let of = match (&a.location, &a.from) {
+                    (Some(l), _) => verbs::ForkOf::Location(l),
+                    (None, f) => verbs::ForkOf::Fork(f.as_deref().unwrap_or_default()),
+                };
+                verbs::fork(&client, of, a.name.as_deref())
+            }
             Self::Checkout(a) => verbs::checkout(&client, &a.fork, &a.dir),
             Self::Status(a) => verbs::status(Some(&client), &a.dir),
             Self::Snapshot(a) => verbs::snapshot(
@@ -391,13 +405,14 @@ pub fn tools() -> Vec<Tool> {
         ),
         (
             "fork",
-            "Fork a location: a new fork of its main, held by you under epoch 1.",
+            "Fork a location: a new fork of its main, held by you under epoch 1. Or fork a fork (`from` instead of `location`): a new fork of its head, in its location; an owner fork is snapshotted first, so the new fork holds every write that reached the volume. Name exactly one of `location` and `from`.",
             input(
                 json!({
-                    "location": { "type": "string", "description": "The location to fork." },
+                    "location": { "type": "string", "description": "The location to fork, at its main." },
+                    "from": { "type": "string", "description": "The fork to fork, at its head, instead of a location." },
                     "name": { "type": "string", "description": "The fork's name (lowercase ASCII, digits, `.`, `_`, `-`); generated if absent." },
                 }),
-                &["location"],
+                &[],
             ),
             output(json!({ "fork": fork }), &["fork"]),
             write.clone(),

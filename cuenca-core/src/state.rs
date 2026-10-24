@@ -61,8 +61,13 @@ pub struct Fork {
     pub released: Vec<GitOid>,
     /// For a sibling fork, the fork whose stale-epoch publishes it keeps.
     pub parent: Option<ForkName>,
-    /// The tree it started from: main for a fork, the head its parent's stale epoch left
-    /// for a sibling ([`Fork::released_at`]).
+    /// For a fork of a fork ([`crate::Event::ForkBranched`]), the fork it was forked
+    /// from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from: Option<ForkName>,
+    /// The tree it started from: main for a fork, the head of the fork it was forked
+    /// from for a fork of a fork, the head its parent's stale epoch left for a sibling
+    /// ([`Fork::released_at`]).
     pub base: GitOid,
     /// The tree of its latest draft, or `base` before the first.
     pub head: GitOid,
@@ -282,6 +287,34 @@ pub(crate) fn check_writer(view: &impl View, state: &Fork, writer: &Writer) -> R
     Ok(())
 }
 
+/// The rules every new fork's name and holder meet, however it starts: the holder is
+/// not revoked, the name is free and not kept for siblings, and a fork is an owner fork
+/// exactly when the volume holds it.
+fn new_fork(view: &impl View, name: &ForkName, holder: &Holder) -> Result<()> {
+    not_revoked(view, &holder.principal)?;
+    // `-from` is kept for siblings, so a sibling's name is never taken.
+    if name.as_str().contains("-from") {
+        return Err(CoreError::ReservedName(name.to_string()));
+    }
+    // A sibling of a fork named `owner` would be named `owner-from-…`: an owner
+    // fork's name, held by its stale holder. So `owner` itself is kept.
+    if name.as_str() == OWNER_FORK_PREFIX.trim_end_matches('-') {
+        return Err(CoreError::ReservedName(name.to_string()));
+    }
+    if is_owner_fork(name) != holder.is_volume()
+        || (holder.is_volume() && *holder != Holder::volume())
+    {
+        return Err(CoreError::OwnerFork(format!(
+            "fork {name:?}: a fork named {OWNER_FORK_PREFIX}* is an owner fork, held by \
+             the volume, and the volume holds nothing else (holder {holder})"
+        )));
+    }
+    if view.fork(name)?.is_some() {
+        return Err(CoreError::ForkExists(name.to_string()));
+    }
+    Ok(())
+}
+
 /// Apply `event`, to be recorded at `offset`, to `view`. On `Err` the view may be
 /// partly written; the caller discards it (the writer aborts its transaction).
 pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<Applied> {
@@ -307,27 +340,7 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             base,
             holder,
         } => {
-            not_revoked(view, &holder.principal)?;
-            // `-from` is kept for siblings, so a sibling's name is never taken.
-            if name.as_str().contains("-from") {
-                return Err(CoreError::ReservedName(name.to_string()));
-            }
-            // A sibling of a fork named `owner` would be named `owner-from-…`: an owner
-            // fork's name, held by its stale holder. So `owner` itself is kept.
-            if name.as_str() == OWNER_FORK_PREFIX.trim_end_matches('-') {
-                return Err(CoreError::ReservedName(name.to_string()));
-            }
-            if is_owner_fork(name) != holder.is_volume()
-                || (holder.is_volume() && *holder != Holder::volume())
-            {
-                return Err(CoreError::OwnerFork(format!(
-                    "fork {name:?}: a fork named {OWNER_FORK_PREFIX}* is an owner fork, held by \
-                     the volume, and the volume holds nothing else (holder {holder})"
-                )));
-            }
-            if view.fork(name)?.is_some() {
-                return Err(CoreError::ForkExists(name.to_string()));
-            }
+            new_fork(view, name, holder)?;
             let loc = location(view, at)?;
             if *base != loc.main {
                 return Err(CoreError::NotAtBase {
@@ -342,6 +355,36 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
                 holders: vec![holder.clone()],
                 released: Vec::new(),
                 parent: None,
+                from: None,
+                base: *base,
+                head: *base,
+                head_changeset: None,
+                verified: None,
+                landing: None,
+            })?;
+        }
+        Event::ForkBranched {
+            fork: name,
+            from,
+            base,
+            holder,
+        } => {
+            new_fork(view, name, holder)?;
+            let source = fork(view, from)?;
+            if *base != source.head {
+                return Err(CoreError::NotAtBase {
+                    what: format!("head of {from:?}"),
+                    head: source.head,
+                    base: *base,
+                });
+            }
+            view.put_fork(&Fork {
+                name: name.clone(),
+                location: source.location.clone(),
+                holders: vec![holder.clone()],
+                released: Vec::new(),
+                parent: None,
+                from: Some(from.clone()),
                 base: *base,
                 head: *base,
                 head_changeset: None,
@@ -784,6 +827,7 @@ pub(crate) fn fenced_target(
                 holders: vec![writer.holder.clone()],
                 released: Vec::new(),
                 parent: Some(at.name.clone()),
+                from: None,
                 base,
                 head: base,
                 head_changeset: None,
