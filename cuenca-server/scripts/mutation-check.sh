@@ -189,4 +189,6 @@ mutate src/land.rs '                    if !pushed {
                         git.push(&remote, export)?;
                     }' '' --test land a_kill
 
+mutate src/land.rs '        let ours = ids.len() == 2' '        let ours = ids.len() >= 2' --test land a_merge_commit
+
 exit $survived

@@ -604,6 +604,65 @@ fn a_branch_with_the_drafts_tree_onto_another_parent_fails_the_landing() {
     assert!(up.creates().is_empty());
 }
 
+/// Nor is a merge commit with the draft's tree whose first parent is main.
+#[test]
+fn a_merge_commit_with_the_drafts_tree_is_not_an_export() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (_a1, id) = requested(&s, &up, Some(&up.url));
+    // A side branch from main, merged back with the draft's tree as the result.
+    git(&up.work, &["checkout", "-q", "-b", "side"]);
+    std::fs::write(up.work.join("z"), "z").unwrap();
+    git(&up.work, &["add", "-A"]);
+    git(&up.work, &["commit", "-q", "-m", "side"]);
+    git(&up.work, &["checkout", "-q", "main"]);
+    git(&up.work, &["merge", "-q", "--no-ff", "--no-commit", "side"]);
+    std::fs::remove_file(up.work.join("z")).unwrap();
+    std::fs::write(up.work.join("README"), "landed\n").unwrap();
+    std::fs::create_dir_all(up.work.join("new")).unwrap();
+    std::fs::write(up.work.join("new/file.txt"), "new\n").unwrap();
+    git(&up.work, &["add", "-A"]);
+    git(&up.work, &["commit", "-q", "-m", "merge"]);
+    let target = s.authority.store().changeset(id).unwrap().unwrap().target;
+    assert_eq!(
+        git(&up.work, &["rev-parse", "HEAD^{tree}"]),
+        target.to_hex()
+    );
+    assert_eq!(
+        git(&up.work, &["rev-parse", "HEAD^1^{tree}"]),
+        s.authority
+            .store()
+            .location(&l1())
+            .unwrap()
+            .unwrap()
+            .main
+            .to_hex()
+    );
+    git(
+        &up.work,
+        &[
+            "push",
+            "-q",
+            up.remote.to_str().unwrap(),
+            &format!("HEAD:refs/heads/cp/{id}"),
+        ],
+    );
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
+    let step = wait_for(s.authority.store(), &f1(), |st| {
+        matches!(st, LandingStep::Failed { .. })
+    });
+    let LandingStep::Failed { reason } = step else {
+        unreachable!()
+    };
+    assert!(reason.contains("not an export"), "{reason}");
+    assert!(up.creates().is_empty());
+}
+
 /// A pull request from the export's branch at another commit is not this landing's.
 #[test]
 fn a_pull_request_from_the_branch_at_another_commit_fails_the_landing() {

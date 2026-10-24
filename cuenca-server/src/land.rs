@@ -294,7 +294,7 @@ impl Worker {
 
     /// The export of the landing: the target tree written into the location's bare
     /// repository and committed onto `parent`, or onto the newest first-parent commit
-    /// of the remote's default branch whose tree is the changeset's base.
+    /// of the remote's default branch whose tree is the main the request's verify judged.
     fn build(
         &self,
         git: &Git,
