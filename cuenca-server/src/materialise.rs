@@ -37,8 +37,9 @@
 //!
 //! The volume needs a filesystem with atomic exchange (`renameat2(RENAME_EXCHANGE)` on
 //! Linux: ext4, btrfs, xfs, tmpfs; `renamex_np(RENAME_SWAP)` on APFS) and an exclusive
-//! rename (`RENAME_NOREPLACE` / `RENAME_EXCL`). Elsewhere every tree fails, loudly, and is
-//! retried.
+//! rename (`RENAME_NOREPLACE` / `RENAME_EXCL`). Without exchange, every update of a tree
+//! already shown fails, loudly, and is retried; without the exclusive rename, a first
+//! show fails too.
 //!
 //! The volume's directory belongs to the materialiser: whatever is under `main/` and
 //! `forks/` at a path the log names is replaced by the log's tree.
