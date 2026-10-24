@@ -1,0 +1,36 @@
+# The Cuenca authority (`cuenca serve`), installed by deploy/install.sh.
+# It runs as cuenca:cuenca: Samba's account reads the volume through group cuenca
+# (cuenca-server/src/materialise.rs, "Modes"). Settings are in /etc/cuenca/cuenca.env.
+[Unit]
+Description=Cuenca authority
+Documentation=https://github.com/broomva/cuenca/blob/main/deploy/README.md
+Wants=network-online.target tailscaled.service
+After=network-online.target tailscaled.service
+
+[Service]
+Type=simple
+User=cuenca
+Group=cuenca
+EnvironmentFile=/etc/cuenca/cuenca.env
+ExecStartPre=/usr/local/lib/cuenca/wait-tailnet
+ExecStart=/usr/local/bin/cuenca serve --state ${CUENCA_STATE} --bind ${CUENCA_BIND} --admin-socket /run/cuenca/admin.sock --volume ${CUENCA_VOLUME} --gh /usr/bin/gh
+Restart=on-failure
+RestartSec=5
+# The admin socket: only the cuenca user (the owner reaches it with sudo -u cuenca).
+RuntimeDirectory=cuenca
+RuntimeDirectoryMode=0700
+UMask=0027
+# Not RestrictSUIDSGID: the volume's folders are setgid (2750, 2770) so new entries keep group cuenca.
+LimitNOFILE=65536
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadWritePaths=/var/lib/cuenca @VOLUME@
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+
+[Install]
+WantedBy=multi-user.target

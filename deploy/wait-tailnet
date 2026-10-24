@@ -1,0 +1,16 @@
+#!/bin/sh
+# Wait until tailscale0 has an IPv4 address, so a service bound to it can start
+# (smbd's `bind interfaces only` and the authority's tailnet bind). Installed as
+# /usr/local/lib/cuenca/wait-tailnet; exits 1 after CUENCA_WAIT_SECS (default 120).
+set -eu
+deadline=$(( $(date +%s) + ${CUENCA_WAIT_SECS:-120} ))
+while :; do
+    if ip -4 -o addr show dev tailscale0 2>/dev/null | grep -q ' inet '; then
+        exit 0
+    fi
+    if [ "$(date +%s)" -ge "$deadline" ]; then
+        echo "wait-tailnet: tailscale0 has no IPv4 address after ${CUENCA_WAIT_SECS:-120}s" >&2
+        exit 1
+    fi
+    sleep 1
+done
