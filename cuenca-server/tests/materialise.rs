@@ -1,0 +1,435 @@
+//! The volume kept in step with the log (BRO-3256): every location's main and every
+//! fork's head shown read-only, swapped in whole, converging after a kill.
+
+mod common;
+
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
+
+use common::*;
+use cuenca_core::{ForkName, Holder, LocationName, NodeId, PrincipalName, Store, Writer};
+use cuenca_server::PrincipalKind::Agent;
+use cuenca_server::materialise::{Materialiser, Shown, Volume, VolumeConfig};
+use cuenca_tree::{Changeset, Entry, GitOid, Op, RepoPath, Tree};
+use serde_json::json;
+
+fn loc(s: &str) -> LocationName {
+    LocationName::new(s).unwrap()
+}
+
+fn fork(s: &str) -> ForkName {
+    ForkName::new(s).unwrap()
+}
+
+fn path(s: &str) -> RepoPath {
+    RepoPath::new(s).unwrap()
+}
+
+fn writer() -> Writer {
+    Writer::new(
+        Holder::new(
+            PrincipalName::new("agent").unwrap(),
+            NodeId::new("nAgentCNTRL").unwrap(),
+        ),
+        1,
+    )
+}
+
+fn ingest(store: &Store, content: &[u8]) -> GitOid {
+    let oid = GitOid::for_blob(content);
+    store
+        .ingest_blob(oid, content.len() as u64, content)
+        .unwrap();
+    oid
+}
+
+/// One file to put: its path, how to make its entry from its blob, its content.
+type Put<'a> = (&'a str, fn(GitOid) -> Entry, &'a [u8]);
+
+/// The changeset putting each [`Put`] over `base`.
+fn change(store: &Store, base: &Tree, ops: &[Put]) -> Changeset {
+    let ops = ops
+        .iter()
+        .map(|(p, make, c)| Op::put(path(p), make(ingest(store, c))))
+        .collect();
+    Changeset::new(base, ops).unwrap()
+}
+
+/// A store with location `site` (main: `README`) and fork `f1` of it.
+fn setup(dir: &Path) -> Store {
+    let store = Store::open(dir.join("store")).unwrap();
+    let main =
+        Tree::from_entries([(path("README"), Entry::File(ingest(&store, b"main\n")))]).unwrap();
+    store.add_location(&loc("site"), None, &main).unwrap();
+    store
+        .create_fork(&fork("f1"), &loc("site"), &writer().holder)
+        .unwrap();
+    store
+}
+
+fn mode(p: &Path) -> u32 {
+    std::fs::symlink_metadata(p).unwrap().permissions().mode() & 0o7777
+}
+
+/// The tree a shown directory holds, read back as a snapshot would.
+fn read_back(dir: &Path) -> GitOid {
+    let mut cache = cuenca_fs::StatCache::new();
+    cuenca_fs::snapshot(dir, &Tree::new(), &mut cache)
+        .unwrap()
+        .tree
+        .git_tree_id()
+}
+
+fn staging_is_empty(volume: &Path) -> bool {
+    std::fs::read_dir(volume.join(".cuenca/staging"))
+        .unwrap()
+        .next()
+        .is_none()
+}
+
+#[test]
+fn a_draft_is_shown_whole_and_read_only() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = setup(dir.path());
+    let root = dir.path().join("volume");
+    let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+
+    let pass = volume.converge(&store).unwrap();
+    assert_eq!(pass.built.len(), 2, "{pass:?}");
+    assert!(pass.failed.is_empty(), "{pass:?}");
+    assert_eq!(
+        std::fs::read(root.join("main/site/README")).unwrap(),
+        b"main\n"
+    );
+    assert_eq!(
+        std::fs::read(root.join("forks/f1/README")).unwrap(),
+        b"main\n"
+    );
+
+    let base = store.fork_head(&fork("f1")).unwrap();
+    let cs = change(
+        &store,
+        &base,
+        &[
+            ("src/lib.rs", Entry::File, b"fn main() {}\n"),
+            ("bin/run", Entry::Executable, b"#!/bin/sh\n"),
+            ("link", Entry::Symlink, b"src/lib.rs"),
+        ],
+    );
+    store.publish_draft(&fork("f1"), &writer(), &cs).unwrap();
+    let pass = volume.converge(&store).unwrap();
+    assert_eq!(
+        pass.built,
+        vec![(Shown::Fork(fork("f1")), cs.target)],
+        "{pass:?}"
+    );
+    assert_eq!(pass.unchanged, 1);
+
+    let shown = root.join("forks/f1");
+    assert_eq!(read_back(&shown), cs.target);
+    assert_eq!(
+        volume.shown(&Shown::Fork(fork("f1"))),
+        Some(cs.target),
+        "recorded"
+    );
+    // Main did not move.
+    assert!(!root.join("main/site/src").exists());
+    // Read-only to all but the owner; the group reads; no one else.
+    for d in [
+        &root.join("main"),
+        &root.join("forks"),
+        &shown,
+        &shown.join("src"),
+    ] {
+        assert_eq!(mode(d), 0o2750, "{}", d.display());
+    }
+    assert_eq!(mode(&shown.join("README")), 0o640);
+    assert_eq!(mode(&shown.join("src/lib.rs")), 0o640);
+    assert_eq!(mode(&shown.join("bin/run")), 0o750);
+    assert_eq!(
+        std::fs::read_link(shown.join("link")).unwrap(),
+        PathBuf::from("src/lib.rs")
+    );
+    assert_eq!(mode(&root.join(".cuenca")), 0o700);
+    // The replaced tree is gone.
+    assert!(staging_is_empty(&root));
+
+    // Nothing changed: nothing built.
+    let pass = volume.converge(&store).unwrap();
+    assert!(pass.built.is_empty(), "{pass:?}");
+    assert_eq!(pass.unchanged, 2);
+}
+
+#[test]
+fn a_reopened_volume_rebuilds_nothing_it_shows() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = setup(dir.path());
+    let root = dir.path().join("volume");
+    Volume::open(&root, store.object_dir())
+        .unwrap()
+        .converge(&store)
+        .unwrap();
+    let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+    let pass = volume.converge(&store).unwrap();
+    assert!(pass.built.is_empty(), "{pass:?}");
+    assert_eq!(pass.unchanged, 2);
+
+    // A shown tree removed behind the volume's back is shown again.
+    std::fs::remove_dir_all(root.join("forks/f1")).unwrap();
+    let pass = volume.converge(&store).unwrap();
+    assert_eq!(pass.built.len(), 1, "{pass:?}");
+    assert_eq!(
+        std::fs::read(root.join("forks/f1/README")).unwrap(),
+        b"main\n"
+    );
+}
+
+#[test]
+fn one_materialiser_per_volume() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = setup(dir.path());
+    let root = dir.path().join("volume");
+    let _first = Volume::open(&root, store.object_dir()).unwrap();
+    let err = Volume::open(&root, store.object_dir())
+        .err()
+        .expect("second open refused");
+    assert!(err.to_string().contains("another materialiser"), "{err}");
+}
+
+#[test]
+fn a_tree_that_fails_leaves_the_previous_one_shown() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = setup(dir.path());
+    let root = dir.path().join("volume");
+    let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+    volume.converge(&store).unwrap();
+
+    let base = store.fork_head(&fork("f1")).unwrap();
+    let cs = change(&store, &base, &[("new", Entry::File, b"new content\n")]);
+    store.publish_draft(&fork("f1"), &writer(), &cs).unwrap();
+    // Damage the blob on disk: the checkout hashes it and refuses.
+    let hex = GitOid::for_blob(b"new content\n").to_hex();
+    let object = store.object_dir().join(&hex[..2]).join(&hex[2..]);
+    let mut perms = std::fs::metadata(&object).unwrap().permissions();
+    perms.set_mode(0o644);
+    std::fs::set_permissions(&object, perms).unwrap();
+    std::fs::write(&object, b"tampered\n").unwrap();
+
+    let pass = volume.converge(&store).unwrap();
+    assert!(pass.built.is_empty(), "{pass:?}");
+    assert_eq!(pass.failed.len(), 1, "{pass:?}");
+    assert_eq!(pass.failed[0].0, Shown::Fork(fork("f1")));
+    assert!(!root.join("forks/f1/new").exists());
+    assert_eq!(
+        std::fs::read(root.join("forks/f1/README")).unwrap(),
+        b"main\n"
+    );
+    assert!(staging_is_empty(&root));
+    // Not retried at once.
+    let pass = volume.converge(&store).unwrap();
+    assert!(pass.failed.is_empty() && pass.built.is_empty(), "{pass:?}");
+    assert!(!volume.retry_due());
+}
+
+/// Over HTTP, as an agent publishes: shown within the spec's 15 s.
+#[test]
+fn a_published_draft_is_in_the_volume_within_15_s() {
+    let s = Server::start();
+    s.add_location("l1");
+    let a1 = s.mint("a1", Agent, "nA1CNTRL", grant(&["l1"], &[]));
+    s.whois.node("nA1CNTRL");
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f1", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("volume");
+    let mut config = VolumeConfig::new(root.clone());
+    config.interval = Duration::from_millis(200);
+    let materialiser = Materialiser::spawn(s.authority.clone(), config).unwrap();
+
+    let cs = s.write(&a1, &Tree::new(), &[("notes/today.md", b"hello\n")]);
+    let published = Instant::now();
+    let r = s.publish(&a1, "f1", 1, &cs);
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let shown = root.join("forks/f1/notes/today.md");
+    while !shown.exists() {
+        assert!(
+            published.elapsed() < Duration::from_secs(15),
+            "not shown in 15 s"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let took = published.elapsed();
+    assert_eq!(std::fs::read(&shown).unwrap(), b"hello\n");
+    assert_eq!(read_back(&root.join("forks/f1")), cs.target);
+    eprintln!("draft shown in the volume {took:?} after its publish was acknowledged");
+    drop(materialiser);
+    s.stop();
+}
+
+// ---- killed while materialising ----------------------------------------------------
+
+const DIR_ENV: &str = "CUENCA_MATERIALISE_CRASH_DIR";
+const KILLS: usize = 10;
+/// Kills tried at most, to get [`KILLS`] inside a materialisation.
+const ATTEMPTS: usize = 40;
+/// Files each draft rewrites, so a checkout takes long enough to be killed inside.
+const FILES: usize = 1500;
+
+/// The draft numbered `n`: file `i` holds `n i`, ingested in one batch.
+fn numbered(store: &Store, base: &Tree, n: u64) -> Changeset {
+    let mut batch = store.blob_batch();
+    let ops = (0..FILES)
+        .map(|i| {
+            let content = format!("{n} {i}\n");
+            let oid = GitOid::for_blob(content.as_bytes());
+            batch
+                .add(oid, content.len() as u64, content.as_bytes())
+                .unwrap();
+            Op::put(path(&format!("d{}/f{i}", i % 8)), Entry::File(oid))
+        })
+        .collect();
+    batch.commit().unwrap();
+    Changeset::new(base, ops).unwrap()
+}
+
+/// The child: publish a draft, materialise, repeat, until killed. Not a test alone.
+#[test]
+#[ignore = "run by killed_while_materialising as a child process"]
+fn child_materialiser() {
+    let Ok(dir) = std::env::var(DIR_ENV) else {
+        return;
+    };
+    let dir = PathBuf::from(dir);
+    let store = Store::open(dir.join("store")).unwrap();
+    let mut volume = Volume::open(&dir.join("volume"), store.object_dir()).unwrap();
+    std::fs::write(dir.join("ready"), b"").unwrap();
+    let mut n = store.len().unwrap();
+    loop {
+        let base = store.fork_head(&fork("f1")).unwrap();
+        n += 1;
+        store
+            .publish_draft(&fork("f1"), &writer(), &numbered(&store, &base, n))
+            .unwrap();
+        // Mark the pass, and how long the last one took, so the parent can aim inside.
+        std::fs::write(dir.join("in-pass"), b"").unwrap();
+        let start = Instant::now();
+        let pass = volume.converge(&store).unwrap();
+        assert!(pass.failed.is_empty(), "{pass:?}");
+        let tmp = dir.join("pass-us.tmp");
+        std::fs::write(&tmp, start.elapsed().as_micros().to_string()).unwrap();
+        std::fs::rename(tmp, dir.join("pass-us")).unwrap();
+        std::fs::remove_file(dir.join("in-pass")).unwrap();
+    }
+}
+
+#[allow(clippy::zombie_processes)] // the caller kills and waits for it
+fn spawn_child(dir: &Path) -> Child {
+    for f in ["ready", "in-pass"] {
+        let _ = std::fs::remove_file(dir.join(f));
+    }
+    let child = Command::new(std::env::current_exe().unwrap())
+        .args(["--ignored", "--exact", "child_materialiser", "--nocapture"])
+        .env(DIR_ENV, dir)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    let start = Instant::now();
+    while !dir.join("ready").exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "child did not start"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    child
+}
+
+/// Wait for the child to start a pass, then a random part of the last pass's length.
+fn aim(dir: &Path, seed: u64) {
+    let start = Instant::now();
+    while !dir.join("in-pass").exists() {
+        assert!(start.elapsed() < Duration::from_secs(60), "no pass started");
+        std::thread::sleep(Duration::from_micros(200));
+    }
+    let last: u64 = std::fs::read_to_string(dir.join("pass-us"))
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(50_000);
+    std::thread::sleep(Duration::from_micros(seed % last.max(1)));
+}
+
+/// Kill the materialiser at random moments inside a pass, until 10 kills have left a
+/// tree staged (at most [`ATTEMPTS`]). After each kill, before anything
+/// restarts: every shown directory holds, whole, a tree the log has held for it. Then a
+/// reopened volume converges to the log and leaves no staging behind.
+#[test]
+fn killed_while_materialising() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    let mut seed = std::process::id() as u64;
+    let mut killed_mid_pass = 0;
+    let mut kill = 0;
+    while killed_mid_pass < KILLS {
+        assert!(
+            kill < ATTEMPTS,
+            "only {killed_mid_pass} of {kill} kills landed inside a materialisation"
+        );
+        kill += 1;
+        let mut child = spawn_child(dir.path());
+        seed = seed
+            .wrapping_mul(6364136223846793005)
+            .wrapping_add(1442695040888963407);
+        // Let a pass or two finish first, so the last pass's length is known.
+        std::thread::sleep(Duration::from_millis(200));
+        aim(dir.path(), seed >> 33);
+        child.kill().unwrap();
+        child.wait().unwrap();
+
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let root = dir.path().join("volume");
+        if std::fs::read_dir(root.join(".cuenca/staging"))
+            .unwrap()
+            .next()
+            .is_some()
+        {
+            killed_mid_pass += 1;
+        }
+        // Every tree the fork has held.
+        let mut held = vec![store.fork(&fork("f1")).unwrap().unwrap().base];
+        for record in store.fork_history(&fork("f1")).unwrap() {
+            if let cuenca_core::Event::DraftPublished { changeset, .. } = record.event {
+                held.push(changeset.target);
+            }
+        }
+        let shown = root.join("forks/f1");
+        // Once shown (by the first kill's convergence at the latest), never gone.
+        assert!(
+            kill == 1 || shown.exists(),
+            "kill {kill}: the fork vanished"
+        );
+        if shown.exists() {
+            let tree = read_back(&shown);
+            assert!(
+                held.contains(&tree),
+                "kill {kill}: a tree the log never held is shown"
+            );
+        }
+        let main = store.location(&loc("site")).unwrap().unwrap().main;
+        if root.join("main/site").exists() {
+            assert_eq!(read_back(&root.join("main/site")), main, "kill {kill}");
+        }
+
+        let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+        assert!(staging_is_empty(&root), "kill {kill}: staging left");
+        let pass = volume.converge(&store).unwrap();
+        assert!(pass.failed.is_empty(), "kill {kill}: {pass:?}");
+        let head = store.fork(&fork("f1")).unwrap().unwrap().head;
+        assert_eq!(read_back(&shown), head, "kill {kill}: did not converge");
+        assert_eq!(read_back(&root.join("main/site")), main, "kill {kill}");
+    }
+    eprintln!("{kill} kills, {killed_mid_pass} left a tree staged mid-pass");
+}

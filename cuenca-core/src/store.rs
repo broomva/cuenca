@@ -214,6 +214,14 @@ impl Store {
             .transpose()
     }
 
+    /// The directory the store keeps blob content in, laid out as `<2 hex>/<38 hex>` of
+    /// the git id. Read-only to everyone but the store: a reader checks each file
+    /// against its id (as `cuenca_fs::ObjectDir` does), since nothing here vouches for
+    /// what it finds there.
+    pub fn object_dir(&self) -> &Path {
+        self.blobs.objects()
+    }
+
     /// A blob's content, verified against its id on the way out.
     pub fn read_blob(&self, oid: GitOid) -> Result<Vec<u8>> {
         if self.blob_info(oid)?.is_none() {

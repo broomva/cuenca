@@ -74,6 +74,12 @@ The branch is pushed to the location's own repository, so workflows that run on 
 
 Run the authority with `--gh <path>` if `gh` is not on its `PATH`. The authority runs git with no system or global config. It also sets git's credential helper for `https://github.com` to `gh auth git-credential`.
 
+## The volume: `cuenca serve --volume <dir>`
+
+With `--volume` (or `CUENCA_VOLUME`), the authority keeps every location's main at `<dir>/main/<location>/` and every fork's head at `<dir>/forks/<fork>/` as plain folders, for stock Samba to serve to Finder. It checks the log for growth every second, so a published draft shows within a few seconds. Each tree is checked out into `<dir>/.cuenca/staging/`, flushed to disk, and swapped into place in one atomic exchange, so a reader sees a whole tree the log has held, never a half-written one. An authority killed mid-swap converges again on restart. Folders are `2750` and files `0640` (`0750` for executables): Samba's account reads them through the authority's group and cannot change them. Only one authority may materialise a volume at a time.
+
+Every fork is shown read-only for now. Owner forks that Finder writes, snapshotted back into drafts, come next (BRO-3256).
+
 More crates land as the plan's nodes do. Install, operate and recover sections arrive with the close-out node (BRO-3260).
 
 ```bash

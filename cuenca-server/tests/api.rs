@@ -558,6 +558,7 @@ fn the_authority_refuses_a_non_tailnet_bind() {
             unsafe_bind: false,
             tailscale: "tailscale".into(),
             gh: "gh".into(),
+            volume: None,
         };
         let rt = tokio::runtime::Runtime::new().unwrap();
         let err = rt.block_on(cuenca_server::run(config)).unwrap_err();

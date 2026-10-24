@@ -191,4 +191,22 @@ mutate src/land.rs '                    if !pushed {
 
 mutate src/land.rs '        let ours = ids.len() == 2' '        let ours = ids.len() >= 2' --test land a_merge_commit
 
+# The volume (materialise.rs): a tree is built in staging and swapped in whole; modes are
+# read-only; a killed pass leaves nothing; one materialiser; records skip work; a failed
+# tree waits before it is tried again.
+mutate src/materialise.rs '        cuenca_fs::checkout(&full, staged, &self.objects)?;' '        let here = self.root.join(what.rel());
+        remove_any(&here)?;
+        cuenca_fs::checkout(&full, &here, &self.objects)?;
+        fs::rename(&here, staged)?;' --test materialise killed_while_materialising
+mutate src/materialise.rs '        set_modes(staged)?;' '' --test materialise a_draft_is_shown
+mutate src/materialise.rs 'const FILE_MODE: u32 = 0o640;' 'const FILE_MODE: u32 = 0o644;' --test materialise a_draft_is_shown
+mutate src/materialise.rs 'const DIR_MODE: u32 = 0o2750;' 'const DIR_MODE: u32 = 0o2755;' --test materialise a_draft_is_shown
+mutate src/materialise.rs '.permissions().mode() & 0o100 != 0;' '.permissions().mode() & 0o100 == 0;' --test materialise a_draft_is_shown
+mutate src/materialise.rs '            fs::remove_dir_all(&staging)?;' '' --test materialise killed_while_materialising
+mutate src/materialise.rs 'FlockOperation::NonBlockingLockExclusive' 'FlockOperation::NonBlockingLockShared' --test materialise one_materialiser
+mutate src/materialise.rs 'if self.shown.get(&what) == Some(&tree) &&' 'if false && self.shown.get(&what) == Some(&tree) &&' --test materialise a_reopened_volume
+mutate src/materialise.rs '        write_record(&self.state.join(what.rel()), tree)?;' '' --test materialise a_reopened_volume
+mutate src/materialise.rs '                && at.elapsed() < RETRY_AFTER' '                && false' --test materialise a_tree_that_fails
+mutate src/materialise.rs '        if let Err(e) = remove_any(&staged)' '        if let Err(e) = Ok::<(), io::Error>(())' --test materialise a_draft_is_shown
+
 exit $survived
