@@ -1,0 +1,50 @@
+# Cuenca's volume over stock Samba (spec rev 2.2, section 2a). Rendered by deploy/install.sh
+# into /etc/samba/smb.conf; edit this template and re-run the script, not the rendered file.
+# Samba applies no rule to any file operation here: what a client may change is decided by
+# the volume's file modes, which the authority sets.
+
+[global]
+   server role = standalone server
+   server string = cuenca
+   # The tailnet only. smbd starts after tailscale0 has its address (smbd.service.d/cuenca.conf).
+   interfaces = tailscale0
+   bind interfaces only = yes
+   disable netbios = yes
+   smb ports = 445
+   # Only the owner's enrolled devices. Everything else, the authority's own host included, is refused.
+   hosts allow = @HOSTS_ALLOW@
+   hosts deny = ALL
+   # One account, cuenca-owner; no guest.
+   map to guest = Never
+   restrict anonymous = 2
+   usershare max shares = 0
+   load printers = no
+   printing = bsd
+   printcap name = /dev/null
+   disable spoolss = yes
+   log file = /var/log/samba/log.%m
+   max log size = 1000
+   logging = file
+   # The tailnet's WireGuard encrypts the link; SMB signing and encryption stay at Samba's defaults.
+
+   # Finder's metadata and named streams in extended attributes, not ._* files (spike C, BRO-3234).
+   # Resource forks still go to ._* files, which the default .forkignore keeps out of snapshots.
+   vfs objects = fruit streams_xattr
+   fruit:resource = file
+   fruit:nfs_aces = no
+
+[cuenca]
+   path = @VOLUME@
+   valid users = cuenca-owner
+   guest ok = no
+   read only = no
+   browseable = yes
+   # A link inside the share never leads outside it.
+   wide links = no
+   # Modes are the server's, not the client's.
+   force group = cuenca
+   create mask = 0660
+   force create mode = 0660
+   directory mask = 2770
+   force directory mode = 2770
+   nt acl support = no

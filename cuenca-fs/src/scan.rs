@@ -23,7 +23,7 @@ use std::io::{self, Read};
 use std::os::fd::OwnedFd;
 use std::os::unix::ffi::OsStrExt;
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::SystemTime;
 
 /// The largest file a snapshot takes, as the authority's blob store accepts.
@@ -72,12 +72,23 @@ pub struct NewBlob {
 }
 
 /// Where a new blob's content is. A file can change after the scan, so whoever uploads
-/// it hashes what it sends (the authority's ingest does).
+/// it from its path hashes what it sends (the authority's ingest does).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Content {
     File(PathBuf),
-    /// A symlink's target.
+    /// The bytes the scan read and hashed: a symlink's target, or a file's content
+    /// within [`SnapshotOptions::keep`].
     Inline(Vec<u8>),
+}
+
+/// How much file content a snapshot keeps, as [`Content::Inline`], instead of naming the
+/// file to be read again: a file of at most `per_file` bytes, while the bytes kept by
+/// the whole scan stay within `total`. The default keeps none. A file over either bound,
+/// or taken from the stat cache unread, is named by its path ([`Content::File`]).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Keep {
+    pub per_file: u64,
+    pub total: u64,
 }
 
 /// An entry a snapshot left out, by its path relative to the root.
@@ -95,6 +106,8 @@ pub struct SnapshotOptions<'a> {
     /// Accept that base paths the rules name are left out of the tree and deleted by the
     /// changeset (listed in [`Snapshot::dropped`]), instead of refusing the snapshot.
     pub drop_ignored: bool,
+    /// File content to keep from the read, so that what is uploaded is what was hashed.
+    pub keep: Keep,
 }
 
 /// Snapshot `root` against `base`, with the rules of `root/.forkignore` (or the defaults
@@ -121,12 +134,12 @@ pub fn snapshot_with(
 ) -> Result<Snapshot> {
     let dir = open_dir(root)?;
     if let Some(rules) = options.rules {
-        let (snap, next) = scan(dir, root, base, cache, rules, options.drop_ignored)?;
+        let (snap, next) = scan(dir, root, base, cache, rules, options)?;
         *cache = next;
         return Ok(snap);
     }
     let (rules, parsed) = ForkIgnore::load(&dir, root)?;
-    let (snap, next) = scan(dir, root, base, cache, &rules, options.drop_ignored)?;
+    let (snap, next) = scan(dir, root, base, cache, &rules, options)?;
     rules_held(
         !rules.excludes(FORKIGNORE),
         parsed.as_deref(),
@@ -196,8 +209,10 @@ fn scan(
     base: &Tree,
     cache: &StatCache,
     ignore: &ForkIgnore,
-    drop_ignored: bool,
+    options: &SnapshotOptions,
 ) -> Result<(Snapshot, StatCache)> {
+    let drop_ignored = options.drop_ignored;
+    let budget = Budget::of(options.keep);
     let started = SystemTime::now();
     let mut found = Vec::new();
     let mut skipped = Vec::new();
@@ -322,7 +337,7 @@ fn scan(
                         }),
                     }
                     if queue.len() >= BATCH {
-                        hashed += read_all(&mut queue, &mut found)?;
+                        hashed += read_all(&mut queue, &mut found, &budget)?;
                     }
                 }
                 _ => skipped.push(Skipped {
@@ -332,7 +347,7 @@ fn scan(
             }
         }
     }
-    hashed += read_all(&mut queue, &mut found)?;
+    hashed += read_all(&mut queue, &mut found, &budget)?;
 
     // A base path the walk left out because the rules named it as a file, or named one of
     // its directories as a directory. A base path is never a directory, so one the walk
@@ -414,12 +429,52 @@ fn errno(path: &Path) -> impl Fn(Errno) -> FsError + '_ {
     move |e| FsError::io(path)(e.into())
 }
 
+/// What is left of a scan's [`Keep`], shared by the files it reads in parallel.
+struct Budget {
+    per_file: u64,
+    left: Mutex<u64>,
+}
+
+impl Budget {
+    fn of(keep: Keep) -> Budget {
+        Budget {
+            per_file: keep.per_file,
+            left: Mutex::new(keep.total),
+        }
+    }
+
+    #[cfg(test)]
+    fn none() -> Budget {
+        Budget::of(Keep::default())
+    }
+
+    /// Take `size` bytes for one file, if it is within both bounds.
+    fn take(&self, size: u64) -> bool {
+        if size > self.per_file {
+            return false;
+        }
+        let mut left = self.left.lock().unwrap_or_else(|p| p.into_inner());
+        match left.checked_sub(size) {
+            Some(rest) => {
+                *left = rest;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Give back what [`Budget::take`] took for a read that was not kept.
+    fn give_back(&self, size: u64) {
+        *self.left.lock().unwrap_or_else(|p| p.into_inner()) += size;
+    }
+}
+
 /// Read every queued file, in parallel, into `found`; how many were read.
-fn read_all(queue: &mut Vec<ToRead>, found: &mut Vec<Found>) -> Result<usize> {
+fn read_all(queue: &mut Vec<ToRead>, found: &mut Vec<Found>, budget: &Budget) -> Result<usize> {
     let n = queue.len();
     let read: Vec<Option<Found>> = std::mem::take(queue)
         .into_par_iter()
-        .map(read_file)
+        .map(|item| read_file(item, budget))
         .collect::<Result<_>>()?;
     found.extend(read.into_iter().flatten());
     Ok(n)
@@ -429,8 +484,9 @@ fn read_all(queue: &mut Vec<ToRead>, found: &mut Vec<Found>) -> Result<usize> {
 /// was opened without following a link, held the announced number of bytes, and the open
 /// file's `fstat` is still `stamp` at the end. Otherwise read it again, up to
 /// [`READ_ATTEMPTS`] times. `None` if the file was removed since it was listed, which
-/// is what an editor's atomic save does to its temporary file.
-fn read_file(item: ToRead) -> Result<Option<Found>> {
+/// is what an editor's atomic save does to its temporary file. Content within `budget`
+/// is kept as [`Content::Inline`]: exactly the bytes that were hashed.
+fn read_file(item: ToRead, budget: &Budget) -> Result<Option<Found>> {
     let ToRead {
         dir,
         name,
@@ -448,28 +504,45 @@ fn read_file(item: ToRead) -> Result<Option<Found>> {
             });
         }
         let flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+        let keep = budget.take(stamp.size());
+        // What to give back to the budget if this read is not kept.
+        let held = if keep { stamp.size() } else { 0 };
         let read = match openat(&*dir, &name, flags, rustix::fs::Mode::empty()) {
-            Ok(fd) => read_once(File::from(fd), stamp, rule, &abs)?,
+            Ok(fd) => read_once(File::from(fd), stamp, rule || keep, &abs),
             // Replaced by a symlink since it was listed.
-            Err(Errno::LOOP) => None,
-            Err(Errno::NOENT) => return Ok(None),
-            Err(e) => return Err(FsError::io(&abs)(e.into())),
-        };
-        if let Some((blob, kept)) = read {
-            if let Some(content) = kept {
-                check_content(&path, Mode::File, &content)?;
+            Err(Errno::LOOP) => Ok(None),
+            Err(Errno::NOENT) => {
+                budget.give_back(held);
+                return Ok(None);
             }
-            let entry = if stamp.is_executable() {
-                Entry::Executable(blob.oid())
-            } else {
-                Entry::File(blob.oid())
-            };
-            return Ok(Some(Found {
-                path,
-                entry,
-                stamp: Some(stamp),
-                content: Content::File(abs),
-            }));
+            Err(e) => Err(FsError::io(&abs)(e.into())),
+        };
+        match read {
+            Ok(Some((blob, kept))) => {
+                if let Some(content) = &kept {
+                    check_content(&path, Mode::File, content)?;
+                }
+                let entry = if stamp.is_executable() {
+                    Entry::Executable(blob.oid())
+                } else {
+                    Entry::File(blob.oid())
+                };
+                let content = match kept {
+                    Some(bytes) if keep => Content::Inline(bytes),
+                    _ => Content::File(abs),
+                };
+                return Ok(Some(Found {
+                    path,
+                    entry,
+                    stamp: Some(stamp),
+                    content,
+                }));
+            }
+            Ok(None) => budget.give_back(held),
+            Err(e) => {
+                budget.give_back(held);
+                return Err(e);
+            }
         }
         let st = match statat(&*dir, &name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(st) => st,
@@ -612,7 +685,10 @@ mod tests {
             // The stamp of what the link points at: following it would match.
             stamp: stamp(&dir.path().join("target")),
         };
-        assert!(matches!(read_file(item), Err(FsError::Unstable(_))));
+        assert!(matches!(
+            read_file(item, &Budget::none()),
+            Err(FsError::Unstable(_))
+        ));
     }
 
     #[test]
@@ -689,13 +765,75 @@ mod tests {
     #[test]
     fn a_file_removed_after_the_listing_is_left_out() {
         let dir = tempfile::tempdir().unwrap();
-        let item = ToRead {
-            dir: Arc::new(open_dir(dir.path()).unwrap()),
-            name: CString::new("gone").unwrap(),
-            path: RepoPath::new("gone").unwrap(),
-            abs: dir.path().join("gone"),
-            stamp: stamp(dir.path()),
-        };
-        assert!(read_file(item).unwrap().is_none());
+        // Listed with 3 bytes, within the budget, then removed before it is read.
+        fs::write(dir.path().join("gone"), b"abc").unwrap();
+        let item = to_read(dir.path(), "gone");
+        fs::remove_file(dir.path().join("gone")).unwrap();
+        let budget = Budget::of(Keep {
+            per_file: 10,
+            total: 10,
+        });
+        assert!(read_file(item, &budget).unwrap().is_none());
+        // Nothing was kept, so nothing stays taken.
+        assert_eq!(*budget.left.lock().unwrap(), 10);
+    }
+
+    /// A file that changed between its listing and its read is read again, and what
+    /// the first read took from the budget is given back first.
+    #[test]
+    fn a_file_read_again_takes_from_the_budget_once() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f"), b"abc").unwrap();
+        let item = to_read(dir.path(), "f");
+        // Listed with 3 bytes; holds 5 by the time it is read.
+        fs::write(dir.path().join("f"), b"abcde").unwrap();
+        let budget = Budget::of(Keep {
+            per_file: 10,
+            total: 10,
+        });
+        let found = read_file(item, &budget).unwrap().unwrap();
+        assert_eq!(found.content, Content::Inline(b"abcde".to_vec()));
+        assert_eq!(*budget.left.lock().unwrap(), 5);
+    }
+
+    fn to_read(dir: &Path, name: &str) -> ToRead {
+        ToRead {
+            dir: Arc::new(open_dir(dir).unwrap()),
+            name: CString::new(name).unwrap(),
+            path: RepoPath::new(name).unwrap(),
+            abs: dir.join(name),
+            stamp: stamp(&dir.join(name)),
+        }
+    }
+
+    #[test]
+    fn a_file_within_the_budget_is_kept_as_the_bytes_that_were_hashed() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("small"), b"12345").unwrap();
+        fs::write(dir.path().join("large"), b"1234567").unwrap();
+        fs::write(dir.path().join("more"), b"12345").unwrap();
+        let budget = Budget::of(Keep {
+            per_file: 6,
+            total: 8,
+        });
+        // Over the per-file bound, within the total: named by its path, and the budget
+        // is untouched.
+        let large = read_file(to_read(dir.path(), "large"), &budget)
+            .unwrap()
+            .unwrap();
+        assert_eq!(large.content, Content::File(dir.path().join("large")));
+        assert_eq!(*budget.left.lock().unwrap(), 8);
+        let small = read_file(to_read(dir.path(), "small"), &budget)
+            .unwrap()
+            .unwrap();
+        assert_eq!(small.content, Content::Inline(b"12345".to_vec()));
+        assert_eq!(small.entry, Entry::file(b"12345"));
+        assert_eq!(*budget.left.lock().unwrap(), 3);
+        // Within the per-file bound, past what is left of the total.
+        let more = read_file(to_read(dir.path(), "more"), &budget)
+            .unwrap()
+            .unwrap();
+        assert_eq!(more.content, Content::File(dir.path().join("more")));
+        assert_eq!(*budget.left.lock().unwrap(), 3);
     }
 }

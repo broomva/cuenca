@@ -66,8 +66,21 @@
 //! "Whole" is per lookup: a reader that opens `forks/<fork>/` after a swap sees the new
 //! tree, one that opened it before keeps the old one, which is then removed beneath it.
 //!
-//! Forking an owner fork into a checkout (snapshot first, spec section 2a) is not here
-//! yet (BRO-3256 part 3).
+//! Forking an owner fork (spec section 2a) snapshots it first, through
+//! [`Volume::snapshot_owner_fork`] with the volume locked from the snapshot to the fork
+//! ([`Authority::branch_fork`]): the new fork holds every write the snapshot read, and
+//! what Finder writes later stays in the owner fork.
+//!
+//! A snapshot reads each file as it is at that moment. A file a client is still
+//! writing is taken as far as it has been written (as `git add` would take it): the
+//! draft, and a fork started from it, hold that partial file, and the owner fork's next
+//! snapshot holds the finished one, so nothing is lost. What is uploaded is only ever
+//! what the scan read: a file of at most 1 MiB (64 MiB per snapshot) is uploaded from
+//! the bytes the scan hashed, and a larger one is read again and hashed against the id
+//! the scan found, so a large file that changed between the scan and its upload fails
+//! that snapshot, which is taken again (the next pass, or the next attempt of a fork,
+//! after a pause; [`Authority::branch_fork`]). A snapshot that waits for writes to
+//! settle is BRO-3450.
 //!
 //! # Trust
 //!
@@ -89,8 +102,8 @@ use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use cuenca_core::{ChangesetId, Fork, ForkName, Holder, LocationName, Store, Writer};
@@ -269,6 +282,11 @@ impl Volume {
         })
     }
 
+    /// The volume's directory.
+    pub fn root(&self) -> &Path {
+        &self.root
+    }
+
     /// The tree `what` shows now, as the volume records it.
     pub fn shown(&self, what: &Shown) -> Option<GitOid> {
         self.shown.get(what).copied()
@@ -415,16 +433,9 @@ impl Volume {
             if !is_owner(&fork) {
                 continue;
             }
-            let what = Shown::Fork(fork.name.clone());
-            let dir = self.root.join(what.rel());
-            if !self.shown.contains_key(&what)
-                || !fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir())
-            {
-                continue;
-            }
-            let cache = self.caches.entry(fork.name.clone()).or_default();
-            match snapshot_one(store, &fork, &dir, cache) {
-                Ok((published, skipped)) => {
+            match self.snapshot_owner_fork(store, &fork) {
+                None => {}
+                Some(Ok((published, skipped))) => {
                     match published {
                         Some((id, offset)) => {
                             snapped.published.push((fork.name.clone(), id, offset))
@@ -437,15 +448,45 @@ impl Volume {
                             .map(|s| (fork.name.clone(), s.path, s.reason)),
                     );
                 }
-                Err(e) => snapped.failed.push((fork.name.clone(), e)),
+                Some(Err(e)) => snapped.failed.push((fork.name.clone(), e)),
             }
         }
         Ok(snapped)
     }
+
+    /// Snapshot one owner fork, as [`Volume::snapshot_owner_forks`] does each: `None`
+    /// when the volume does not show it (nothing was written to it here, so the log's
+    /// head is all of it), else what was published and what was left out, or why the
+    /// snapshot failed (nothing of it was published).
+    pub fn snapshot_owner_fork(
+        &mut self,
+        store: &Store,
+        fork: &cuenca_core::Fork,
+    ) -> Option<Result<SnapshotOne, String>> {
+        let what = Shown::Fork(fork.name.clone());
+        let dir = self.root.join(what.rel());
+        if !is_owner(fork)
+            || !self.shown.contains_key(&what)
+            || !fs::symlink_metadata(&dir).is_ok_and(|m| m.is_dir())
+        {
+            return None;
+        }
+        let cache = self.caches.entry(fork.name.clone()).or_default();
+        Some(snapshot_one(store, fork, &dir, cache))
+    }
 }
 
+/// The file content a snapshot of an owner fork keeps from its read and uploads as it
+/// was hashed, so a client still writing a file cannot fail the upload. A larger file,
+/// or one past the total, is read again for its upload, and a write in between fails
+/// that snapshot (it is taken again).
+const KEEP: cuenca_fs::Keep = cuenca_fs::Keep {
+    per_file: 1 << 20,
+    total: 64 << 20,
+};
+
 /// The draft one snapshot published, if any, and what it left out.
-type SnapshotOne = (Option<(ChangesetId, u64)>, Vec<cuenca_fs::Skipped>);
+pub type SnapshotOne = (Option<(ChangesetId, u64)>, Vec<cuenca_fs::Skipped>);
 
 /// Snapshot one owner fork's directory against its head; publish the changes, if any,
 /// as the volume under the fork's epoch.
@@ -455,8 +496,62 @@ fn snapshot_one(
     dir: &Path,
     cache: &mut cuenca_fs::StatCache,
 ) -> Result<SnapshotOne, String> {
+    let scanned = scan_fork(store, fork, dir, cache)?;
+    publish_scanned(store, fork, scanned, cache)
+}
+
+/// A scan of an owner fork not yet published, and its stat cache as it was before.
+struct Scanned {
+    snap: cuenca_fs::Snapshot,
+    before: cuenca_fs::StatCache,
+}
+
+fn scan_fork(
+    store: &Store,
+    fork: &cuenca_core::Fork,
+    dir: &Path,
+    cache: &mut cuenca_fs::StatCache,
+) -> Result<Scanned, String> {
     let head = store.tree(fork.head).map_err(|e| e.to_string())?;
-    let snap = cuenca_fs::snapshot(dir, &head, cache).map_err(|e| e.to_string())?;
+    let before = cache.clone();
+    let snap = scan(dir, &head, cache).map_err(|e| e.to_string())?;
+    Ok(Scanned { snap, before })
+}
+
+/// Publish a scan. The stat cache may only name content the log holds, since a file it
+/// answers is not read and so would be uploaded by path: a scan that publishes nothing
+/// puts the cache back as it was before that scan.
+fn publish_scanned(
+    store: &Store,
+    fork: &cuenca_core::Fork,
+    scanned: Scanned,
+    cache: &mut cuenca_fs::StatCache,
+) -> Result<SnapshotOne, String> {
+    publish(store, fork, scanned.snap).inspect_err(|_| *cache = scanned.before)
+}
+
+/// Scan an owner fork's directory against `head`, keeping [`KEEP`] of what it reads.
+fn scan(
+    dir: &Path,
+    head: &cuenca_tree::Tree,
+    cache: &mut cuenca_fs::StatCache,
+) -> Result<cuenca_fs::Snapshot, cuenca_fs::FsError> {
+    let options = cuenca_fs::SnapshotOptions {
+        keep: KEEP,
+        ..Default::default()
+    };
+    cuenca_fs::snapshot_with(dir, head, cache, &options)
+}
+
+/// Upload what a snapshot of an owner fork read and publish it as the fork's draft.
+/// Only the bytes the scan read are ever taken: content the scan kept is uploaded as it
+/// was hashed, and a file it did not keep is read again and hashed against the id the
+/// scan found, so a file changed (or swapped) since fails the snapshot instead.
+fn publish(
+    store: &Store,
+    fork: &cuenca_core::Fork,
+    snap: cuenca_fs::Snapshot,
+) -> Result<SnapshotOne, String> {
     if snap.is_clean() {
         return Ok((None, snap.skipped));
     }
@@ -467,8 +562,15 @@ fn snapshot_one(
             cuenca_fs::Content::Inline(bytes) => batch.add(blob.oid, blob.size, bytes.as_slice()),
         };
         // A file that changed since the scan hashes to another id: refused, and the
-        // next pass reads it again.
-        added.map_err(|e| e.to_string())?;
+        // next pass reads it again. Said without the store's own words, which would give
+        // the length or the id of whatever the path now reaches.
+        added.map_err(|e| match (&blob.content, e) {
+            (
+                cuenca_fs::Content::File(path),
+                cuenca_core::CoreError::OidMismatch { .. } | cuenca_core::CoreError::Hash(_),
+            ) => format!("{}: changed while it was snapshotted", path.display()),
+            (_, e) => e.to_string(),
+        })?;
     }
     batch.commit().map_err(|e| e.to_string())?;
     let writer = Writer::new(Holder::volume(), fork.epoch());
@@ -665,6 +767,9 @@ impl Materialiser {
     pub fn spawn(authority: Arc<Authority>, config: VolumeConfig) -> io::Result<Self> {
         let mut volume = Volume::open(&config.root, authority.store.object_dir())?;
         volume.set_retry_after(config.retry_after);
+        let volume = Arc::new(Mutex::new(volume));
+        // Forking an owner fork snapshots it under the same lock ([`Authority::branch_fork`]).
+        authority.set_volume(volume.clone())?;
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();
@@ -675,6 +780,7 @@ impl Materialiser {
                     let mut snapped_at: Option<Instant> = None;
                     while !stop.load(Ordering::SeqCst) {
                         let ran = catch_unwind(AssertUnwindSafe(|| {
+                            let mut volume = Authority::lock_volume(&volume);
                             if snapped_at.is_none_or(|t| t.elapsed() >= config.snapshot_interval) {
                                 snapped_at = Some(Instant::now());
                                 match volume.snapshot_owner_forks(&authority.store) {
@@ -778,6 +884,138 @@ mod tests {
         assert_eq!(fs::read(shown.join("edit.md")).unwrap(), b"from finder\n");
         assert!(!shown.join("README").exists());
         assert!(fs::read_dir(&volume.staging).unwrap().next().is_none());
+    }
+
+    /// A small file written again between the scan and its upload is uploaded as the
+    /// scan read it: a client that keeps writing cannot fail the snapshot.
+    #[test]
+    fn a_small_file_changed_after_the_scan_is_uploaded_as_it_was_read() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let main = Tree::new();
+        let site = LocationName::new("site").unwrap();
+        store.add_location(&site, None, &main).unwrap();
+        let owner = ForkName::new("owner-mac").unwrap();
+        store.create_fork(&owner, &site, &Holder::volume()).unwrap();
+        let fork = store.fork(&owner).unwrap().unwrap();
+        let root = dir.path().join("fork");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("x.md"), b"first\n").unwrap();
+        let snap = scan(&root, &main, &mut cuenca_fs::StatCache::new()).unwrap();
+        fs::write(root.join("x.md"), b"second, longer\n").unwrap();
+        let (published, _) = publish(&store, &fork, snap).unwrap();
+        assert!(published.is_some());
+        let fork = store.fork(&owner).unwrap().unwrap();
+        let head = store.tree(fork.head).unwrap();
+        assert_eq!(head.get("x.md"), Some(&Entry::file(b"first\n")));
+    }
+
+    /// After a snapshot that failed to publish (a large file changed before its
+    /// upload), the next one still reads, and keeps, the small file: the failed attempt
+    /// left the stat cache as it was, so nothing unpublished is answered by path.
+    #[test]
+    fn a_failed_snapshot_leaves_the_cache_naming_only_what_the_log_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let main = Tree::new();
+        let site = LocationName::new("site").unwrap();
+        store.add_location(&site, None, &main).unwrap();
+        let owner = ForkName::new("owner-mac").unwrap();
+        store.create_fork(&owner, &site, &Holder::volume()).unwrap();
+        let fork = store.fork(&owner).unwrap().unwrap();
+        let root = dir.path().join("fork");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("x.md"), b"first\n").unwrap();
+        let big = vec![b'b'; (KEEP.per_file + 1) as usize];
+        fs::write(root.join("big.bin"), &big).unwrap();
+        // Old enough that a stat cache trusts it.
+        let old = std::time::SystemTime::now() - Duration::from_secs(60);
+        for name in ["x.md", "big.bin"] {
+            File::options()
+                .write(true)
+                .open(root.join(name))
+                .unwrap()
+                .set_modified(old)
+                .unwrap();
+        }
+        let mut cache = cuenca_fs::StatCache::new();
+        // The large file is uploaded by path; changed first, it fails the attempt.
+        let scanned = scan_fork(&store, &fork, &root, &mut cache).unwrap();
+        let mut changed = big.clone();
+        changed[0] = b'c';
+        fs::write(root.join("big.bin"), &changed).unwrap();
+        assert!(publish_scanned(&store, &fork, scanned, &mut cache).is_err());
+        // Settled again, and old: the next attempt fails on nothing of its own.
+        fs::write(root.join("big.bin"), &big).unwrap();
+        File::options()
+            .write(true)
+            .open(root.join("big.bin"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let scanned = scan_fork(&store, &fork, &root, &mut cache).unwrap();
+        let x = scanned
+            .snap
+            .new_blobs
+            .iter()
+            .find(|b| b.oid == Entry::file(b"first\n").oid())
+            .unwrap();
+        assert!(
+            matches!(x.content, cuenca_fs::Content::Inline(_)),
+            "x.md is named by its path: {:?}",
+            x.content
+        );
+        fs::write(root.join("x.md"), b"second, longer\n").unwrap();
+        publish_scanned(&store, &fork, scanned, &mut cache).unwrap();
+        let head = store
+            .tree(store.fork(&owner).unwrap().unwrap().head)
+            .unwrap();
+        assert_eq!(head.get("x.md"), Some(&Entry::file(b"first\n")));
+    }
+
+    /// A folder swapped for a link to a folder outside the fork, between the scan and
+    /// the upload, never brings the outside file in: the upload is hashed against what
+    /// the scan read, so the snapshot fails and publishes nothing.
+    #[test]
+    fn a_folder_swapped_for_a_link_after_the_scan_publishes_nothing_from_outside() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let main = Tree::new();
+        let site = LocationName::new("site").unwrap();
+        store.add_location(&site, None, &main).unwrap();
+        let owner = ForkName::new("owner-mac").unwrap();
+        store.create_fork(&owner, &site, &Holder::volume()).unwrap();
+        let fork = store.fork(&owner).unwrap().unwrap();
+        let root = dir.path().join("fork");
+        fs::create_dir_all(root.join("sub")).unwrap();
+        fs::write(root.join("sub/x.md"), b"mine\n").unwrap();
+        let outside = dir.path().join("host");
+        fs::create_dir(&outside).unwrap();
+        // As long as what the scan read, so a length check alone would not refuse it.
+        fs::write(outside.join("x.md"), b"HOST\n").unwrap();
+        let snap = cuenca_fs::snapshot(&root, &main, &mut cuenca_fs::StatCache::new()).unwrap();
+        fs::rename(root.join("sub"), dir.path().join("moved")).unwrap();
+        std::os::unix::fs::symlink(&outside, root.join("sub")).unwrap();
+        let len = store.len().unwrap();
+        let err = publish(&store, &fork, snap).unwrap_err();
+        // Named by its path, with nothing of what the path now reaches: no id, no length.
+        assert!(
+            err.contains("sub/x.md: changed while it was snapshotted"),
+            "{err}"
+        );
+        let host = GitOid::for_blob(b"HOST\n").to_hex();
+        assert!(
+            !err.contains(&host[..12]) && !err.contains("bytes"),
+            "{err}"
+        );
+        assert_eq!(store.len().unwrap(), len, "nothing published");
+        assert!(
+            store
+                .blob_info(GitOid::for_blob(b"HOST\n"))
+                .unwrap()
+                .is_none(),
+            "the outside file reached the store"
+        );
     }
 
     /// An upload reopens only a regular file: a symlink or a FIFO swapped in since the

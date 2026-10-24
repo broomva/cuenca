@@ -65,7 +65,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use crate::authority::{AuthError, Authority, Caller};
+use crate::authority::{AuthError, Authority, BranchError, Caller};
 use crate::keys::PrincipalKind;
 use cuenca_core::gates::{AuthorKind, Declarations, LandingRequest};
 
@@ -186,6 +186,17 @@ impl From<AuthError> for ApiError {
         match e {
             AuthError::Internal(e) => Self::internal(e),
             _ => Self::new(StatusCode::UNAUTHORIZED, "unauthorized", "unauthorized"),
+        }
+    }
+}
+
+impl From<BranchError> for ApiError {
+    fn from(e: BranchError) -> Self {
+        match e {
+            BranchError::Core(e) => e.into(),
+            e @ BranchError::Snapshot { .. } => {
+                Self::new(StatusCode::CONFLICT, "snapshot_failed", e.to_string())
+            }
         }
     }
 }
@@ -381,21 +392,44 @@ async fn forks(State(a): Shared, Extension(c): Me) -> ApiResult {
     .await
 }
 
+/// A new fork: of a location, at its main (`location`), or of a fork, at its head
+/// (`from`; an owner fork is snapshotted first). Exactly one of the two.
 #[derive(Deserialize)]
 struct CreateFork {
     fork: String,
-    location: String,
+    location: Option<String>,
+    from: Option<String>,
 }
 
 async fn create_fork(State(a): Shared, Extension(c): Me, body: axum::body::Bytes) -> ApiResult {
     let req: CreateFork = json_body(&body)?;
     let fork = parse(&req.fork, ForkName::new)?;
-    let location = parse(&req.location, LocationName::new)?;
+    let start = match (req.location, req.from) {
+        (Some(l), None) => Ok(parse(&l, LocationName::new)?),
+        (None, Some(f)) => Err(parse(&f, ForkName::new)?),
+        _ => {
+            return Err(ApiError::new(
+                StatusCode::BAD_REQUEST,
+                "invalid",
+                "name exactly one of `location` (fork its main) and `from` (fork a fork)",
+            ));
+        }
+    };
     blocking(&a, move |a| {
-        visible_location(a, &c, &location)?;
-        let offset = a.guarded(&c.key.principal, || {
-            a.store.create_fork(&fork, &location, &c.holder)
-        })?;
+        let offset = match start {
+            Ok(location) => {
+                visible_location(a, &c, &location)?;
+                a.guarded(&c.key.principal, || {
+                    a.store.create_fork(&fork, &location, &c.holder)
+                })?
+            }
+            // Forking a fork reads it: the caller must read the fork and its location.
+            Err(from) => {
+                let source = visible_fork(a, &c, &from)?;
+                visible_location(a, &c, &source.location)?;
+                a.branch_fork(&fork, &from, &c.holder)?
+            }
+        };
         to_json(json!({ "offset": offset, "fork": a.store.fork(&fork)? }))
     })
     .await

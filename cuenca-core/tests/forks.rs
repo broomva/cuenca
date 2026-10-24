@@ -775,3 +775,127 @@ fn ownership_survives_reopen() {
     assert!(store.revoked(&principal("agent")).unwrap().is_some());
     assert_eq!(store.replay_check().unwrap().revoked, 1);
 }
+
+/// Spec section 2a: forking a fork starts the new fork from the fork's head, in its
+/// location, held by the one who forks it; from then on the two move apart, and
+/// neither sees the other's drafts.
+#[test]
+fn a_fork_of_a_fork_starts_at_its_head_and_then_moves_apart() {
+    let (_d, store, main) = forked();
+    let first = write(&store, &main, &[("a", b"2"), ("b", b"new")]);
+    store.publish_draft(&fork("f"), &w1(), &first).unwrap();
+    let at = store.fork_head(&fork("f")).unwrap();
+    let mac = holder("mac", "nMacCNTRL");
+
+    store.branch_fork(&fork("g"), &fork("f"), &mac).unwrap();
+    let g = store.fork(&fork("g")).unwrap().unwrap();
+    assert_eq!(
+        (
+            &g.location,
+            g.epoch(),
+            g.holder().unwrap(),
+            &g.from,
+            &g.parent
+        ),
+        (&loc("l"), 1, &mac, &Some(fork("f")), &None)
+    );
+    assert_eq!((g.base, g.head), (at.git_tree_id(), at.git_tree_id()));
+    assert_eq!(g.head_changeset, None);
+
+    // A later draft of f stays in f; one of g stays in g.
+    let later = write(&store, &at, &[("c", b"later")]);
+    store.publish_draft(&fork("f"), &w1(), &later).unwrap();
+    assert_eq!(store.fork_head(&fork("g")).unwrap(), at);
+    let mine = write(&store, &at, &[("d", b"mine")]);
+    store
+        .publish_draft(&fork("g"), &Writer::new(mac.clone(), 1), &mine)
+        .unwrap();
+    assert!(store.fork_head(&fork("f")).unwrap().get("d").is_none());
+    assert!(store.fork_head(&fork("g")).unwrap().get("c").is_none());
+    // Only its holder writes it: f's holder does not.
+    let theirs = write(
+        &store,
+        &store.fork_head(&fork("g")).unwrap(),
+        &[("e", b"x")],
+    );
+    assert!(matches!(
+        store.publish_draft(&fork("g"), &w1(), &theirs),
+        Err(CoreError::NotHolder { .. })
+    ));
+    store.replay_check().unwrap();
+}
+
+/// A fork of a fork meets every rule a new fork meets: its source exists, its name is
+/// free and not kept, an owner fork's name goes with the volume, and a revoked
+/// principal holds nothing new. A refusal appends nothing.
+#[test]
+fn a_fork_of_a_fork_meets_the_rules_of_a_new_fork() {
+    let (_d, store, _) = forked();
+    store
+        .create_fork(&fork("owner-mac"), &loc("l"), &Holder::volume())
+        .unwrap();
+    store.revoke(&principal("gone")).unwrap();
+    let len = store.len().unwrap();
+    let refused = [
+        (fork("g"), fork("nope"), agent()),
+        (fork("f"), fork("owner-mac"), agent()),
+        (fork("owner"), fork("owner-mac"), agent()),
+        (fork("g-from-x"), fork("owner-mac"), agent()),
+        (fork("owner-ipad"), fork("owner-mac"), agent()),
+        (fork("g"), fork("owner-mac"), Holder::volume()),
+        (fork("g"), fork("owner-mac"), holder("gone", "nGoneCNTRL")),
+    ];
+    for (name, from, who) in refused {
+        let got = store.branch_fork(&name, &from, &who);
+        assert!(got.is_err(), "{name} from {from} by {who}: {got:?}");
+    }
+    assert!(matches!(
+        store.branch_fork(&fork("g"), &fork("nope"), &agent()),
+        Err(CoreError::UnknownFork(_))
+    ));
+    assert_eq!(store.len().unwrap(), len);
+    // An owner fork is forked like any other, into a fork its forker holds.
+    store
+        .branch_fork(&fork("mac-build"), &fork("owner-mac"), &owner())
+        .unwrap();
+    assert_eq!(store.len().unwrap(), len + 1);
+}
+
+/// A fork of a fork is in the log: it survives a reopen, with its source.
+#[test]
+fn a_fork_of_a_fork_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let head = {
+        let store = Store::open(dir.path()).unwrap();
+        let main = tree(&store, &[("a", b"1")]);
+        store.add_location(&loc("l"), None, &main).unwrap();
+        store.create_fork(&fork("f"), &loc("l"), &agent()).unwrap();
+        let cs = write(&store, &main, &[("a", b"2")]);
+        store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
+        store.branch_fork(&fork("g"), &fork("f"), &owner()).unwrap();
+        cs.target
+    };
+    let store = Store::open(dir.path()).unwrap();
+    let g = store.fork(&fork("g")).unwrap().unwrap();
+    assert_eq!((g.from, g.base, g.head), (Some(fork("f")), head, head));
+    assert_eq!(store.replay_check().unwrap().forks, 2);
+}
+
+/// A fork made at a main its caller checked is refused if main moved since, and
+/// appends nothing: it never starts from a main nobody checked.
+#[test]
+fn a_fork_at_a_main_that_moved_is_refused() {
+    let (_d, store, main) = forked();
+    let cs = write(&store, &main, &[("a", b"2")]);
+    let id = store.publish_draft(&fork("f"), &w1(), &cs).unwrap().id;
+    land(&store, &fork("f"), &w1(), id);
+    let len = store.len().unwrap();
+    assert!(matches!(
+        store.create_fork_at(&fork("g"), &loc("l"), main.git_tree_id(), &agent()),
+        Err(CoreError::NotAtBase { .. })
+    ));
+    assert_eq!(store.len().unwrap(), len);
+    store
+        .create_fork_at(&fork("g"), &loc("l"), cs.target, &agent())
+        .unwrap();
+}

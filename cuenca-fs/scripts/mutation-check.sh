@@ -63,10 +63,20 @@ mutate src/scan.rs '                    skipped.push(Skipped {
 mutate src/scan.rs 'FileType::RegularFile => {' 'FileType::RegularFile | FileType::Fifo | FileType::Socket => {' --test fs git_state
 mutate src/scan.rs 'let entry = if stamp.is_executable() {' 'let entry = if false {' --test fs
 mutate src/scan.rs 'if stamp.size() > MAX_FILE_BYTES {' 'if false {' --test fs blob_limit
-mutate src/scan.rs 'check_content(&path, Mode::File, &content)?;' '' --test fs gitattributes
+mutate src/scan.rs 'check_content(&path, Mode::File, content)?;' '' --test fs gitattributes
 mutate src/scan.rs 'if !known.insert(oid) {' 'if false {' --test fs new_blobs
-mutate src/scan.rs '            Err(Errno::LOOP) => None,
-            Err(Errno::NOENT) => return Ok(None),' '            Err(Errno::LOOP) => None,' --lib removed_after_the_listing
+mutate src/scan.rs '            Err(Errno::NOENT) => {
+                budget.give_back(held);
+                return Ok(None);
+            }' '' --lib removed_after_the_listing
+# Kept content is the bytes that were hashed, within both bounds; a read not kept gives
+# its bytes back (BRO-3456).
+mutate src/scan.rs '                    Some(bytes) if keep => Content::Inline(bytes),' '' --lib within_the_budget
+mutate src/scan.rs '        if size > self.per_file {' '        if false {' --lib within_the_budget
+mutate src/scan.rs '        match left.checked_sub(size) {' '        match Some(*left) {' --lib within_the_budget
+mutate src/scan.rs '                budget.give_back(held);
+                return Ok(None);' '                return Ok(None);' --lib removed_after_the_listing
+mutate src/scan.rs '            Ok(None) => budget.give_back(held),' '            Ok(None) => {}' --lib read_again_takes_from_the_budget_once
 # never leaving the root
 mutate src/scan.rs 'let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;' 'let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;' --lib renamed_out_of_the_root
 mutate src/scan.rs '        Err(Errno::LOOP | Errno::NOTDIR) => return Err(FsError::Unstable(p.abs.clone())),
@@ -134,5 +144,13 @@ mutate src/checkout.rs '    let fd = match openat(
         CWD,
         dest,' --test fs parent_swapped
 mutate src/checkout.rs '            too_large(&abs, bytes.len() as u64)?;' '' --test fs larger_than_a_snapshot
+
+
+# Rules read from a stored tree: as strict as from disk, with the defaults when absent.
+mutate src/ignore.rs '            Some(_) => Err(not_a_file()),' '            Some(e) => Self::from_bytes(&read(e.oid()).map_err(FsError::Ignore)?),' --lib rules_from_a_tree
+mutate src/ignore.rs '        let text = std::str::from_utf8(bytes)
+            .map_err(|_| FsError::Ignore("the file is not UTF-8".into()))?;
+        Self::parse(text)' '        Self::parse(&String::from_utf8_lossy(bytes))' --lib rules_from_a_tree
+mutate src/ignore.rs '            None => Ok(Self::defaults()),' '            None => Self::parse(""),' --lib rules_from_a_tree
 
 exit $survived

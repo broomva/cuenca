@@ -3,13 +3,14 @@
 use std::collections::{HashMap, HashSet};
 use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, OnceLock};
 
-use cuenca_core::{CoreError, Fork, Holder, Location, PrincipalName, Store};
+use cuenca_core::{CoreError, Fork, ForkName, Holder, Location, PrincipalName, Store};
 use cuenca_tree::{Changeset, GitOid, Op};
 
 use crate::identity::Whois;
 use crate::keys::{KeyRecord, KeyRing, PrincipalKind};
+use crate::materialise::Volume;
 
 /// Trees whose blob sets are kept in memory for read checks. Trees never change, so
 /// an entry is never stale; the cache is only cleared to bound its size.
@@ -35,6 +36,28 @@ pub struct Authority {
     lander_wake: (Mutex<u64>, std::sync::Condvar),
     /// The last error each landing hit, while it is retried.
     pub(crate) landing_errors: crate::land::LandingErrors,
+    /// The volume, once a materialiser keeps it: shared so that forking an owner fork
+    /// snapshots it first, with no materialiser pass in between.
+    volume: OnceLock<Arc<Mutex<Volume>>>,
+}
+
+/// How long forking an owner fork keeps trying to snapshot it before refusing: a file
+/// that changes between the scan and its upload fails that attempt, so a fork taken
+/// while a client keeps writing may need several.
+const SNAPSHOT_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The pause between two attempts, with the volume unlocked.
+const SNAPSHOT_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
+
+/// Why forking a fork was refused.
+#[derive(Debug, thiserror::Error)]
+pub enum BranchError {
+    #[error(transparent)]
+    Core(#[from] CoreError),
+    /// The owner fork could not be snapshotted, so it was not forked: a fork of it
+    /// would lack what the owner wrote since its last snapshot.
+    #[error("owner fork {fork} could not be snapshotted first, so it was not forked: {error}")]
+    Snapshot { fork: String, error: String },
 }
 
 /// An authenticated request's principal, on the node Tailscale named.
@@ -108,6 +131,7 @@ impl Authority {
             revocation: std::sync::RwLock::new(()),
             lander_wake: (Mutex::new(0), std::sync::Condvar::new()),
             landing_errors: Default::default(),
+            volume: OnceLock::new(),
         })
     }
 
@@ -134,6 +158,89 @@ impl Authority {
 
     pub(crate) fn set_landing_error(&self, fork: &cuenca_core::ForkName, error: Option<String>) {
         self.landing_errors.set(fork, error);
+    }
+
+    /// Share the volume a materialiser keeps ([`crate::materialise::Materialiser`]).
+    /// One per authority: a second is refused.
+    pub(crate) fn set_volume(&self, volume: Arc<Mutex<Volume>>) -> std::io::Result<()> {
+        self.volume
+            .set(volume)
+            .map_err(|_| std::io::Error::other("the authority already has a volume"))
+    }
+
+    /// The shared volume, locked: a pass that panicked leaves it as consistent as a
+    /// failed one (each pass starts from what is on disk), so a poisoned lock is taken.
+    pub(crate) fn lock_volume(volume: &Mutex<Volume>) -> std::sync::MutexGuard<'_, Volume> {
+        volume.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Fork the fork `from` into `fork`, held by `holder` (the caller), at `from`'s head
+    /// ([`Store::branch_fork`]), as a write by `holder`'s principal
+    /// ([`Authority::guarded`]). A fork the rules will refuse anyway (its name, its
+    /// holder, no such `from`) is refused before anything else is done.
+    ///
+    /// An owner fork the volume shows is snapshotted first (spec section 2a: "the
+    /// authority snapshots it, and the new fork starts from that snapshot"), with the
+    /// volume locked from the snapshot to the fork, so its head cannot move in between.
+    /// A file a client is still writing is taken as far as it has been written; its
+    /// finished version is the owner fork's next snapshot (see [`crate::materialise`]).
+    /// The new fork holds every write the snapshot read, and anything written later
+    /// stays in `from`. A snapshot that fails (a file the authority cannot read, one
+    /// that changed between the scan and its upload) is taken again, with the volume
+    /// unlocked between attempts, for up to `SNAPSHOT_BUDGET`, then refused, and no
+    /// fork is made.
+    ///
+    /// The volume is locked outside the revocation lock, never inside it, so a slow
+    /// snapshot never holds up a revocation.
+    pub fn branch_fork(
+        &self,
+        fork: &ForkName,
+        from: &ForkName,
+        holder: &Holder,
+    ) -> Result<u64, BranchError> {
+        let principal = &holder.principal;
+        self.guarded(principal, || self.store.check_branch(fork, from, holder))?;
+        let source = self
+            .store
+            .fork(from)?
+            .ok_or_else(|| CoreError::UnknownFork(from.to_string()))?;
+        let Some(volume) = self
+            .volume
+            .get()
+            .filter(|_| source.holder().is_some_and(Holder::is_volume))
+        else {
+            return Ok(self.guarded(principal, || self.store.branch_fork(fork, from, holder))?);
+        };
+        let started = std::time::Instant::now();
+        let mut attempt = 0;
+        loop {
+            attempt += 1;
+            // Locked from the snapshot to the fork; unlocked between attempts.
+            let mut locked = Self::lock_volume(volume);
+            // Read under the lock: only the volume moves an owner fork's head.
+            let source = self
+                .store
+                .fork(from)?
+                .ok_or_else(|| CoreError::UnknownFork(from.to_string()))?;
+            let error = match locked.snapshot_owner_fork(&self.store, &source) {
+                None | Some(Ok(_)) => {
+                    return Ok(
+                        self.guarded(principal, || self.store.branch_fork(fork, from, holder))?
+                    );
+                }
+                Some(Err(error)) => error,
+            };
+            if started.elapsed() + SNAPSHOT_PAUSE >= SNAPSHOT_BUDGET {
+                tracing::error!(fork = %from, error, attempt, "owner fork snapshot failed; not forked");
+                return Err(BranchError::Snapshot {
+                    fork: from.to_string(),
+                    error: without_host_paths(&error, locked.root(), from),
+                });
+            }
+            drop(locked);
+            tracing::warn!(fork = %from, error, attempt, "owner fork snapshot failed; trying again");
+            std::thread::sleep(SNAPSHOT_PAUSE);
+        }
     }
 
     pub fn store(&self) -> &Store {
@@ -304,6 +411,19 @@ impl Authority {
     }
 }
 
+/// A failed owner-fork snapshot as the caller is told it: paths are the fork's own
+/// (the fork's folder itself is named by the fork), and where the volume is on the
+/// authority's host stays in its log.
+fn without_host_paths(error: &str, root: &Path, fork: &ForkName) -> String {
+    let dir = root.join("forks").join(fork.as_str());
+    let dir = dir.display().to_string();
+    let root = root.display().to_string();
+    error
+        .replace(&format!("{dir}/"), "")
+        .replace(&dir, fork.as_str())
+        .replace(&format!("{root}/"), "<volume>/")
+}
+
 /// An IPv4 address that arrived as IPv4-mapped IPv6 is the IPv4 address.
 fn canonical(ip: IpAddr) -> IpAddr {
     match ip {
@@ -346,6 +466,39 @@ impl Caller {
 mod tests {
     use super::*;
     use std::net::{Ipv4Addr, Ipv6Addr};
+
+    #[test]
+    fn a_snapshot_error_names_no_host_path() {
+        let root = Path::new("/srv/cuenca/volume");
+        let fork = ForkName::new("owner-mac").unwrap();
+        let said = |e: &str| without_host_paths(e, root, &fork);
+        assert_eq!(
+            said("/srv/cuenca/volume/forks/owner-mac/a/b.md: changed while it was snapshotted"),
+            "a/b.md: changed while it was snapshotted"
+        );
+        assert_eq!(
+            said("/srv/cuenca/volume/forks/owner-mac: Permission denied (os error 13)"),
+            "owner-mac: Permission denied (os error 13)"
+        );
+        assert_eq!(
+            said("/srv/cuenca/volume/forks: gone"),
+            "<volume>/forks: gone"
+        );
+        // A short or relative root replaces only whole path prefixes.
+        let fork_path = |root: &str, e: &str| without_host_paths(e, Path::new(root), &fork);
+        assert_eq!(
+            fork_path(
+                ".",
+                "./forks/owner-mac/a.md: changed while it was snapshotted"
+            ),
+            "a.md: changed while it was snapshotted"
+        );
+        assert_eq!(
+            fork_path("vol", "vol/forks/owner-mac/volume.md: Permission denied"),
+            "volume.md: Permission denied"
+        );
+        assert_eq!(fork_path("vol", "vol/forks: gone"), "<volume>/forks: gone");
+    }
 
     struct Nobody;
 

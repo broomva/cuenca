@@ -62,6 +62,16 @@ pub enum Event {
         base: GitOid,
         holder: Holder,
     },
+    /// A fork of the fork `from`, starting from `from`'s head at that moment (`base`),
+    /// in `from`'s location, held by `holder` under epoch 1. Forking an owner fork
+    /// snapshots it first (spec section 2a), so `base` holds every write the
+    /// snapshot read; what is written later stays in `from`.
+    ForkBranched {
+        fork: ForkName,
+        from: ForkName,
+        base: GitOid,
+        holder: Holder,
+    },
     /// A draft: a changeset moving the fork's head from `changeset.base` to
     /// `changeset.target`, stored whole, written by the fork's holder under its
     /// current epoch. (A location's first tree is named by id only; its objects are in
@@ -171,6 +181,7 @@ impl Event {
         match self {
             Event::LocationAdded { .. } | Event::PrincipalRevoked { .. } => vec![],
             Event::ForkCreated { fork, .. }
+            | Event::ForkBranched { fork, .. }
             | Event::DraftPublished { fork, .. }
             | Event::TakenOver { fork, .. }
             | Event::MainAdvanced { fork, .. }

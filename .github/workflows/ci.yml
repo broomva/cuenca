@@ -77,3 +77,11 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+
+  deploy:
+    name: Deploy (container)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: bash -n deploy/install.sh deploy/check.sh deploy/test-container.sh deploy/test-systemd.sh deploy/wait-tailnet
+      - run: bash deploy/test-container.sh
