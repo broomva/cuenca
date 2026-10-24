@@ -161,7 +161,7 @@ mutate src/land.rs 'Some(at) if at == export.commit => return Ok(()),' 'Some(at)
 mutate src/land.rs '        if let Some(found) = gh.find(export)? {
             return Ok(found);
         }' '' --test land a_kill
-mutate src/land.rs 'if !git.has_commit(export.commit)? {' 'if false {' --test land a_kill
+mutate src/land.rs 'if !pushed && !git.has_commit(export.commit)? {' 'if false {' --test land a_kill
 mutate src/land.rs '                    self.a.store.record_export_intent(name, id, &export)?;' '' --test land a_draft_lands
 mutate src/land.rs '            Some(at) => {
                 return Err(LandError::Fail(format!(' '            Some(_) if false => {
@@ -176,8 +176,8 @@ mutate src/http.rs '            CoreError::NotVerified { .. } => (S::CONFLICT, "
 mutate src/land.rs '            && tree_of(ids[0])? == changeset.target.to_hex()' '' --test land a_branch_that
 mutate src/land.rs '                    let export = match git.remote_branch(&remote, &export_branch(id))? {
                         Some(at) => git.adopt(&remote, &self.a.store, id, landing.main, at)?,
-                        None => self.build(&git, &remote, &fork, &landing, None)?,
-                    };' '                    let export = self.build(&git, &remote, &fork, &landing, None)?;' --test land a_changeset_landed_again
+                        None => self.build(&git, &remote, &landing, None)?,
+                    };' '                    let export = self.build(&git, &remote, &landing, None)?;' --test land a_branch_with_the_drafts_tree
 mutate src/land.rs '            Ok(None) if std::time::Instant::now() >= deadline => {' '            Ok(None) if false => {' --test land a_hung_call
 
 mutate src/land.rs '            if !on_main.contains(&oid)' '            if false' --test land a_fork_with_several

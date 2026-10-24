@@ -245,7 +245,10 @@ impl Worker {
                 LandingStep::Requested => {
                     // An earlier landing of the same changeset (dropped by a takeover,
                     // or from another fork with the same edit) may have exported it
-                    // already: that export is this one's.
+                    // already: that export is this one's. Building it again gives the
+                    // same commit when the parent is the same, so this matters when it
+                    // is not: the remote's main has a newer commit with the same tree,
+                    // or the old parent fell out of the search.
                     let export = match git.remote_branch(&remote, &export_branch(id))? {
                         Some(at) => git.adopt(&remote, &self.a.store, id, landing.main, at)?,
                         None => self.build(&git, &remote, &landing, None)?,

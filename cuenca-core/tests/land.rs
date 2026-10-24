@@ -394,3 +394,24 @@ fn a_fork_with_several_drafts_lands_its_head_onto_its_own_base_only() {
     assert_eq!(store.main_tree(&loc("l")).unwrap().git_tree_id(), cs.target);
     store.replay_check().unwrap();
 }
+
+/// A changeset's first record dates it, however many forks publish it later.
+#[test]
+fn a_changeset_is_dated_by_its_first_record() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open(dir.path()).unwrap();
+    let main = tree(&store, &[("a", b"1")]);
+    store.add_location(&loc("l"), None, &main).unwrap();
+    let cs = write(&store, &main, &[("a", b"2")]);
+    let id = ChangesetId::of(&cs);
+    assert_eq!(store.changeset_first_at(id).unwrap(), None);
+    store.create_fork(&f(), &loc("l"), &agent()).unwrap();
+    let first = store.publish_draft(&f(), &w1(), &cs).unwrap();
+    let at = store.records(first.offset, 1).unwrap()[0].at_ms;
+    assert_eq!(store.changeset_first_at(id).unwrap(), Some(at));
+    std::thread::sleep(std::time::Duration::from_millis(5));
+    store.create_fork(&fork("g"), &loc("l"), &agent()).unwrap();
+    let again = store.publish_draft(&fork("g"), &w1(), &cs).unwrap();
+    assert!(again.offset > first.offset);
+    assert_eq!(store.changeset_first_at(id).unwrap(), Some(at));
+}
