@@ -299,25 +299,15 @@ mutate src/authority.rs '                Some(Err(error)) if attempt >= SNAPSHOT
 mutate src/http.rs '                let source = visible_fork(a, &c, &from)?;' '                let source = a.store.fork(&from)?.ok_or_else(ApiError::not_found)?;' --test owner_forks needs_reading
 mutate src/admin.rs 'cuenca_fs::ForkIgnore::for_tree(&main, |oid|' 'cuenca_fs::ForkIgnore::for_tree(&Tree::new(), |oid|' --lib an_owner_fork_of_a_main_tracking
 
-mutate src/authority.rs 'const SNAPSHOT_ATTEMPTS: u32 = 3;' 'const SNAPSHOT_ATTEMPTS: u32 = 1;' --test owner_forks tried_again
+mutate src/authority.rs 'const SNAPSHOT_ATTEMPTS: u32 = 10;' 'const SNAPSHOT_ATTEMPTS: u32 = 1;' --test owner_forks tried_again
 mutate src/authority.rs '                        error: error.replace(&shown, ""),' '                        error,' --test owner_forks cannot_be_snapshotted
 mutate src/http.rs '                visible_location(a, &c, &source.location)?;' '' --test owner_forks needs_reading
-# A file changed between the scan and its upload is taken as it is now (a write in
-# progress as far as it has gone, BRO-3450), never refused for good.
-mutate src/materialise.rs '                if let Some(now) = hash_file(path)? {' '                return Err("changed".into());
-                #[allow(unreachable_code)]
-                if let Some(now) = hash_file(path)? {' --lib an_upload_takes_what
-mutate src/materialise.rs '    let size = file.metadata().map_err(|e| fail(&e))?.len();' '    let size = 0;' --lib an_upload_takes_what
-# Each new put is staged from its own path; a changed file's put names what it holds
-# now, and a put of what the head holds is left out.
-mutate src/materialise.rs '        staged.insert(now);' '        staged.insert(oid);' --lib two_paths_share
-mutate src/materialise.rs '        rewritten = true;' '' --lib changed_after_the_scan
-mutate src/materialise.rs '        if head.get(path.as_str()) != Some(&entry) {' '        if true {' --lib changed_after_the_scan
-# A symlink's put is staged from its text; a path gone since the scan falls back to
-# where the scan listed its blob.
-mutate src/materialise.rs '        Entry::Symlink(_) => fs::read_link(path)' '        Entry::Symlink(_) if false => fs::read_link(path)' --lib symlink_sharing
-mutate src/materialise.rs '    if listed { Ok(oid) } else { Err(error) }' '    let _ = listed;
-    Err(error)' --lib gone_since_the_scan
-mutate src/materialise.rs '            Entry::Executable(_) => Entry::Executable(now),' '' --lib executable_changed
-mutate src/materialise.rs '        if now != oid && path.as_str() == cuenca_fs::FORKIGNORE {' '        if false {' --lib rules_changed_after
+
+# Only what the scan read is uploaded: a folder swapped for a link since never brings an
+# outside file in.
+mutate src/materialise.rs '            cuenca_fs::Content::File(path) => batch.add(blob.oid, blob.size, open_regular(path)?),' '            cuenca_fs::Content::File(path) => {
+                let now = fs::read(path).map_err(|e| e.to_string())?;
+                batch.add(GitOid::for_blob(&now), now.len() as u64, now.as_slice())
+            }' --lib swapped_for_a_link
+
 exit $survived

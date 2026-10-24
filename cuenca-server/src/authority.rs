@@ -42,7 +42,7 @@ pub struct Authority {
 }
 
 /// How many times forking an owner fork tries to snapshot it before refusing.
-const SNAPSHOT_ATTEMPTS: u32 = 3;
+const SNAPSHOT_ATTEMPTS: u32 = 10;
 
 /// Why forking a fork was refused.
 #[derive(Debug, thiserror::Error)]
@@ -181,7 +181,8 @@ impl Authority {
     /// finished version is the owner fork's next snapshot (see [`crate::materialise`]).
     /// The new fork holds every write the snapshot read, and anything written later
     /// stays in `from`. A snapshot that fails (a file the authority cannot read, one
-    /// that keeps changing) is tried again, then refused, and no fork is made.
+    /// that changed between the scan and its upload) is taken again, up to
+    /// `SNAPSHOT_ATTEMPTS` times, then refused, and no fork is made.
     ///
     /// The volume is locked outside the revocation lock, never inside it, so a slow
     /// snapshot never holds up a revocation.
@@ -230,7 +231,7 @@ impl Authority {
                 }
                 Some(Err(error)) => {
                     tracing::warn!(fork = %from, error, attempt, "owner fork snapshot failed; trying again");
-                    std::thread::sleep(std::time::Duration::from_millis(200));
+                    std::thread::sleep(std::time::Duration::from_millis(100));
                 }
             }
         }
