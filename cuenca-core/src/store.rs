@@ -478,13 +478,18 @@ impl Store {
     /// verified against the location's main as it is now ([`Fork::verified`]; the
     /// verify's result does not matter: GitHub's required checks, or the owner, decide),
     /// with the gates' verdict on it ([`crate::gates`], log-only: the intent is recorded
-    /// whatever the verdict). Asking again for the fork's latest request is a retry and
-    /// appends nothing, whatever step it is at; it returns the first request's verdict.
+    /// whatever the verdict). Asking again for the fork's latest request, while it is
+    /// still the fork's head, is a retry and appends nothing, whatever step it is at; it
+    /// returns the first request's verdict. Once a newer draft is the head, the old id
+    /// is refused as [`CoreError::NotHead`].
     ///
     /// The gates run outside the write lock, on a snapshot, and the intent is appended
     /// only if main has not moved since that snapshot, so the journaled verdict is
-    /// always against the main the intent was recorded on. If main keeps moving, the
-    /// request gives up with [`CoreError::MainMoved`] after a few tries.
+    /// always against the main the intent was recorded on. A move of main also makes
+    /// the head's verify stale, so a request whose main moved is normally refused as
+    /// [`CoreError::NotVerified`]; it is evaluated again only when a verify against
+    /// the new main landed in between, and gives up with [`CoreError::MainMoved`] if
+    /// that keeps happening.
     pub fn record_landing_intent(
         &self,
         fork: &ForkName,

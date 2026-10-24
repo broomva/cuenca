@@ -209,13 +209,16 @@ impl Bed {
     }
 
     /// Record a verify of `id` against main as it is now, as a landing request needs,
-    /// unless `id` is not the fork's head or already has one against this main: every
-    /// check the base declares, reported passed.
+    /// unless `id` is not the fork's head, already has one against this main, or
+    /// already has a landing request (a retry needs no new verify, so the tests see
+    /// that one is answered without it): every check the base declares, reported
+    /// passed.
     fn verify(&self, token: &str, fork: &str, id: ChangesetId) {
         let store = self.s.authority.store();
         let state = store.fork(&ForkName::new(fork).unwrap()).unwrap().unwrap();
         let main = store.location(&state.location).unwrap().unwrap().main;
         if state.head_changeset.map(|(head, _)| head) != Some(id)
+            || state.landing.is_some_and(|l| l.changeset == id)
             || state
                 .verified
                 .is_some_and(|v| v.changeset == id && v.base == main)

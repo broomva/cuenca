@@ -29,7 +29,7 @@
 //! | GET | `/v1/forks/{fork}/history` | the log records naming the fork (and only forks the caller reads) |
 //! | POST | `/v1/forks/{fork}/drafts` | `{epoch, changeset}`: publish a draft |
 //! | POST | `/v1/forks/{fork}/landing` | `{epoch, changeset, declarations?}` (an id): ask to land; answers the gates' verdict, journaled with the intent |
-//! | POST | `/v1/forks/{fork}/landing/dry-run` | the same body: the verdict a landing request would get now, recording nothing |
+//! | POST | `/v1/forks/{fork}/landing/dry-run` | the same body: the verdict a landing request would get now, recording nothing (so it too needs a verify of the head against main as it is now) |
 //! | GET | `/v1/forks/{fork}/landing` | the fork's landing request, its step, and the error it is being retried for |
 //! | POST | `/v1/forks/{fork}/verdicts` | `{epoch, changeset, base, checks}`: record a verify ([`cuenca_core::checks`]) |
 //! | PUT | `/v1/blobs/{oid}` | upload a blob; `Content-Length` is its size |

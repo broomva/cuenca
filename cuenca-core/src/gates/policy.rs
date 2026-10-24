@@ -57,6 +57,7 @@ use regex::Regex;
 use regex::bytes::Regex as BytesRegex;
 use yaml_rust2::Yaml;
 use yaml_rust2::parser::{Event, Parser};
+use yaml_rust2::scanner::TScalarStyle;
 
 /// Where the base's policy is read from.
 pub const POLICY_PATH: &str = ".control/policy.yaml";
@@ -510,6 +511,15 @@ fn prescan(text: &str) -> Res<()> {
                     mark.line()
                 ));
             }
+            // PyYAML, which p9 loads the file with, merges a mapping under a plain `<<`
+            // key into its parent; yaml-rust2 keeps `<<` as an ordinary key, so the
+            // gates would compile defaults where p9 sees rules (r8, B). Refused.
+            Ok((Event::Scalar(value, TScalarStyle::Plain, _, None), mark)) if value == "<<" => {
+                return Err(format!(
+                    "{POLICY_PATH} uses a YAML merge key `<<` (line {}), which the gate engine refuses",
+                    mark.line()
+                ));
+            }
             Ok((Event::SequenceStart(..) | Event::MappingStart(..), mark)) => {
                 depth += 1;
                 if depth > MAX_POLICY_DEPTH {
@@ -854,6 +864,9 @@ cuenca:
             b"auto_merge:\n  rules:\n    - path_touched: ''\n      action: require_human\n",
             b"\xff\xfe",
             b"a: 1\n---\nb: 2\n",
+            // A merge key: PyYAML merges it, yaml-rust2 would keep `<<` as a key (r8, B).
+            b"<<:\n  auto_merge:\n    rules:\n      - {path_touched: CLAUDE.md, action: require_human}\n",
+            b"gates:\n  <<: {hard: [{id: G4, pattern: 'x'}]}\n",
             // p9's floors: no looser governance tier, no larger file limit, no
             // switching the Deletion Gate off.
             b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md]\n",
