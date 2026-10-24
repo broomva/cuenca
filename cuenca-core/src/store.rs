@@ -380,6 +380,22 @@ impl Store {
         Ok(self.record(event, |_| Ok(()))?.0)
     }
 
+    /// Whether [`Store::branch_fork`] would be refused now for any reason but `from`'s
+    /// head: the rules of a new fork, or no fork `from`. Appends nothing; for a caller
+    /// with work to do before forking (snapshotting an owner fork) that must not do it
+    /// for a fork that will be refused anyway.
+    pub fn check_branch(&self, fork: &ForkName, from: &ForkName, holder: &Holder) -> Result<()> {
+        let txn = self.begin()?;
+        let view = Tables {
+            locations: txn.open_table(LOCATIONS)?,
+            forks: txn.open_table(FORKS)?,
+            changesets: txn.open_table(CHANGESETS)?,
+            revoked: txn.open_table(REVOKED)?,
+        };
+        crate::state::branch_source(&view, fork, from, holder)?;
+        Ok(())
+    }
+
     /// Publish a draft written by `writer`: `changeset` must start from the fork's head,
     /// every blob it puts must be ingested, and content with a rule (symlinks,
     /// `.gitattributes`) must pass it.

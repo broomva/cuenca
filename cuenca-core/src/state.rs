@@ -315,6 +315,18 @@ fn new_fork(view: &impl View, name: &ForkName, holder: &Holder) -> Result<()> {
     Ok(())
 }
 
+/// The fork a fork of `from` named `name`, held by `holder`, starts from, if the rules
+/// of a new fork allow it ([`new_fork`]) and `from` exists.
+pub(crate) fn branch_source(
+    view: &impl View,
+    name: &ForkName,
+    from: &ForkName,
+    holder: &Holder,
+) -> Result<Fork> {
+    new_fork(view, name, holder)?;
+    fork(view, from)
+}
+
 /// Apply `event`, to be recorded at `offset`, to `view`. On `Err` the view may be
 /// partly written; the caller discards it (the writer aborts its transaction).
 pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<Applied> {
@@ -369,8 +381,7 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             base,
             holder,
         } => {
-            new_fork(view, name, holder)?;
-            let source = fork(view, from)?;
+            let source = branch_source(view, name, from, holder)?;
             if *base != source.head {
                 return Err(CoreError::NotAtBase {
                     what: format!("head of {from:?}"),

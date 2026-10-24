@@ -412,7 +412,7 @@ async fn create_fork(State(a): Shared, Extension(c): Me, body: axum::body::Bytes
             Err(from) => {
                 let source = visible_fork(a, &c, &from)?;
                 visible_location(a, &c, &source.location)?;
-                a.guarded(&c.key.principal, || a.branch_fork(&fork, &from, &c.holder))?
+                a.branch_fork(&fork, &from, &c.holder)?
             }
         };
         to_json(json!({ "offset": offset, "fork": a.store.fork(&fork)? }))

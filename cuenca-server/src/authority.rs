@@ -169,20 +169,32 @@ impl Authority {
         volume.lock().unwrap_or_else(|p| p.into_inner())
     }
 
-    /// Fork the fork `from` into `fork`, held by `holder`, at `from`'s head
-    /// ([`Store::branch_fork`]). An owner fork the volume shows is snapshotted first
-    /// (spec section 2a: "the authority snapshots it, and the new fork starts from that
-    /// snapshot"), with the volume locked from the snapshot to the fork, so its head
-    /// cannot move in between: the new fork holds every write the snapshot read, and
-    /// anything written later stays in `from`. A snapshot that fails (a file that keeps
-    /// changing, one the authority cannot read) is tried again, then refused, and no
-    /// fork is made.
+    /// Fork the fork `from` into `fork`, held by `holder` (the caller), at `from`'s head
+    /// ([`Store::branch_fork`]), as a write by `holder`'s principal
+    /// ([`Authority::guarded`]). A fork the rules will refuse anyway (its name, its
+    /// holder, no such `from`) is refused before anything else is done.
+    ///
+    /// An owner fork the volume shows is snapshotted first (spec section 2a: "the
+    /// authority snapshots it, and the new fork starts from that snapshot"): after
+    /// [`Volume::settle`], with what last changed before the request only
+    /// ([`Volume::snapshot_owner_fork`]), so a file still being written is never torn
+    /// into the fork (the owner fork's own snapshots never take one either, so its head
+    /// holds none); and with the volume locked from the snapshot to the fork, so its
+    /// head cannot move in between. The new fork holds every write the snapshot read,
+    /// and anything written later stays in `from`. A snapshot that fails (a file the
+    /// authority cannot read, a `.forkignore` changed meanwhile) is tried again, then
+    /// refused, and no fork is made.
+    ///
+    /// The volume is locked outside the revocation lock, never inside it, so a slow
+    /// snapshot never holds up a revocation.
     pub fn branch_fork(
         &self,
         fork: &ForkName,
         from: &ForkName,
         holder: &Holder,
     ) -> Result<u64, BranchError> {
+        let principal = &holder.principal;
+        self.guarded(principal, || self.store.check_branch(fork, from, holder))?;
         let source = self
             .store
             .fork(from)?
@@ -192,8 +204,13 @@ impl Authority {
             .get()
             .filter(|_| source.holder().is_some_and(Holder::is_volume))
         else {
-            return Ok(self.store.branch_fork(fork, from, holder)?);
+            return Ok(self.guarded(principal, || self.store.branch_fork(fork, from, holder))?);
         };
+        // What changed before the request is taken once it has stood for the volume's
+        // settle time; what changes after it is a later write.
+        let asked = std::time::SystemTime::now();
+        let settle = Self::lock_volume(volume).settle();
+        std::thread::sleep(settle);
         let mut volume = Self::lock_volume(volume);
         let mut attempt = 0;
         loop {
@@ -203,13 +220,19 @@ impl Authority {
                 .store
                 .fork(from)?
                 .ok_or_else(|| CoreError::UnknownFork(from.to_string()))?;
-            match volume.snapshot_owner_fork(&self.store, &source) {
+            match volume.snapshot_owner_fork(&self.store, &source, Some(asked)) {
                 None | Some(Ok(_)) => break,
                 Some(Err(error)) if attempt >= SNAPSHOT_ATTEMPTS => {
                     tracing::error!(fork = %from, error, "owner fork snapshot failed; not forked");
+                    // Paths in the answer are the fork's own; where the volume is on the
+                    // authority's host stays in its log.
+                    let shown = format!(
+                        "{}/",
+                        volume.root().join("forks").join(from.as_str()).display()
+                    );
                     return Err(BranchError::Snapshot {
                         fork: from.to_string(),
-                        error,
+                        error: error.replace(&shown, ""),
                     });
                 }
                 Some(Err(error)) => {
@@ -218,7 +241,7 @@ impl Authority {
                 }
             }
         }
-        Ok(self.store.branch_fork(fork, from, holder)?)
+        Ok(self.guarded(principal, || self.store.branch_fork(fork, from, holder))?)
     }
 
     pub fn store(&self) -> &Store {

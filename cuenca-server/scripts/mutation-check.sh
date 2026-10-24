@@ -290,11 +290,19 @@ mutate src/materialise.rs '                if snapped_at.is_none_or(|t| t.elapse
 # a snapshot that keeps failing refuses the fork; only a fork the caller reads is forked;
 # an owner fork's main and its rules are checked strictly, and the fork starts from that
 # main.
-mutate src/authority.rs '            match volume.snapshot_owner_fork(&self.store, &source) {' '            match None::<Result<crate::materialise::SnapshotOne, String>> {' --test owner_forks unsnapshotted_edits
+mutate src/authority.rs '            match volume.snapshot_owner_fork(&self.store, &source, Some(asked)) {' '            match None::<Result<crate::materialise::SnapshotOne, String>> {' --test owner_forks unsnapshotted_edits
+mutate src/authority.rs '        std::thread::sleep(settle);' '' --test owner_forks not_torn
+mutate src/materialise.rs '        let before = before.unwrap_or_else(|| SystemTime::now() - self.settle);' '        let before = before.unwrap_or_else(SystemTime::now);' --test owner_forks only_settled
+mutate src/materialise.rs '    settled_before(&mut snap, &head, dir, before)?;' '' --test owner_forks only_settled
+mutate src/authority.rs '        self.guarded(principal, || self.store.check_branch(fork, from, holder))?;' '' --test owner_forks refused_fork
+mutate src/http.rs '                a.branch_fork(&fork, &from, &c.holder)?' '                a.guarded(&c.key.principal, || a.branch_fork(&fork, &from, &c.holder))?' --test owner_forks revocation_does_not_wait
 mutate src/authority.rs '            .filter(|_| source.holder().is_some_and(Holder::is_volume))' '            .filter(|_| false)' --test owner_forks unsnapshotted_edits
 mutate src/authority.rs '                Some(Err(error)) if attempt >= SNAPSHOT_ATTEMPTS => {' '                Some(Err(_)) if attempt >= SNAPSHOT_ATTEMPTS => break,
                 Some(Err(error)) if false => {' --test owner_forks cannot_be_snapshotted
 mutate src/http.rs '                let source = visible_fork(a, &c, &from)?;' '                let source = a.store.fork(&from)?.ok_or_else(ApiError::not_found)?;' --test owner_forks needs_reading
 mutate src/admin.rs 'cuenca_fs::ForkIgnore::for_tree(&main, |oid|' 'cuenca_fs::ForkIgnore::for_tree(&Tree::new(), |oid|' --lib an_owner_fork_of_a_main_tracking
 
+mutate src/authority.rs 'const SNAPSHOT_ATTEMPTS: u32 = 3;' 'const SNAPSHOT_ATTEMPTS: u32 = 1;' --test owner_forks tried_again
+mutate src/authority.rs '                        error: error.replace(&shown, ""),' '                        error,' --test owner_forks cannot_be_snapshotted
+mutate src/http.rs '                visible_location(a, &c, &source.location)?;' '' --test owner_forks needs_reading
 exit $survived
