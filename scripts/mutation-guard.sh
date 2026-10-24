@@ -13,8 +13,9 @@
 #
 # A run dir is named run-<pid> and holds .backup. When the next run starts, one whose
 # process is gone (SIGKILLed, so its EXIT trap never ran) is removed, unless it may have
-# left a mutant in the source (.backup/path) or a test group still running
-# (.backup/pgid): then the guard names both and refuses to start, deleting nothing.
+# left a mutant in the source (.backup/path), failed to copy Cargo.lock back
+# (.backup/lock-failed) or left a test group still running (.backup/pgid): then the guard
+# names each and refuses to start, deleting nothing.
 guard_repo=$(git rev-parse --show-toplevel)
 guard_root=${CUENCA_MUT_TMPDIR:-/tmp/cuenca-mut}
 case $guard_root in
@@ -29,11 +30,13 @@ for stale in "$guard_root"/run-*; do
   case $pid in '' | *[!0-9]*) continue ;; esac
   [ -d "$stale/.backup" ] || continue
   ps -p "$pid" >/dev/null 2>&1 && continue
-  if [ -s "$stale/.backup/path" ] || { [ -s "$stale/.backup/pgid" ] && pgrep -g "$(cat "$stale/.backup/pgid")" >/dev/null; }; then
+  if [ -s "$stale/.backup/path" ] || [ -e "$stale/.backup/lock-failed" ] || { [ -s "$stale/.backup/pgid" ] && pgrep -g "$(cat "$stale/.backup/pgid")" >/dev/null; }; then
     echo "mutation-guard: run $pid died without cleaning up. Before running again:" >&2
     if [ -s "$stale/.backup/path" ]; then
       echo "  $(cat "$stale/.backup/path") may still be mutated: compare it with $stale/.backup/file and restore it (this overwrites edits made since)" >&2
       echo "  restore Cargo.lock from $stale/.backup/Cargo.lock or git" >&2
+    elif [ -e "$stale/.backup/lock-failed" ]; then
+      echo "  Cargo.lock was not restored: copy $stale/.backup/Cargo.lock back over it, or take it from git" >&2
     fi
     if [ -s "$stale/.backup/pgid" ] && pgrep -g "$(cat "$stale/.backup/pgid")" >/dev/null; then
       echo "  its tests still run as process group $(cat "$stale/.backup/pgid"): kill -KILL -- -$(cat "$stale/.backup/pgid")" >&2
