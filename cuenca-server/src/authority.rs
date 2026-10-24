@@ -178,10 +178,10 @@ impl Authority {
     /// authority snapshots it, and the new fork starts from that snapshot"), with the
     /// volume locked from the snapshot to the fork, so its head cannot move in between.
     /// A file a client is still writing is taken as far as it has been written; its
-    /// finished version is the owner fork's next snapshot (see [`crate::materialise`]). The new fork holds every write the snapshot read,
-    /// and anything written later stays in `from`. A snapshot that fails (a file the
-    /// authority cannot read, a `.forkignore` changed meanwhile) is tried again, then
-    /// refused, and no fork is made.
+    /// finished version is the owner fork's next snapshot (see [`crate::materialise`]).
+    /// The new fork holds every write the snapshot read, and anything written later
+    /// stays in `from`. A snapshot that fails (a file the authority cannot read, one
+    /// that keeps changing) is tried again, then refused, and no fork is made.
     ///
     /// The volume is locked outside the revocation lock, never inside it, so a slow
     /// snapshot never holds up a revocation.

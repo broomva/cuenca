@@ -821,3 +821,46 @@ fn a_snapshot_failing_once_is_tried_again() {
     drop(materialiser);
     s.stop();
 }
+
+/// R40 with duplicated content, as when a file is copied in Finder and both copies keep
+/// changing: two paths always holding the same bytes are rewritten every few
+/// milliseconds while the owner fork is forked 10 times, and every fork is made, 10 of
+/// 10 (before, the scan listed their shared blob under one path, and a change to that
+/// path left the other's blob unstaged: refused as a missing blob).
+#[test]
+fn forking_while_two_copies_keep_changing_is_never_refused_10_of_10() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    let (s, mac, shown, _dir, materialiser) = forking_setup();
+    let stop = Arc::new(AtomicBool::new(false));
+    let writer = {
+        let (stop, shown) = (stop.clone(), shown.clone());
+        std::thread::spawn(move || {
+            let mut k = 0u64;
+            while !stop.load(Ordering::SeqCst) {
+                let content = format!("content {k}\n");
+                std::fs::write(shown.join("a.md"), &content).unwrap();
+                std::fs::write(shown.join("b.md"), &content).unwrap();
+                k += 1;
+                // A client's pace: a file rewritten with no pause at all is one that
+                // "keeps changing", refused loudly, as before this change.
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    };
+    let mut made = 0;
+    for i in 0..10 {
+        std::thread::sleep(Duration::from_millis(50));
+        let r = fork_from(&s, &mac, &format!("mac-{i}"), "owner-mac");
+        if r.status() == 200 {
+            made += 1;
+        } else {
+            eprintln!("fork {i}: {} {}", r.status(), r.text().unwrap());
+        }
+    }
+    stop.store(true, Ordering::SeqCst);
+    writer.join().unwrap();
+    assert_eq!(made, 10, "forks made while two copies kept changing");
+    drop(materialiser);
+    s.stop();
+}

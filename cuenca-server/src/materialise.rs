@@ -91,7 +91,7 @@
 //! until the log moves again, so nothing but the materialiser may write `.cuenca/`. One
 //! materialiser per volume is enforced by a lock on `.cuenca/lock`.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, File};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
@@ -483,55 +483,86 @@ fn snapshot_one(
     cache: &mut cuenca_fs::StatCache,
 ) -> Result<SnapshotOne, String> {
     let head = store.tree(fork.head).map_err(|e| e.to_string())?;
-    let mut snap = cuenca_fs::snapshot(dir, &head, cache).map_err(|e| e.to_string())?;
+    let snap = cuenca_fs::snapshot(dir, &head, cache).map_err(|e| e.to_string())?;
+    stage_and_publish(store, fork, &head, snap, dir)
+}
+
+/// Stage the blobs a snapshot of `dir` against `head` names and publish its changeset.
+/// Each put whose blob is new is staged from its own path, so a blob several paths
+/// share is staged as long as one of them still holds it. A file that changed since the
+/// scan is taken as it is now (a write in progress, as far as it has gone): its put
+/// names what it holds now, and is left out if that is what the head holds. No other op
+/// changes, so a rename or a deletion is never split.
+fn stage_and_publish(
+    store: &Store,
+    fork: &cuenca_core::Fork,
+    head: &cuenca_tree::Tree,
+    snap: cuenca_fs::Snapshot,
+    dir: &Path,
+) -> Result<SnapshotOne, String> {
     if snap.is_clean() {
         return Ok((None, snap.skipped));
     }
-    let mut batch = store.blob_batch();
-    // Files that changed between the scan and their upload, by path: what they hold
-    // now is taken instead (a write still in progress is taken as far as it has gone).
-    let mut changed: HashMap<PathBuf, GitOid> = HashMap::new();
+    let mut sizes: HashMap<GitOid, u64> = HashMap::new();
+    let mut inline: HashMap<GitOid, &[u8]> = HashMap::new();
     for blob in &snap.new_blobs {
-        match &blob.content {
-            cuenca_fs::Content::File(path) => {
-                let now = upload_file(&mut batch, path, blob.oid, blob.size)?;
-                if now != blob.oid {
-                    changed.insert(path.clone(), now);
-                }
-            }
-            cuenca_fs::Content::Inline(bytes) => {
-                batch
-                    .add(blob.oid, blob.size, bytes.as_slice())
-                    .map_err(|e| e.to_string())?;
-            }
+        sizes.insert(blob.oid, blob.size);
+        if let cuenca_fs::Content::Inline(bytes) = &blob.content {
+            inline.insert(blob.oid, bytes);
         }
     }
-    if !changed.is_empty() {
-        let ops = snap
-            .changeset
-            .ops
-            .iter()
-            .map(|op| match op {
-                Op::Put { path, entry } => match changed.get(&dir.join(path.as_str())) {
-                    Some(&oid) => Op::put(
-                        path.clone(),
-                        match entry {
-                            Entry::Executable(_) => Entry::Executable(oid),
-                            Entry::Symlink(_) => Entry::Symlink(oid),
-                            _ => Entry::File(oid),
-                        },
-                    ),
-                    None => op.clone(),
-                },
-                op => op.clone(),
-            })
-            .collect();
-        snap.changeset = Changeset::new(&head, ops).map_err(|e| e.to_string())?;
+    let mut batch = store.blob_batch();
+    let mut staged: HashSet<GitOid> = HashSet::new();
+    let mut ops = Vec::with_capacity(snap.changeset.ops.len());
+    let mut rewritten = false;
+    for op in &snap.changeset.ops {
+        let Op::Put { path, entry } = op else {
+            ops.push(op.clone());
+            continue;
+        };
+        let oid = entry.oid();
+        let Some(&size) = sizes.get(&oid) else {
+            // The head, or another put staged before, has it already.
+            ops.push(op.clone());
+            continue;
+        };
+        if staged.contains(&oid) {
+            ops.push(op.clone());
+            continue;
+        }
+        if let Some(bytes) = inline.get(&oid) {
+            batch.add(oid, size, *bytes).map_err(|e| e.to_string())?;
+            staged.insert(oid);
+            ops.push(op.clone());
+            continue;
+        }
+        let now = upload_file(&mut batch, &dir.join(path.as_str()), oid, size)?;
+        staged.insert(now);
+        if now == oid {
+            ops.push(op.clone());
+            continue;
+        }
+        rewritten = true;
+        let entry = match entry {
+            Entry::Executable(_) => Entry::Executable(now),
+            _ => Entry::File(now),
+        };
+        if head.get(path.as_str()) != Some(&entry) {
+            ops.push(Op::put(path.clone(), entry));
+        }
+    }
+    let changeset = if rewritten {
+        Changeset::new(head, ops).map_err(|e| e.to_string())?
+    } else {
+        snap.changeset
+    };
+    if changeset.ops.is_empty() {
+        return Ok((None, snap.skipped));
     }
     batch.commit().map_err(|e| e.to_string())?;
     let writer = Writer::new(Holder::volume(), fork.epoch());
     let published = store
-        .publish_draft(&fork.name, &writer, &snap.changeset)
+        .publish_draft(&fork.name, &writer, &changeset)
         .map_err(|e| e.to_string())?;
     Ok((Some((published.id, published.offset)), snap.skipped))
 }
@@ -555,7 +586,11 @@ fn upload_file(
         match batch.add(oid, size, open_regular(path)?) {
             Ok(_) => return Ok(oid),
             Err(CoreError::OidMismatch { .. } | CoreError::Hash(_)) => {
-                (oid, size) = hash_file(path)?;
+                // Changed since; a file still changing while it is hashed is tried
+                // again.
+                if let Some(now) = hash_file(path)? {
+                    (oid, size) = now;
+                }
             }
             Err(e) => return Err(format!("{}: {e}", path.display())),
         }
@@ -566,14 +601,16 @@ fn upload_file(
     ))
 }
 
-/// The blob id and size of what the file at `path` holds now.
-fn hash_file(path: &Path) -> Result<(GitOid, u64), String> {
+/// The blob id and size of what the file at `path` holds now, or `None` if its size
+/// changed while it was read.
+fn hash_file(path: &Path) -> Result<Option<(GitOid, u64)>, String> {
     use std::io::Read as _;
     let fail = |e: &dyn std::fmt::Display| format!("{}: {e}", path.display());
-    let mut file = open_regular(path)?;
+    let file = open_regular(path)?;
     let size = file.metadata().map_err(|e| fail(&e))?.len();
     let mut hasher = cuenca_tree::BlobHasher::new(size);
     let mut buf = vec![0; 64 * 1024];
+    let mut file = file.take(size + 1);
     loop {
         let n = file.read(&mut buf).map_err(|e| fail(&e))?;
         if n == 0 {
@@ -581,8 +618,11 @@ fn hash_file(path: &Path) -> Result<(GitOid, u64), String> {
         }
         hasher.update(&buf[..n]);
     }
-    let blob = hasher.finish().map_err(|e| fail(&e))?;
-    Ok((blob.oid(), size))
+    match hasher.finish() {
+        Ok(blob) => Ok(Some((blob.oid(), size))),
+        Err(cuenca_tree::HashFailure::WrongLength { .. }) => Ok(None),
+        Err(e) => Err(fail(&e)),
+    }
 }
 
 /// Open a file the scan found, again by its path, for its upload: never through a
@@ -889,6 +929,74 @@ mod tests {
         assert_eq!(fs::read(shown.join("edit.md")).unwrap(), b"from finder\n");
         assert!(!shown.join("README").exists());
         assert!(fs::read_dir(&volume.staging).unwrap().next().is_none());
+    }
+
+    /// A store with location `site` (main: `README`), its owner fork `owner-mac`, and a
+    /// folder holding main, for the snapshot tests below.
+    fn owner_dir() -> (tempfile::TempDir, Store, cuenca_core::Fork, Tree) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let oid = GitOid::for_blob(b"main\n");
+        store.ingest_blob(oid, 5, &b"main\n"[..]).unwrap();
+        let main =
+            Tree::from_entries([(RepoPath::new("README").unwrap(), Entry::File(oid))]).unwrap();
+        let site = LocationName::new("site").unwrap();
+        store.add_location(&site, None, &main).unwrap();
+        let owner = ForkName::new("owner-mac").unwrap();
+        store.create_fork(&owner, &site, &Holder::volume()).unwrap();
+        fs::create_dir(dir.path().join("fork")).unwrap();
+        fs::write(dir.path().join("fork/README"), b"main\n").unwrap();
+        let fork = store.fork(&owner).unwrap().unwrap();
+        (dir, store, fork, main)
+    }
+
+    fn scan(dir: &Path, head: &Tree) -> cuenca_fs::Snapshot {
+        cuenca_fs::snapshot(dir, head, &mut cuenca_fs::StatCache::new()).unwrap()
+    }
+
+    /// Two new files with the same content, both changed before the upload (so the
+    /// path the scan listed the blob under no longer holds it): each is taken as it is
+    /// now, staged from its own path, and nothing is refused for the blob neither holds.
+    #[test]
+    fn a_blob_two_paths_share_is_staged_from_each_path() {
+        let (d, store, fork, head) = owner_dir();
+        let root = d.path().join("fork");
+        fs::write(root.join("a.md"), b"same\n").unwrap();
+        fs::write(root.join("b.md"), b"same\n").unwrap();
+        let snap = scan(&root, &head);
+        assert_eq!(snap.new_blobs.len(), 1, "one blob for two paths");
+        fs::write(root.join("a.md"), b"A\n").unwrap();
+        fs::write(root.join("b.md"), b"B\n").unwrap();
+        let (published, _) = stage_and_publish(&store, &fork, &head, snap, &root).unwrap();
+        assert!(published.is_some());
+        let now = store.fork_head(&fork.name).unwrap();
+        let blob = |c: &[u8]| Some(Entry::File(GitOid::for_blob(c)));
+        assert_eq!(now.get("a.md").copied(), blob(b"A\n"));
+        assert_eq!(now.get("b.md").copied(), blob(b"B\n"));
+    }
+
+    /// A file changed after the scan is published as it is now, not as the scan read it;
+    /// one changed back to what the head holds is no change at all.
+    #[test]
+    fn a_file_changed_after_the_scan_is_taken_as_it_is_now() {
+        let (d, store, fork, head) = owner_dir();
+        let root = d.path().join("fork");
+        fs::write(root.join("c.md"), b"one\n").unwrap();
+        let snap = scan(&root, &head);
+        fs::write(root.join("c.md"), b"two\n").unwrap();
+        stage_and_publish(&store, &fork, &head, snap, &root).unwrap();
+        let now = store.fork_head(&fork.name).unwrap();
+        assert_eq!(
+            now.get("c.md").copied(),
+            Some(Entry::File(GitOid::for_blob(b"two\n")))
+        );
+
+        let fork = store.fork(&fork.name).unwrap().unwrap();
+        fs::write(root.join("README"), b"edited\n").unwrap();
+        let snap = scan(&root, &now);
+        fs::write(root.join("README"), b"main\n").unwrap();
+        let (published, _) = stage_and_publish(&store, &fork, &now, snap, &root).unwrap();
+        assert_eq!(published, None, "a put of what the head holds");
     }
 
     /// A file that changed between the scan and its upload is staged as it is now,

@@ -304,6 +304,13 @@ mutate src/authority.rs '                        error: error.replace(&shown, ""
 mutate src/http.rs '                visible_location(a, &c, &source.location)?;' '' --test owner_forks needs_reading
 # A file changed between the scan and its upload is taken as it is now (a write in
 # progress as far as it has gone, BRO-3450), never refused for good.
-mutate src/materialise.rs '                (oid, size) = hash_file(path)?;' '                return Err("changed".into());' --lib an_upload_takes_what
+mutate src/materialise.rs '                if let Some(now) = hash_file(path)? {' '                return Err("changed".into());
+                #[allow(unreachable_code)]
+                if let Some(now) = hash_file(path)? {' --lib an_upload_takes_what
 mutate src/materialise.rs '    let size = file.metadata().map_err(|e| fail(&e))?.len();' '    let size = 0;' --lib an_upload_takes_what
+# Each new put is staged from its own path; a changed file's put names what it holds
+# now, and a put of what the head holds is left out.
+mutate src/materialise.rs '        staged.insert(now);' '        staged.insert(oid);' --lib two_paths_share
+mutate src/materialise.rs '        rewritten = true;' '' --lib changed_after_the_scan
+mutate src/materialise.rs '        if head.get(path.as_str()) != Some(&entry) {' '        if true {' --lib changed_after_the_scan
 exit $survived
