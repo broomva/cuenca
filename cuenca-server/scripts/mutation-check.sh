@@ -325,10 +325,10 @@ mutate ../cuenca-core/src/gates/mod.rs 'if bytes > MAX_DECLARATION_BYTES {' 'if 
 # P20 r2 (A, B): an intent for a superseded head is not a retry; only used declarations are journaled.
 mutate ../cuenca-core/src/state.rs '    check_writer(view, &state, writer)?;
     // The head first:' '    check_writer(view, &state, writer)?;
-    if let Some((last, at)) = state.landing_intent
-        && last == id
+    if let Some(l) = &state.landing
+        && l.changeset == id
     {
-        return Ok(Some(at));
+        return Ok(Some(l.offset));
     }
     // The head first:' --test gate_log
 mutate ../cuenca-core/src/gates/mod.rs '            declarations: input.request.declarations.used(input.changeset),' '            declarations: input.request.declarations.clone(),' --test gate_log

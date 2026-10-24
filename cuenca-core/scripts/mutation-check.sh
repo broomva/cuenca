@@ -283,6 +283,8 @@ mutate src/gates/builtin.rs 'Some(c) if c.len() as u64 > self.0 =>' 'Some(c) if 
 mutate src/gates/mod.rs 'findings.truncate(MAX_FINDINGS_PER_GATE);' '' --lib
 mutate src/gates/policy.rs '            Ok((Event::Alias(_), mark)) => {' '            Ok((Event::Alias(_), mark)) if false => {' --lib
 mutate src/gates/policy.rs 'if bytes.len() > MAX_POLICY_BYTES {' 'if false {' --lib
+# P20 r9 (B): a line break PyYAML reads and yaml-rust2 does not is refused.
+mutate src/gates/policy.rs "matches!(c, '\\u{85}' | '\\u{2028}' | '\\u{2029}')" 'false' --lib
 mutate src/gates/policy.rs '                _ => return Err(format!("{at}: unknown key {key:?}")),' '                _ => {}' --lib
 mutate src/store.rs '        let bytes = if matches!(entry, Entry::Symlink(_)) {' '        let bytes = if false {' --lib
 

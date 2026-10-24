@@ -265,6 +265,20 @@ impl Policy {
         // skips it. The YAML loader here would make it part of the first key, so
         // `\u{feff}auto_merge` would read as no `auto_merge` (r4, B).
         let text = text.strip_prefix('\u{feff}').unwrap_or(text);
+        // PyYAML, which p9 loads the file with, also breaks lines at U+0085, U+2028 and
+        // U+2029; yaml-rust2 does not, so rules p9 reads could be one string here (r9, B).
+        // No YAML parser should see a character the other reads differently: these, and
+        // every other control character but tab, LF and CR, are refused.
+        if let Some((at, c)) = text.char_indices().find(|&(_, c)| {
+            matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}')
+                || (c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+        }) {
+            let line = text[..at].matches('\n').count() + 1;
+            return Err(format!(
+                "{POLICY_PATH} holds the character U+{:04X} (line {line}), which the gate engine refuses",
+                u32::from(c)
+            ));
+        }
         prescan(text)?;
         let docs = yaml_rust2::YamlLoader::load_from_str(text)
             .map_err(|e| format!("{POLICY_PATH} is not valid YAML: {e}"))?;
@@ -847,6 +861,23 @@ cuenca:
                 utc_offset: -300
             }]
         );
+    }
+
+    #[test]
+    fn a_line_break_only_pyyaml_sees_is_refused() {
+        // PyYAML breaks lines at U+0085, U+2028 and U+2029; yaml-rust2 does not, so the
+        // rules below were one string under `note:` and the engine protected nothing (r9, B).
+        for sep in ["\u{2028}", "\u{2029}", "\u{85}", "\u{0b}", "\u{0c}"] {
+            let text = format!(
+                "note: x{sep}auto_merge:{sep}  rules:{sep}  - path_touched:{sep}      CLAUDE.md{sep}    action:{sep}      require_human\n"
+            );
+            let got = Policy::parse(text.as_bytes());
+            assert!(
+                got.is_err(),
+                "{sep:?}: parsed Ok, protected {:?}",
+                got.map(|p| p.protected.len())
+            );
+        }
     }
 
     #[test]
