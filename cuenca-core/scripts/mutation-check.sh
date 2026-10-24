@@ -9,7 +9,14 @@ cd "$(dirname "$0")/.."
 backup=$guard_backup
 lock=$(git rev-parse --show-toplevel)/Cargo.lock
 cp "$lock" "$backup/Cargo.lock"
-restore() { [ -n "${current:-}" ] && cp "$backup/file" "$current"; current=; rm -f "$backup/path"; cp "$backup/Cargo.lock" "$lock"; }
+# A failed copy back keeps the run dir, so .backup/path makes the next run refuse to start.
+restore() {
+  if [ -n "${current:-}" ] && ! cp "$backup/file" "$current"; then
+    echo "restore failed: $current is still mutated; its original is $backup/file" >&2; trap - EXIT; exit 4
+  fi
+  current=; rm -f "$backup/path"
+  cp "$backup/Cargo.lock" "$lock" || { echo "restore failed: $lock; its original is $backup/Cargo.lock" >&2; trap - EXIT; exit 4; }
+}
 trap 'guard_kill; restore; guard_cleanup' EXIT
 trap 'exit 130' INT TERM
 

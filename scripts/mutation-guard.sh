@@ -7,7 +7,8 @@
 #                          short: tests bind Unix sockets at $TMPDIR/.tmpXXXXXX/admin.sock,
 #                          and macOS caps a socket path at 104 bytes, so a run dir longer
 #                          than 64 bytes is refused. Point it at a roomy disk if /tmp is not.
-#   CUENCA_MUT_BUDGET_MB   bytes one cargo test may leave under the run dir (default 4096)
+#   CUENCA_MUT_BUDGET_MB   bytes one running cargo test may have under the run dir before
+#                          it is killed (default 4096; leaving more on exit only warns)
 #   CUENCA_MUT_TIMEOUT     seconds one cargo test may run, build included (default 1800)
 #
 # A run dir is named run-<pid> and holds .backup. When the next run starts, one whose
@@ -21,15 +22,22 @@ case $guard_root in
   *) echo "mutation-guard: CUENCA_MUT_TMPDIR must be absolute, not $guard_root" >&2; exit 2 ;;
 esac
 mkdir -p "$guard_root"
+# Without ps and pgrep every old run would look dead.
+command -v ps >/dev/null && command -v pgrep >/dev/null || { echo "mutation-guard: needs ps and pgrep" >&2; exit 2; }
 for stale in "$guard_root"/run-*; do
   pid=${stale##*/run-}
   case $pid in '' | *[!0-9]*) continue ;; esac
   [ -d "$stale/.backup" ] || continue
   ps -p "$pid" >/dev/null 2>&1 && continue
   if [ -s "$stale/.backup/path" ] || { [ -s "$stale/.backup/pgid" ] && pgrep -g "$(cat "$stale/.backup/pgid")" >/dev/null; }; then
-    echo "mutation-guard: run $pid was killed mid-mutant. Before running again:" >&2
-    [ -s "$stale/.backup/path" ] && echo "  restore $(cat "$stale/.backup/path") from $stale/.backup/file" >&2
-    [ -s "$stale/.backup/pgid" ] && echo "  check process group $(cat "$stale/.backup/pgid") is gone (pgrep -g)" >&2
+    echo "mutation-guard: run $pid died without cleaning up. Before running again:" >&2
+    if [ -s "$stale/.backup/path" ]; then
+      echo "  $(cat "$stale/.backup/path") may still be mutated: compare it with $stale/.backup/file and restore it (this overwrites edits made since)" >&2
+      echo "  restore Cargo.lock from $stale/.backup/Cargo.lock or git" >&2
+    fi
+    if [ -s "$stale/.backup/pgid" ] && pgrep -g "$(cat "$stale/.backup/pgid")" >/dev/null; then
+      echo "  its tests still run as process group $(cat "$stale/.backup/pgid"): kill -KILL -- -$(cat "$stale/.backup/pgid")" >&2
+    fi
     echo "  then remove $stale" >&2
     exit 2
   fi
