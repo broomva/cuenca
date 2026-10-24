@@ -319,8 +319,8 @@ fn a_failed_tree_is_tried_again_after_its_wait() {
 }
 
 /// The record is written only after the swap: a swap that fails (here, `forks/` not
-/// writable) leaves the previous tree shown and recorded, so a reopened volume tries the
-/// new tree again instead of believing it shown.
+/// writable) leaves the previous tree shown and no record believed, so a reopened volume
+/// builds the new tree instead of believing it shown.
 #[test]
 fn a_failed_swap_records_nothing() {
     let dir = tempfile::tempdir().unwrap();
@@ -338,17 +338,74 @@ fn a_failed_swap_records_nothing() {
     let pass = volume.converge(&store).unwrap();
     std::fs::set_permissions(&forks, std::fs::Permissions::from_mode(0o2750)).unwrap();
     assert_eq!(pass.failed.len(), 1, "{pass:?}");
-    assert_eq!(volume.shown(&Shown::Fork(fork("f1"))), Some(before));
+    assert_eq!(volume.shown(&Shown::Fork(fork("f1"))), None);
+    assert_eq!(
+        read_back(&root.join("forks/f1")),
+        before,
+        "the previous tree is shown"
+    );
     drop(volume);
 
     let mut volume = Volume::open(&root, store.object_dir()).unwrap();
-    assert_eq!(
-        volume.shown(&Shown::Fork(fork("f1"))),
-        Some(before),
-        "recorded"
-    );
+    assert_eq!(volume.shown(&Shown::Fork(fork("f1"))), None, "recorded");
     let pass = volume.converge(&store).unwrap();
     assert_eq!(pass.built, vec![(Shown::Fork(fork("f1")), cs.target)]);
+}
+
+/// A record that cannot be written after its swap (here, a directory where its
+/// temporary file goes) is not believed: when the fork goes back to the tree it showed
+/// before, the volume shows that tree again, in the same process and after a restart.
+#[test]
+fn a_tree_whose_record_failed_is_not_believed() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = setup(dir.path());
+    let root = dir.path().join("volume");
+    let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+    volume.converge(&store).unwrap();
+    let before = volume.shown(&Shown::Fork(fork("f1"))).unwrap();
+    let blocker = root.join(".cuenca/state/forks/.f1.tmp");
+
+    // The same process: a draft adds `new`, its record fails, the next draft removes it.
+    let add_then_revert = |volume: &mut Volume| {
+        let base = store.fork_head(&fork("f1")).unwrap();
+        let cs = change(&store, &base, &[("new", Entry::File, b"new\n")]);
+        store.publish_draft(&fork("f1"), &writer(), &cs).unwrap();
+        std::fs::create_dir(&blocker).unwrap();
+        let pass = volume.converge(&store).unwrap();
+        std::fs::remove_dir(&blocker).unwrap();
+        assert_eq!(pass.failed.len(), 1, "{pass:?}");
+        assert!(
+            root.join("forks/f1/new").exists(),
+            "swapped before the record failed"
+        );
+        let head = store.fork_head(&fork("f1")).unwrap();
+        let revert = Changeset::new(&head, vec![Op::delete(path("new"))]).unwrap();
+        assert_eq!(revert.target, before);
+        store
+            .publish_draft(&fork("f1"), &writer(), &revert)
+            .unwrap();
+    };
+    add_then_revert(&mut volume);
+    let pass = volume.converge(&store).unwrap();
+    assert_eq!(
+        pass.built,
+        vec![(Shown::Fork(fork("f1")), before)],
+        "{pass:?}"
+    );
+    assert_eq!(read_back(&root.join("forks/f1")), before);
+
+    // After a restart: the same, with the volume reopened between the failure and the
+    // revert's pass.
+    add_then_revert(&mut volume);
+    drop(volume);
+    let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+    let pass = volume.converge(&store).unwrap();
+    assert_eq!(
+        pass.built,
+        vec![(Shown::Fork(fork("f1")), before)],
+        "{pass:?}"
+    );
+    assert_eq!(read_back(&root.join("forks/f1")), before);
 }
 
 /// A reader of the volume never finds a shown fork missing while its tree is replaced:

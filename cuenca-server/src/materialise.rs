@@ -13,9 +13,10 @@
 //! one atomic exchange (`RENAME_EXCHANGE` on Linux, `RENAME_SWAP` on macOS), or one
 //! rename that refuses to replace anything for a tree shown for the first time. So a
 //! reader of the volume sees a tree the log has held, whole, or the next one, whole;
-//! never a tree half written. Only after the swap does it record which tree is shown, in
-//! `.cuenca/state/`, so a materialiser killed at any point redoes at most the tree it was
-//! on: on restart it clears the staging directory and converges again.
+//! never a tree half written. Before the swap it forgets the path's record in
+//! `.cuenca/state/`, and only after the swap does it record the new tree, so a
+//! materialiser that fails or is killed at any point rebuilds that path on its next pass
+//! (or on restart, after clearing the staging directory), never trusting a record for it.
 //!
 //! [`Materialiser`] runs it on a thread of the authority: once at start, then whenever
 //! the log grows, checked every [`VolumeConfig::interval`] (1 s by default; the spec's
@@ -272,9 +273,15 @@ impl Volume {
         set_modes(staged)?;
         flush(&self.staging)?;
         let dest = self.root.join(what.rel());
+        let record = self.state.join(what.rel());
+        // Forget what the path shows before changing it: if anything from here on fails,
+        // or the process dies, the path is rebuilt on the next pass, never believed to
+        // show a tree it may not.
+        self.shown.remove(what);
+        forget_record(&record)?;
         swap_into_place(staged, &dest)?;
         File::open(dest.parent().expect("main/ or forks/"))?.sync_all()?;
-        write_record(&self.state.join(what.rel()), tree)?;
+        write_record(&record, tree)?;
         self.shown.insert(what.clone(), tree);
         Ok(())
     }
@@ -344,6 +351,15 @@ fn remove_any(path: &Path) -> io::Result<()> {
     match fs::symlink_metadata(path) {
         Ok(m) if m.is_dir() => fs::remove_dir_all(path),
         Ok(_) => fs::remove_file(path),
+        Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
+/// Remove the record at `path`, if there is one, durably.
+fn forget_record(path: &Path) -> io::Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => File::open(path.parent().expect("state/main or state/forks"))?.sync_all(),
         Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
         Err(e) => Err(e),
     }

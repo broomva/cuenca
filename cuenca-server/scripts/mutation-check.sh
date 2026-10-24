@@ -246,8 +246,14 @@ mutate src/materialise.rs '        swap_into_place(staged, &dest)?;' '        if
 # that is not shown.
 mutate src/materialise.rs '        swap_into_place(staged, &dest)?;
         File::open(dest.parent().expect("main/ or forks/"))?.sync_all()?;
-        write_record(&self.state.join(what.rel()), tree)?;' '        write_record(&self.state.join(what.rel()), tree)?;
+        write_record(&record, tree)?;' '        write_record(&record, tree)?;
         swap_into_place(staged, &dest)?;
         File::open(dest.parent().expect("main/ or forks/"))?.sync_all()?;' --test materialise a_failed_swap_records_nothing
+# What the path shows is forgotten before the swap, in memory and on disk: kept, a
+# failure after the swap leaves a record of a tree no longer shown.
+mutate src/materialise.rs '        self.shown.remove(what);
+' '' --test materialise a_tree_whose_record_failed
+mutate src/materialise.rs '        forget_record(&record)?;
+' '' --test materialise a_tree_whose_record_failed
 
 exit $survived
