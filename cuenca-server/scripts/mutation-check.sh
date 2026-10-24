@@ -206,7 +206,13 @@ mutate src/materialise.rs '            fs::remove_dir_all(&staging)?;' '' --test
 mutate src/materialise.rs 'FlockOperation::NonBlockingLockExclusive' 'FlockOperation::NonBlockingLockShared' --test materialise one_materialiser
 mutate src/materialise.rs 'if self.shown.get(&what) == Some(&tree) &&' 'if false && self.shown.get(&what) == Some(&tree) &&' --test materialise a_reopened_volume
 mutate src/materialise.rs '        write_record(&self.state.join(what.rel()), tree)?;' '' --test materialise a_reopened_volume
-mutate src/materialise.rs '                && at.elapsed() < RETRY_AFTER' '                && false' --test materialise a_tree_that_fails
+mutate src/materialise.rs '                && at.elapsed() < self.retry_after' '                && false' --test materialise a_tree_that_fails
 mutate src/materialise.rs '        if let Err(e) = remove_any(&staged)' '        if let Err(e) = Ok::<(), io::Error>(())' --test materialise a_draft_is_shown
+mutate src/materialise.rs '        fs::set_permissions(root, fs::Permissions::from_mode(DIR_MODE))?;' '' --test materialise a_draft_is_shown
+mutate src/materialise.rs '    match rustix::fs::renameat_with(CWD, staged, CWD, dest, RenameFlags::EXCHANGE) {' '    let _ = remove_any(dest);
+    match rustix::fs::renameat_with(CWD, staged, CWD, dest, RenameFlags::EXCHANGE) {' --test materialise a_reader_never_sees
+mutate src/materialise.rs '            .any(|(_, at)| at.elapsed() >= self.retry_after)' '            .any(|(_, at)| at.elapsed() >= self.retry_after && false)' --test materialise a_failed_tree_is_tried_again
+mutate src/materialise.rs ' || volume.retry_due()' '' --test materialise a_failed_tree_is_tried_again
+mutate src/materialise.rs '    let tmp = path.with_file_name(format!(".{name}.tmp"));' '    let tmp = path.with_extension("tmp");' --test materialise records_of_dotted_names
 
 exit $survived

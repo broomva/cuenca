@@ -26,8 +26,17 @@
 //! What is shown is read-only to everyone but the authority's own user: folders `2750`,
 //! files `0640` (`0750` for an executable), so Samba's account, a member of the
 //! authority's group, can read them and not change them, and no other account can read
-//! them (spec section 2a). `main/` and `forks/` are `2750` too. The group is whatever the
-//! volume's folders carry; the deploy (BRO-3257) makes it `cuenca`.
+//! them (spec section 2a). `main/` and `forks/` are `2750` too. Trees are checked out
+//! under `.cuenca/`, which is `0700` and so not setgid, and a rename keeps a file's group:
+//! on Linux a shown tree carries the authority's primary group, not the volume's. So the
+//! authority must run with Samba's group as its primary group (the deploy, BRO-3257, runs
+//! it as `cuenca:cuenca`).
+//!
+//! # Filesystem
+//!
+//! The volume needs a filesystem with atomic exchange (`renameat2(RENAME_EXCHANGE)` on
+//! Linux: ext4, btrfs, xfs, tmpfs; `renamex_np(RENAME_SWAP)` on APFS). Elsewhere every
+//! update of a tree already shown fails, loudly, and is retried.
 //!
 //! # Not here yet
 //!
@@ -68,8 +77,8 @@ const FILE_MODE: u32 = 0o640;
 /// Executables the volume shows: the owner's execute bit is what a snapshot reads.
 const EXEC_MODE: u32 = 0o750;
 /// How long a tree that failed to materialise waits before it is tried again, unless the
-/// log moves it on first.
-const RETRY_AFTER: Duration = Duration::from_secs(30);
+/// log moves that path to another tree first ([`VolumeConfig::retry_after`]).
+pub const RETRY_AFTER: Duration = Duration::from_secs(30);
 
 /// One thing the volume shows.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord)]
@@ -116,8 +125,9 @@ pub struct Volume {
     state: PathBuf,
     /// What each path shows, as recorded in `.cuenca/state/`.
     shown: HashMap<Shown, GitOid>,
-    /// Trees that failed, and when; tried again after [`RETRY_AFTER`].
+    /// Trees that failed, and when; tried again after `retry_after`.
     failed: HashMap<Shown, (GitOid, Instant)>,
+    retry_after: Duration,
     /// The lock that keeps this the volume's only materialiser, held while it lives.
     _lock: File,
     next_staging: u64,
@@ -130,6 +140,7 @@ impl Volume {
     /// never shown.
     pub fn open(root: &Path, objects: &Path) -> io::Result<Self> {
         fs::create_dir_all(root)?;
+        fs::set_permissions(root, fs::Permissions::from_mode(DIR_MODE))?;
         let private = root.join(".cuenca");
         fs::create_dir_all(&private)?;
         fs::set_permissions(&private, fs::Permissions::from_mode(0o700))?;
@@ -163,6 +174,7 @@ impl Volume {
             state,
             shown,
             failed: HashMap::new(),
+            retry_after: RETRY_AFTER,
             _lock: lock,
             next_staging: 0,
         })
@@ -173,11 +185,17 @@ impl Volume {
         self.shown.get(what).copied()
     }
 
-    /// Whether a tree that failed is waiting to be tried again.
+    /// How long a tree that failed waits before it is tried again ([`RETRY_AFTER`] by
+    /// default).
+    pub fn set_retry_after(&mut self, wait: Duration) {
+        self.retry_after = wait;
+    }
+
+    /// Whether a tree that failed is due to be tried again.
     pub fn retry_due(&self) -> bool {
         self.failed
             .values()
-            .any(|(_, at)| at.elapsed() >= RETRY_AFTER)
+            .any(|(_, at)| at.elapsed() >= self.retry_after)
     }
 
     /// Make the volume show what the log holds now: each location's main and each
@@ -200,7 +218,7 @@ impl Volume {
             }
             if let Some((failed, at)) = self.failed.get(&what)
                 && *failed == tree
-                && at.elapsed() < RETRY_AFTER
+                && at.elapsed() < self.retry_after
             {
                 continue;
             }
@@ -296,8 +314,9 @@ fn set_modes(dir: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Make what was staged durable before it is shown, so a power loss after the swap
-/// cannot leave a shown tree with torn files.
+/// Make what was staged durable before it is shown, so on Linux (`syncfs`) a power loss
+/// after the swap cannot leave a shown tree with torn files. Elsewhere (`sync`, which
+/// only schedules the writes) this is best effort; the deploy is Linux.
 fn flush(staging: &Path) -> io::Result<()> {
     #[cfg(target_os = "linux")]
     {
@@ -321,9 +340,15 @@ fn remove_any(path: &Path) -> io::Result<()> {
     }
 }
 
-/// Record that `path`'s tree is `tree`: written beside it and renamed over it.
+/// Record that `path`'s tree is `tree`: written beside it and renamed over it. The
+/// temporary name starts with a dot, which no location or fork name can, so it is
+/// never another record.
 fn write_record(path: &Path, tree: GitOid) -> io::Result<()> {
-    let tmp = path.with_extension("tmp");
+    let name = path
+        .file_name()
+        .expect("a record has a name")
+        .to_string_lossy();
+    let tmp = path.with_file_name(format!(".{name}.tmp"));
     fs::write(&tmp, tree.to_hex())?;
     File::open(&tmp)?.sync_all()?;
     fs::rename(&tmp, path)?;
@@ -366,6 +391,8 @@ pub struct VolumeConfig {
     pub root: PathBuf,
     /// How often the log is checked for growth.
     pub interval: Duration,
+    /// How long a tree that failed waits before it is tried again.
+    pub retry_after: Duration,
 }
 
 impl VolumeConfig {
@@ -373,6 +400,7 @@ impl VolumeConfig {
         Self {
             root,
             interval: Duration::from_secs(1),
+            retry_after: RETRY_AFTER,
         }
     }
 }
@@ -387,6 +415,7 @@ impl Materialiser {
     /// Open the volume and start converging it: now, then each time the log grows.
     pub fn spawn(authority: Arc<Authority>, config: VolumeConfig) -> io::Result<Self> {
         let mut volume = Volume::open(&config.root, authority.store.object_dir())?;
+        volume.set_retry_after(config.retry_after);
         let stop = Arc::new(AtomicBool::new(false));
         let thread = {
             let stop = stop.clone();

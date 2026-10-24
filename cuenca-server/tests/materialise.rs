@@ -138,6 +138,7 @@ fn a_draft_is_shown_whole_and_read_only() {
     assert!(!root.join("main/site/src").exists());
     // Read-only to all but the owner; the group reads; no one else.
     for d in [
+        &root,
         &root.join("main"),
         &root.join("forks"),
         &shown,
@@ -231,6 +232,131 @@ fn a_tree_that_fails_leaves_the_previous_one_shown() {
     let pass = volume.converge(&store).unwrap();
     assert!(pass.failed.is_empty() && pass.built.is_empty(), "{pass:?}");
     assert!(!volume.retry_due());
+}
+
+/// A tree that failed is tried again once its wait is over, with no new log entry: the
+/// materialiser's loop polls for it.
+#[test]
+fn a_failed_tree_is_tried_again_after_its_wait() {
+    let s = Server::start();
+    s.add_location("l1");
+    let store = s.authority.store();
+    store
+        .create_fork(&fork("f1"), &loc("l1"), &writer().holder)
+        .unwrap();
+    let base = store.fork_head(&fork("f1")).unwrap();
+    let cs = change(store, &base, &[("new", Entry::File, b"new content\n")]);
+    store.publish_draft(&fork("f1"), &writer(), &cs).unwrap();
+    let hex = GitOid::for_blob(b"new content\n").to_hex();
+    let object = store.object_dir().join(&hex[..2]).join(&hex[2..]);
+    let mut perms = std::fs::metadata(&object).unwrap().permissions();
+    perms.set_mode(0o644);
+    std::fs::set_permissions(&object, perms).unwrap();
+    std::fs::write(&object, b"tampered\n").unwrap();
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("volume");
+    let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+    volume.set_retry_after(Duration::from_millis(300));
+    let pass = volume.converge(store).unwrap();
+    assert_eq!(pass.failed.len(), 1, "{pass:?}");
+    assert!(!volume.retry_due());
+    std::thread::sleep(Duration::from_millis(350));
+    assert!(volume.retry_due());
+    drop(volume);
+
+    // The materialiser's loop: the blob is repaired, the log does not move, and the
+    // tree is shown once the wait is over.
+    let len = store.len().unwrap();
+    let mut config = VolumeConfig::new(root.clone());
+    config.interval = Duration::from_millis(50);
+    config.retry_after = Duration::from_millis(500);
+    let materialiser = Materialiser::spawn(s.authority.clone(), config).unwrap();
+    std::thread::sleep(Duration::from_millis(200));
+    assert!(
+        !root.join("forks/f1/new").exists(),
+        "failed on the first pass"
+    );
+    std::fs::write(&object, b"new content\n").unwrap();
+    let start = Instant::now();
+    while !root.join("forks/f1/new").exists() {
+        assert!(
+            start.elapsed() < Duration::from_secs(10),
+            "never tried again"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    assert_eq!(store.len().unwrap(), len, "the log did not move");
+    drop(materialiser);
+    s.stop();
+}
+
+/// A reader of the volume never finds a shown fork missing while its tree is replaced:
+/// one thread looks, again and again, while 8 drafts of 1,500 files are swapped in.
+#[test]
+fn a_reader_never_sees_a_shown_tree_missing() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = setup(dir.path());
+    let root = dir.path().join("volume");
+    let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+    let base = store.fork_head(&fork("f1")).unwrap();
+    store
+        .publish_draft(&fork("f1"), &writer(), &numbered(&store, &base, 0))
+        .unwrap();
+    volume.converge(&store).unwrap();
+
+    let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let reader = {
+        let done = done.clone();
+        let shown = root.join("forks/f1/d0");
+        std::thread::spawn(move || {
+            let (mut looks, mut gaps) = (0u64, 0u64);
+            while !done.load(std::sync::atomic::Ordering::SeqCst) {
+                looks += 1;
+                if !shown.is_dir() {
+                    gaps += 1;
+                }
+            }
+            (looks, gaps)
+        })
+    };
+    for n in 1..=8 {
+        let base = store.fork_head(&fork("f1")).unwrap();
+        let cs = numbered(&store, &base, n);
+        store.publish_draft(&fork("f1"), &writer(), &cs).unwrap();
+        let pass = volume.converge(&store).unwrap();
+        assert_eq!(pass.built, vec![(Shown::Fork(fork("f1")), cs.target)]);
+    }
+    done.store(true, std::sync::atomic::Ordering::SeqCst);
+    let (looks, gaps) = reader.join().unwrap();
+    assert!(looks > 1000, "the reader looked only {looks} times");
+    assert_eq!(gaps, 0, "{gaps} of {looks} looks found forks/f1 missing");
+}
+
+/// A record's temporary file is never another fork's record: forks `f1.tmp` and `f1.x`
+/// (whose record, with a `.tmp` extension swapped in, would be written through
+/// `f1.tmp`'s), reopened, rebuild nothing.
+#[test]
+fn records_of_dotted_names_do_not_collide() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = setup(dir.path());
+    for name in ["f1.tmp", "f1.x"] {
+        store
+            .create_fork(&fork(name), &loc("site"), &writer().holder)
+            .unwrap();
+    }
+    let root = dir.path().join("volume");
+    let pass = Volume::open(&root, store.object_dir())
+        .unwrap()
+        .converge(&store)
+        .unwrap();
+    assert_eq!(pass.built.len(), 4, "{pass:?}");
+    let pass = Volume::open(&root, store.object_dir())
+        .unwrap()
+        .converge(&store)
+        .unwrap();
+    assert!(pass.built.is_empty(), "{pass:?}");
+    assert_eq!(pass.unchanged, 4);
 }
 
 /// Over HTTP, as an agent publishes: shown within the spec's 15 s.
