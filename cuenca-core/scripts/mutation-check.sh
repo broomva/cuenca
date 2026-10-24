@@ -5,15 +5,16 @@
 # restored after each mutant, also on interrupt.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-backup=$(mktemp -d)
+. ../scripts/mutation-guard.sh
+backup=$guard_backup
 lock=$(git rev-parse --show-toplevel)/Cargo.lock
 cp "$lock" "$backup/Cargo.lock"
 restore() { [ -n "${current:-}" ] && cp "$backup/file" "$current"; current=; cp "$backup/Cargo.lock" "$lock"; }
-trap 'restore; rm -rf "$backup"' EXIT
+trap 'restore; guard_cleanup' EXIT
 trap 'exit 130' INT TERM
 
 # A mutant only counts as killed against a suite that passes unmutated.
-if ! cargo test -q -p cuenca-core >"$backup/log" 2>&1; then
+if ! bounded cargo test -q -p cuenca-core >"$backup/log" 2>&1; then
   echo "baseline is red: fix the suite before reading any mutant verdict"; cat "$backup/log"; exit 2
 fi
 echo "baseline  green"
@@ -29,10 +30,13 @@ if s.count(sys.argv[2]) != 1: sys.exit("anchor not unique: " + sys.argv[2])
 p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $file: $old"; survived=1; restore; return; fi
-  if cargo test -q -p cuenca-core "$@" >"$backup/log" 2>&1; then
+  bounded cargo test -q -p cuenca-core "$@" >"$backup/log" 2>&1; local status=$?
+  if [ "$status" -eq 0 ]; then
     echo "SURVIVED  $file: $old"; survived=1
   elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' "$backup/log"; then
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; survived=1
+  elif [ "$status" -eq 124 ] || [ "$status" -eq 125 ]; then
+    echo "killed    $file: $old ($(tail -n 1 "$backup/log"))"
   else
     echo "killed    $file: $old"
   fi
