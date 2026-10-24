@@ -294,13 +294,17 @@ mutate src/authority.rs '            match volume.snapshot_owner_fork(&self.stor
 mutate src/authority.rs '        self.guarded(principal, || self.store.check_branch(fork, from, holder))?;' '' --test owner_forks refused_fork
 mutate src/http.rs '                a.branch_fork(&fork, &from, &c.holder)?' '                a.guarded(&c.key.principal, || a.branch_fork(&fork, &from, &c.holder))?' --test owner_forks revocation_does_not_wait
 mutate src/authority.rs '            .filter(|_| source.holder().is_some_and(Holder::is_volume))' '            .filter(|_| false)' --test owner_forks unsnapshotted_edits
-mutate src/authority.rs '                Some(Err(error)) if attempt >= SNAPSHOT_ATTEMPTS => {' '                Some(Err(_)) if attempt >= SNAPSHOT_ATTEMPTS => break,
-                Some(Err(error)) if false => {' --test owner_forks cannot_be_snapshotted
+mutate src/authority.rs '                Some(Err(error)) => error,' '                Some(Err(error)) if false => error,
+                Some(Err(_)) => {
+                    return Ok(self.guarded(principal, || {
+                        self.store.branch_fork(fork, from, holder)
+                    })?);
+                }' --test owner_forks cannot_be_snapshotted
 mutate src/http.rs '                let source = visible_fork(a, &c, &from)?;' '                let source = a.store.fork(&from)?.ok_or_else(ApiError::not_found)?;' --test owner_forks needs_reading
 mutate src/admin.rs 'cuenca_fs::ForkIgnore::for_tree(&main, |oid|' 'cuenca_fs::ForkIgnore::for_tree(&Tree::new(), |oid|' --lib an_owner_fork_of_a_main_tracking
 
-mutate src/authority.rs 'const SNAPSHOT_ATTEMPTS: u32 = 10;' 'const SNAPSHOT_ATTEMPTS: u32 = 1;' --test owner_forks tried_again
-mutate src/authority.rs '                        error: error.replace(&shown, ""),' '                        error,' --test owner_forks cannot_be_snapshotted
+mutate src/authority.rs 'std::time::Duration::from_secs(5);' 'std::time::Duration::from_secs(0);' --test owner_forks tried_again
+mutate src/authority.rs '                    error: error.replace(&shown, ""),' '                    error,' --test owner_forks cannot_be_snapshotted
 mutate src/http.rs '                visible_location(a, &c, &source.location)?;' '' --test owner_forks needs_reading
 
 # Only what the scan read is uploaded: a folder swapped for a link since never brings an
@@ -309,5 +313,7 @@ mutate src/materialise.rs '            cuenca_fs::Content::File(path) => batch.a
                 let now = fs::read(path).map_err(|e| e.to_string())?;
                 batch.add(GitOid::for_blob(&now), now.len() as u64, now.as_slice())
             }' --lib swapped_for_a_link
+mutate src/materialise.rs '        added.map_err(|e| match (&blob.content, e) {' '        added.map_err(|e| match (&blob.content, e) {
+            (_, e) if true => e.to_string(),' --lib swapped_for_a_link
 
 exit $survived

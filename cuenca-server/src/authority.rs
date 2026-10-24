@@ -41,8 +41,13 @@ pub struct Authority {
     volume: OnceLock<Arc<Mutex<Volume>>>,
 }
 
-/// How many times forking an owner fork tries to snapshot it before refusing.
-const SNAPSHOT_ATTEMPTS: u32 = 10;
+/// How long forking an owner fork keeps trying to snapshot it before refusing: a file
+/// that changes between the scan and its upload fails that attempt, so a fork taken
+/// while a client keeps writing may need several.
+const SNAPSHOT_BUDGET: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// The pause between two attempts, with the volume unlocked.
+const SNAPSHOT_PAUSE: std::time::Duration = std::time::Duration::from_millis(100);
 
 /// Why forking a fork was refused.
 #[derive(Debug, thiserror::Error)]
@@ -181,8 +186,9 @@ impl Authority {
     /// finished version is the owner fork's next snapshot (see [`crate::materialise`]).
     /// The new fork holds every write the snapshot read, and anything written later
     /// stays in `from`. A snapshot that fails (a file the authority cannot read, one
-    /// that changed between the scan and its upload) is taken again, up to
-    /// `SNAPSHOT_ATTEMPTS` times, then refused, and no fork is made.
+    /// that changed between the scan and its upload) is taken again, with the volume
+    /// unlocked between attempts, for up to `SNAPSHOT_BUDGET`, then refused, and no
+    /// fork is made.
     ///
     /// The volume is locked outside the revocation lock, never inside it, so a slow
     /// snapshot never holds up a revocation.
@@ -205,37 +211,42 @@ impl Authority {
         else {
             return Ok(self.guarded(principal, || self.store.branch_fork(fork, from, holder))?);
         };
-        let mut volume = Self::lock_volume(volume);
+        let started = std::time::Instant::now();
         let mut attempt = 0;
         loop {
             attempt += 1;
+            // Locked from the snapshot to the fork; unlocked between attempts.
+            let mut locked = Self::lock_volume(volume);
             // Read under the lock: only the volume moves an owner fork's head.
             let source = self
                 .store
                 .fork(from)?
                 .ok_or_else(|| CoreError::UnknownFork(from.to_string()))?;
-            match volume.snapshot_owner_fork(&self.store, &source) {
-                None | Some(Ok(_)) => break,
-                Some(Err(error)) if attempt >= SNAPSHOT_ATTEMPTS => {
-                    tracing::error!(fork = %from, error, "owner fork snapshot failed; not forked");
-                    // Paths in the answer are the fork's own; where the volume is on the
-                    // authority's host stays in its log.
-                    let shown = format!(
-                        "{}/",
-                        volume.root().join("forks").join(from.as_str()).display()
+            let error = match locked.snapshot_owner_fork(&self.store, &source) {
+                None | Some(Ok(_)) => {
+                    return Ok(
+                        self.guarded(principal, || self.store.branch_fork(fork, from, holder))?
                     );
-                    return Err(BranchError::Snapshot {
-                        fork: from.to_string(),
-                        error: error.replace(&shown, ""),
-                    });
                 }
-                Some(Err(error)) => {
-                    tracing::warn!(fork = %from, error, attempt, "owner fork snapshot failed; trying again");
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
+                Some(Err(error)) => error,
+            };
+            if started.elapsed() + SNAPSHOT_PAUSE >= SNAPSHOT_BUDGET {
+                tracing::error!(fork = %from, error, attempt, "owner fork snapshot failed; not forked");
+                // Paths in the answer are the fork's own; where the volume is on the
+                // authority's host stays in its log.
+                let shown = format!(
+                    "{}/",
+                    locked.root().join("forks").join(from.as_str()).display()
+                );
+                return Err(BranchError::Snapshot {
+                    fork: from.to_string(),
+                    error: error.replace(&shown, ""),
+                });
             }
+            drop(locked);
+            tracing::warn!(fork = %from, error, attempt, "owner fork snapshot failed; trying again");
+            std::thread::sleep(SNAPSHOT_PAUSE);
         }
-        Ok(self.guarded(principal, || self.store.branch_fork(fork, from, holder))?)
     }
 
     pub fn store(&self) -> &Store {

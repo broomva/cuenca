@@ -508,8 +508,15 @@ fn publish(
             cuenca_fs::Content::Inline(bytes) => batch.add(blob.oid, blob.size, bytes.as_slice()),
         };
         // A file that changed since the scan hashes to another id: refused, and the
-        // next pass reads it again.
-        added.map_err(|e| e.to_string())?;
+        // next pass reads it again. Said without the store's own words, which would give
+        // the length or the id of whatever the path now reaches.
+        added.map_err(|e| match (&blob.content, e) {
+            (
+                cuenca_fs::Content::File(path),
+                cuenca_core::CoreError::OidMismatch { .. } | cuenca_core::CoreError::Hash(_),
+            ) => format!("{}: changed while it was snapshotted", path.display()),
+            (_, e) => e.to_string(),
+        })?;
     }
     batch.commit().map_err(|e| e.to_string())?;
     let writer = Writer::new(Holder::volume(), fork.epoch());
@@ -843,16 +850,27 @@ mod tests {
         fs::write(root.join("sub/x.md"), b"mine\n").unwrap();
         let outside = dir.path().join("host");
         fs::create_dir(&outside).unwrap();
-        fs::write(outside.join("x.md"), b"HOST SECRET\n").unwrap();
+        // As long as what the scan read, so a length check alone would not refuse it.
+        fs::write(outside.join("x.md"), b"HOST\n").unwrap();
         let snap = cuenca_fs::snapshot(&root, &main, &mut cuenca_fs::StatCache::new()).unwrap();
         fs::rename(root.join("sub"), dir.path().join("moved")).unwrap();
         std::os::unix::fs::symlink(&outside, root.join("sub")).unwrap();
         let len = store.len().unwrap();
-        assert!(publish(&store, &fork, snap).is_err());
+        let err = publish(&store, &fork, snap).unwrap_err();
+        // Named by its path, with nothing of what the path now reaches: no id, no length.
+        assert!(
+            err.contains("sub/x.md: changed while it was snapshotted"),
+            "{err}"
+        );
+        let host = GitOid::for_blob(b"HOST\n").to_hex();
+        assert!(
+            !err.contains(&host[..12]) && !err.contains("bytes"),
+            "{err}"
+        );
         assert_eq!(store.len().unwrap(), len, "nothing published");
         assert!(
             store
-                .blob_info(GitOid::for_blob(b"HOST SECRET\n"))
+                .blob_info(GitOid::for_blob(b"HOST\n"))
                 .unwrap()
                 .is_none(),
             "the outside file reached the store"

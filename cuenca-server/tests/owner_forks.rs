@@ -754,8 +754,8 @@ fn a_refused_fork_of_an_owner_fork_snapshots_nothing() {
 fn a_revocation_does_not_wait_for_a_fork() {
     let (s, mac, shown, _dir, materialiser) = forking_setup();
     s.mint("other", Agent, "nOtherCNTRL", grant(&["l1"], &[]));
-    // A file the authority cannot read keeps the fork in its snapshot attempts (three,
-    // 200 ms apart) for a while, then refuses it.
+    // A file the authority cannot read keeps the fork in its snapshot attempts (100 ms
+    // apart, for 5 s) for a while, then refuses it.
     std::fs::write(shown.join("secret.md"), b"locked\n").unwrap();
     std::fs::set_permissions(
         shown.join("secret.md"),
@@ -809,7 +809,7 @@ fn a_snapshot_failing_once_is_tried_again() {
     let secret = shown.join("secret.md");
     std::fs::write(&secret, b"locked\n").unwrap();
     std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o000)).unwrap();
-    // Readable again after the first attempt, before the last (200 ms apart).
+    // Readable again after the first attempt, before the last (100 ms apart).
     let unlock = std::thread::spawn(move || {
         std::thread::sleep(Duration::from_millis(250));
         std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o660)).unwrap();
