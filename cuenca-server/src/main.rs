@@ -28,6 +28,9 @@ struct Args {
     /// The gh binary, logged in, that landing opens pull requests with.
     #[arg(long, default_value = "gh")]
     gh: PathBuf,
+    /// The volume to keep every location's main and fork's head in, for Samba to serve.
+    #[arg(long, env = "CUENCA_VOLUME")]
+    volume: Option<PathBuf>,
 }
 
 #[tokio::main]
@@ -45,6 +48,7 @@ async fn main() -> anyhow::Result<()> {
         unsafe_bind: a.unsafe_bind,
         tailscale: a.tailscale,
         gh: a.gh,
+        volume: a.volume,
     })
     .await
 }

@@ -130,6 +130,9 @@ enum Verb {
         /// The gh binary, logged in, that landing opens pull requests with.
         #[arg(long, default_value = "gh")]
         gh: PathBuf,
+        /// The volume to keep every location's main and fork's head in, for Samba to serve.
+        #[arg(long, env = "CUENCA_VOLUME")]
+        volume: Option<PathBuf>,
     },
 }
 
@@ -234,6 +237,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             unsafe_bind,
             tailscale,
             gh,
+            volume,
         } => {
             tracing_subscriber::fmt()
                 .with_env_filter(
@@ -249,6 +253,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                     unsafe_bind,
                     tailscale,
                     gh,
+                    volume,
                 },
             ))?;
             return Ok(0);

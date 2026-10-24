@@ -55,6 +55,11 @@ impl BlobFiles {
         Ok(Self { objects, tmp })
     }
 
+    /// The directory blobs sit in, as `<2 hex>/<38 hex>`.
+    pub(crate) fn objects(&self) -> &Path {
+        &self.objects
+    }
+
     fn path(&self, oid: GitOid) -> PathBuf {
         let hex = oid.to_hex();
         self.objects.join(&hex[..2]).join(&hex[2..])

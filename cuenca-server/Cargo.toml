@@ -24,7 +24,7 @@ cuenca-tree = { path = "../cuenca-tree" }
 futures-util.workspace = true
 hex.workspace = true
 rand.workspace = true
-rustix = { version = "1", features = ["process"] }
+rustix = { version = "1", features = ["fs", "process"] }
 serde.workspace = true
 serde_json.workspace = true
 sha2.workspace = true

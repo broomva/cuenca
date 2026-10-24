@@ -191,4 +191,69 @@ mutate src/land.rs '                    if !pushed {
 
 mutate src/land.rs '        let ours = ids.len() == 2' '        let ours = ids.len() >= 2' --test land a_merge_commit
 
+# The volume (materialise.rs): a tree is built in staging and swapped in whole; modes are
+# read-only; a killed pass leaves nothing; one materialiser; records skip work; a failed
+# tree waits before it is tried again.
+mutate src/materialise.rs '        cuenca_fs::checkout(&full, staged, &self.objects)?;' '        let here = self.root.join(what.rel());
+        remove_any(&here)?;
+        cuenca_fs::checkout(&full, &here, &self.objects)?;
+        fs::rename(&here, staged)?;' --test materialise killed_while_materialising
+mutate src/materialise.rs '        set_modes(staged)?;' '' --test materialise a_draft_is_shown
+mutate src/materialise.rs 'const FILE_MODE: u32 = 0o640;' 'const FILE_MODE: u32 = 0o644;' --test materialise a_draft_is_shown
+mutate src/materialise.rs 'const DIR_MODE: u32 = 0o2750;' 'const DIR_MODE: u32 = 0o2755;' --test materialise a_draft_is_shown
+mutate src/materialise.rs '.permissions().mode() & 0o100 != 0;' '.permissions().mode() & 0o100 == 0;' --test materialise a_draft_is_shown
+mutate src/materialise.rs '            fs::remove_dir_all(&staging)?;' '' --test materialise killed_while_materialising
+mutate src/materialise.rs 'FlockOperation::NonBlockingLockExclusive' 'FlockOperation::NonBlockingLockShared' --test materialise one_materialiser
+mutate src/materialise.rs '            if self.shown.get(&what) == Some(&tree)
+' '            if false && self.shown.get(&what) == Some(&tree)
+' --test materialise a_reopened_volume
+mutate src/materialise.rs '.is_ok_and(|m| m.is_dir())' '.is_ok() && self.root.join(what.rel()).is_dir()' --test materialise a_reopened_volume
+mutate src/materialise.rs '        write_record(&record, tree)?;' '' --test materialise a_reopened_volume
+mutate src/materialise.rs '                && at.elapsed() < self.retry_after' '                && false' --test materialise a_tree_that_fails
+mutate src/materialise.rs '        if let Err(e) = remove_any(&staged)' '        if let Err(e) = Ok::<(), io::Error>(())' --test materialise a_draft_is_shown
+mutate src/materialise.rs '        fs::set_permissions(root, fs::Permissions::from_mode(DIR_MODE))?;' '' --test materialise a_draft_is_shown
+mutate src/materialise.rs '    match rustix::fs::renameat_with(CWD, staged, CWD, dest, RenameFlags::EXCHANGE) {' '    let _ = remove_any(dest);
+    match rustix::fs::renameat_with(CWD, staged, CWD, dest, RenameFlags::EXCHANGE) {' --test materialise a_reader_never_sees
+mutate src/materialise.rs '            .any(|(_, at)| at.elapsed() >= self.retry_after)' '            .any(|(_, at)| at.elapsed() >= self.retry_after && false)' --test materialise a_failed_tree_is_tried_again
+mutate src/materialise.rs ' || volume.retry_due()' '' --test materialise a_failed_tree_is_tried_again
+mutate src/materialise.rs '    let tmp = path.with_file_name(format!(".{name}.tmp"));' '    let tmp = path.with_extension("tmp");' --test materialise records_of_dotted_names
+
+# Narrower windows than delete-then-rename: three renames (aside, in, back), and one
+# exchange per top-level entry (never missing, but mixed). The reader catches both.
+mutate src/materialise.rs '    match rustix::fs::renameat_with(CWD, staged, CWD, dest, RenameFlags::EXCHANGE) {' '    if dest.exists() {
+        let aside = staged.with_extension("aside");
+        fs::rename(dest, &aside)?;
+        fs::rename(staged, dest)?;
+        return fs::rename(&aside, staged);
+    }
+    match rustix::fs::renameat_with(CWD, staged, CWD, dest, RenameFlags::EXCHANGE) {' --test materialise a_reader_never_sees
+mutate src/materialise.rs '        swap_into_place(staged, &dest)?;' '        if dest.exists() {
+            for e in fs::read_dir(staged)? {
+                let e = e?;
+                let to = dest.join(e.file_name());
+                if fs::symlink_metadata(&to).is_ok() {
+                    rustix::fs::renameat_with(CWD, e.path(), CWD, &to, RenameFlags::EXCHANGE)
+                        .map_err(io::Error::from)?;
+                } else {
+                    fs::rename(e.path(), &to)?;
+                }
+            }
+        } else {
+            swap_into_place(staged, &dest)?;
+        }' --test materialise a_reader_never_sees
+
+# The record follows the swap: written first, a failed swap leaves it naming a tree
+# that is not shown.
+mutate src/materialise.rs '        swap_into_place(staged, &dest)?;
+        File::open(dest.parent().expect("main/ or forks/"))?.sync_all()?;
+        write_record(&record, tree)?;' '        write_record(&record, tree)?;
+        swap_into_place(staged, &dest)?;
+        File::open(dest.parent().expect("main/ or forks/"))?.sync_all()?;' --test materialise a_failed_swap_records_nothing
+# What the path shows is forgotten before the swap, in memory and on disk: kept, a
+# failure after the swap leaves a record of a tree no longer shown.
+mutate src/materialise.rs '        self.shown.remove(what);
+' '' --test materialise a_tree_whose_record_failed
+mutate src/materialise.rs '        forget_record(&record)?;
+' '' --test materialise a_tree_whose_record_failed
+
 exit $survived
