@@ -14,6 +14,10 @@
 # EXIT trap never ran) is removed when the next run starts.
 guard_repo=$(git rev-parse --show-toplevel)
 guard_root=${CUENCA_MUT_TMPDIR:-/tmp/cuenca-mut}
+case $guard_root in
+  /*) ;;
+  *) echo "mutation-guard: CUENCA_MUT_TMPDIR must be absolute, not $guard_root" >&2; exit 2 ;;
+esac
 mkdir -p "$guard_root"
 for stale in "$guard_root"/run-*; do
   [ -d "$stale" ] || continue
@@ -28,13 +32,17 @@ fi
 guard_backup=$guard_dir/.backup
 mkdir -p "$guard_backup"
 export TMPDIR=$guard_dir
-guard_cleanup() { rm -rf "$guard_dir"; }
+# A group left behind by a SIGKILLed bounded.py is killed before its dir is removed.
+guard_cleanup() {
+  [ -s "$guard_backup/pgid" ] && kill -KILL -- "-$(cat "$guard_backup/pgid")" 2>/dev/null
+  rm -rf "$guard_dir"
+}
 
 # bounded COMMAND...: run COMMAND under the budget and the timeout. The run dir is
 # emptied first, so the budget applies to this command alone. Status 124 is a timeout
 # and 125 an exceeded budget; either one is reported on stderr.
 bounded() {
   find "$guard_dir" -mindepth 1 -maxdepth 1 ! -name .backup -exec rm -rf {} +
-  python3 "$guard_repo/scripts/bounded.py" --dir "$guard_dir" \
+  python3 "$guard_repo/scripts/bounded.py" --dir "$guard_dir" --pgid-file "$guard_backup/pgid" \
     --budget-mb "${CUENCA_MUT_BUDGET_MB:-4096}" --timeout "${CUENCA_MUT_TIMEOUT:-1800}" -- "$@"
 }

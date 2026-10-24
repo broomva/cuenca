@@ -40,7 +40,12 @@ PY
   elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' "$backup/log"; then
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; survived=1
   elif [ "$status" -eq 124 ] || [ "$status" -eq 125 ]; then
-    echo "killed    $file: $old ($(tail -n 1 "$backup/log"))"
+    # Stopped by the guard: a kill only if the tests had started, not mid-build.
+    if grep -qE '^running [0-9]+ tests?$' "$backup/log"; then
+      echo "killed    $file: $old ($(tail -n 1 "$backup/log"))"
+    else
+      echo "NO TEST   $file: $old (stopped before any test ran: $(tail -n 1 "$backup/log"))"; survived=1
+    fi
   else
     echo "killed    $file: $old"
   fi
