@@ -299,7 +299,8 @@ fn a_failed_tree_is_tried_again_after_its_wait() {
     config.interval = Duration::from_millis(50);
     config.retry_after = Duration::from_millis(500);
     let materialiser = Materialiser::spawn(s.authority.clone(), config).unwrap();
-    std::thread::sleep(Duration::from_millis(200));
+    // The first pass runs as the thread starts; a second's margin before the repair.
+    std::thread::sleep(Duration::from_secs(1));
     assert!(
         !root.join("forks/f1/new").exists(),
         "failed on the first pass"
@@ -333,6 +334,7 @@ fn a_failed_swap_records_nothing() {
     let base = store.fork_head(&fork("f1")).unwrap();
     let cs = change(&store, &base, &[("new", Entry::File, b"new\n")]);
     store.publish_draft(&fork("f1"), &writer(), &cs).unwrap();
+    // Unwritable to a non-root runner, as CI's are; root would ignore the mode.
     let forks = root.join("forks");
     std::fs::set_permissions(&forks, std::fs::Permissions::from_mode(0o550)).unwrap();
     let pass = volume.converge(&store).unwrap();
@@ -428,7 +430,7 @@ fn a_reader_never_sees_a_shown_tree_missing() {
         let fork_dir = root.join("forks/f1");
         let shown = fork_dir.join("d0");
         std::thread::spawn(move || {
-            let (mut looks, mut gaps, mut mixed) = (0u64, 0u64, 0u64);
+            let (mut looks, mut gaps, mut mixed, mut compared) = (0u64, 0u64, 0u64, 0u64);
             while !done.load(std::sync::atomic::Ordering::SeqCst) {
                 looks += 1;
                 if !shown.is_dir() {
@@ -451,6 +453,7 @@ fn a_reader_never_sees_a_shown_tree_missing() {
                     };
                     if let (Some(a), Some(b)) = (read("d0/f0"), read("d3/f1499")) {
                         let draft = |s: &str| s.split(' ').next().map(str::to_string);
+                        compared += 1;
                         if draft(&a) != draft(&b) {
                             mixed += 1;
                         }
@@ -459,7 +462,7 @@ fn a_reader_never_sees_a_shown_tree_missing() {
                 // Not a busy spin: the suite's other tests run beside this one.
                 std::thread::yield_now();
             }
-            (looks, gaps, mixed)
+            (looks, gaps, mixed, compared)
         })
     };
     for n in 1..=8 {
@@ -470,7 +473,8 @@ fn a_reader_never_sees_a_shown_tree_missing() {
         assert_eq!(pass.built, vec![(Shown::Fork(fork("f1")), cs.target)]);
     }
     done.store(true, std::sync::atomic::Ordering::SeqCst);
-    let (looks, gaps, mixed) = reader.join().unwrap();
+    let (looks, gaps, mixed, compared) = reader.join().unwrap();
+    assert!(compared > 1000, "the reader compared only {compared} pairs");
     assert!(looks > 1000, "the reader looked only {looks} times");
     assert_eq!(gaps, 0, "{gaps} of {looks} looks found forks/f1 missing");
     assert_eq!(
@@ -621,8 +625,9 @@ fn spawn_child(dir: &Path) -> Child {
 }
 
 /// Wait until the child has a tree staged (it is inside a materialisation), then a
-/// random part of half the last pass's length, so the kill lands somewhere between the
-/// checkout and the removal of the replaced tree. Panics, with the child's stderr, if the
+/// random part of half the last pass's length: the kill lands while the tree is being
+/// checked out (in practice before the swap; the swap's atomicity and the record's
+/// order are proven by the deterministic tests above, not here). Panics, with the child's stderr, if the
 /// child exits on its own.
 fn aim(dir: &Path, child: &mut Child, seed: u64) {
     let staging = dir.join("volume/.cuenca/staging");

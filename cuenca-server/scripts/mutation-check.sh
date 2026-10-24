@@ -208,7 +208,7 @@ mutate src/materialise.rs '            if self.shown.get(&what) == Some(&tree)
 ' '            if false && self.shown.get(&what) == Some(&tree)
 ' --test materialise a_reopened_volume
 mutate src/materialise.rs '.is_ok_and(|m| m.is_dir())' '.is_ok() && self.root.join(what.rel()).is_dir()' --test materialise a_reopened_volume
-mutate src/materialise.rs '        write_record(&self.state.join(what.rel()), tree)?;' '' --test materialise a_reopened_volume
+mutate src/materialise.rs '        write_record(&record, tree)?;' '' --test materialise a_reopened_volume
 mutate src/materialise.rs '                && at.elapsed() < self.retry_after' '                && false' --test materialise a_tree_that_fails
 mutate src/materialise.rs '        if let Err(e) = remove_any(&staged)' '        if let Err(e) = Ok::<(), io::Error>(())' --test materialise a_draft_is_shown
 mutate src/materialise.rs '        fs::set_permissions(root, fs::Permissions::from_mode(DIR_MODE))?;' '' --test materialise a_draft_is_shown
