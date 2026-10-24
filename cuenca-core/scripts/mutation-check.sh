@@ -299,6 +299,16 @@ mutate src/gates/policy.rs '        if strata != ["A", "B", "C"] {' '        if 
 mutate src/gates/policy.rs ')? && !checks.iter().any(|c| c == "stability-check")' ')? && false' --lib
 mutate src/gates/policy.rs '.is_some_and(|n| n.iter().any(String::is_empty))' '.is_some_and(|_| false)' --lib
 mutate src/gates/policy.rs '                _ => return Err(format!("{at}: unknown key {key:?}")),' '                _ => {}' --lib
+# P20 r10 (A, B and C): whole YAML features PyYAML reads otherwise are refused.
+mutate src/gates/policy.rs '            TokenType::VersionDirective(..) | TokenType::TagDirective(..) => {' '            TokenType::VersionDirective(..) | TokenType::TagDirective(..) if false => {' --lib
+mutate src/gates/policy.rs '            TokenType::Anchor(_) => return refuse("a YAML anchor", line),' '' --lib
+mutate src/gates/policy.rs '            TokenType::Value if flow > 0 && line != last_line => {' '            TokenType::Value if false => {' --lib
+mutate src/gates/policy.rs 'if flow > 0 && !flow_plain_ok(&value) =>' 'if false =>' --lib
+mutate src/gates/policy.rs '        .is_some_and(|c| c.is_ascii_alphanumeric() || "_./+".contains(c))' '        .is_some_and(|c| c.is_ascii_alphanumeric() || "_./+-|>:".contains(c))' --lib
+mutate src/gates/policy.rs '        && chars.all(|c| c.is_ascii_alphanumeric() || "_./*@+- ".contains(c))' '        && chars.all(|c| c.is_ascii_alphanumeric() || "_./*@+- ?#:".contains(c))' --lib
+mutate src/gates/policy.rs '                if key
+                    && matches!(' '                if false
+                    && matches!(' --lib
 mutate src/store.rs '        let bytes = if matches!(entry, Entry::Symlink(_)) {' '        let bytes = if false {' --lib
 
 # Gate engine floors (P20 r1, C): p9's governance tier and the size limit cannot be loosened; an unreadable check manifest fails.

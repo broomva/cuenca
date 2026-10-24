@@ -50,6 +50,7 @@ import random
 import subprocess
 import sys
 import tempfile
+import time
 from pathlib import Path
 
 # The p9 the comparison is pinned to (broomva/skills): CI downloads this commit's file
@@ -67,8 +68,15 @@ def fetch_p9(dest: Path) -> Path:
 
     url = (f"https://raw.githubusercontent.com/broomva/skills/{P9_COMMIT}"
            "/skills/orchestration/p9/scripts/p9.py")
-    with urllib.request.urlopen(url, timeout=60) as r:
-        body = r.read()
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(url, timeout=60) as r:
+                body = r.read()
+            break
+        except OSError:
+            if attempt == 2:
+                raise
+            time.sleep(5 * (attempt + 1))
     if hashlib.sha256(body).hexdigest() != P9_SHA256:
         raise SystemExit(f"{url} does not hash to the pinned {P9_SHA256}")
     dest.write_bytes(body)
@@ -253,6 +261,8 @@ cuenca:
     max_file_bytes: 1048576
     secret_paths: ['\\.p12$', 'secrets/']
 """,
+    # A byte-order mark, which p9 reads past.
+    "\ufeffauto_merge:\n  rules:\n    - path_touched: CLAUDE.md\n      action: require_human\n",
     # Flow style throughout.
     """{auto_merge: {enabled: true, rules: [{path_touched: a/b, action: require_human}, {branch_pattern: x, action: notify}], gates: {governance: {l3_window_seconds: 86400}}}, gates: {hard: [{id: G4, pattern: 'x$'}]}}
 """,
@@ -331,6 +341,45 @@ FIXED = [
     "auto_merge:\n  rules:\n    - path_touched: a\n      action: require_human\n\ufeffcuenca: {}\n",
     "auto_merge:\n  rules:\n    - path_touched: \"\\x41\"\n      action: require_human\n",
     "auto_merge:\n  rules:\n    - path_touched: \"\\N\"\n      action: require_human\n",
+    # Round 9, B: U+2028/U+2029 as the only line breaks of a rule.
+    *(f"note: x{sep}auto_merge:{sep}  rules:{sep}  - path_touched:{sep}      CLAUDE.md{sep}    action:{sep}"
+      f"      require_human\n" for sep in ("\u2028", "\u2029")),
+    "auto_merge:\n  rules: []\n# \ufffe\n",
+    "version: a\uffffb\n",
+    # Empty or missing names p9 refuses.
+    "auto_merge:\n  gates:\n    governance:\n      required_checks: [ci]\n",
+    "auto_merge:\n  gates:\n    review_bots: ['']\n",
+    "auto_merge:\n  gates:\n    aggregate_checks: ['']\n",
+    "auto_merge:\n  gates:\n    p20: {public_api_paths: ['']}\n",
+    # Round 10, A, B and C: flow-context plain scalars PyYAML ends or refuses.
+    "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, docs/ADR-00?.md]\n",
+    "cuenca:\n  gates:\n    secret_paths: ['x', \\.pem?$]\n",
+    "gates:\n  hard: [{id: G4, pattern: k?y$}]\n",
+    "auto_merge:\n  rules: [{path_touched: a-b?c, action: require_human}]\n",
+    "auto_merge:\n  rules: [{path_touched: |\n CLAUDE.md, action: require_human}]\n",
+    "auto_merge:\n  rules: [{path_touched: >x, action: require_human}]\n",
+    "auto_merge:\n  rules: [{path_touched: :x, action: require_human}]\n",
+    "auto_merge:\n  rules: [{path_touched\n : CLAUDE.md, action: require_human}]\n",
+    "permissions: {k\n: v}\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "auto_merge:\n  rules: [{path_touched: x, action: require_human}, {path_touched\n: y, action: notify}]\n",
+    "auto_merge:\n  rules: [{path_touched: CLAUDE\n   .md, action: require_human}]\n",
+    "auto_merge:\n  rules: [{path_touched: a b, action: require_human}]\n",
+    "auto_merge:\n  rules: [{path_touched: -x, action: require_human}]\n",
+    "auto_merge:\n  rules:\n    - path_touched: a?b\n      action: require_human\n",
+    # Round 10, A: a non-scalar key, %YAML other than 1.x, a repeated %TAG, odd anchor names.
+    "permissions: {[a]: b}\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "permissions:\n  ? {a: b}\n  : c\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "%YAML 2.0\n---\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "%YAML 0.9\n---\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "%TAG !e! tag:a,2000:\n%TAG !e! tag:b,2000:\n---\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "auto_merge: &a.b {rules: [{path_touched: x, action: require_human}]}\n",
+    "auto_merge: &a:b {rules: [{path_touched: x, action: require_human}]}\n",
+    "auto_merge: &a/b {rules: [{path_touched: x, action: require_human}]}\n",
+    "auto_merge: &a%b {rules: [{path_touched: x, action: require_human}]}\n",
+    "auto_merge: &a {rules: [{path_touched: x, action: require_human}]}\n",
+    # Round 10, A: the shape two mutants together let through as engine [] vs p9 ['x'].
+    "# c auto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "note: x\u2028# c auto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
 ]
 
 ODD_SCALARS = [
@@ -355,7 +404,7 @@ ODD_TAGS = ["!!str ", "!!merge ", "!!null ", "!!map ", "!!seq ", "!!set ", "!!om
 def mutate(text: str, rng: random.Random) -> str:
     lines = text.split("\n")
     kv = [i for i, l in enumerate(lines) if ":" in l and not l.lstrip().startswith("#")]
-    op = rng.randrange(14)
+    op = min(rng.randrange(17), 14)  # the flow op (14) three times as often: r10 found its class
     if op == 0 and kv:  # an odd scalar as a value
         i = rng.choice(kv)
         key, _, _ = lines[i].partition(":")
@@ -431,7 +480,19 @@ def mutate(text: str, rng: random.Random) -> str:
     elif op == 13:  # a comment
         i = rng.randrange(len(lines))
         lines[i] = lines[i] + rng.choice([" # x", "#x", " #", " # : y"])
+    elif op == 14 and kv:  # a flow collection, with an odd plain scalar or a split key
+        i = rng.choice(kv)
+        key, _, value = lines[i].partition(":")
+        word = value.strip() or "x"
+        odd = rng.choice(FLOW_ODD).replace("W", word)
+        lines[i] = f"{key}: " + rng.choice([f"[{odd}]", f"[a, {odd}]", f"{{k: {odd}}}", f"[{{k: {odd}}}]"])
     return "\n".join(lines)
+
+
+# How a plain scalar in a flow collection can read differently: W is the original value.
+FLOW_ODD = ["W?", "?W", "W?x", "|W", ">W", ":W", "W:x", "-W", "W x", "W\n  x", "W\n  : y",
+            "W #c", "W#c", "!W", "%W", "@W", "`W`", "&a W", "*W", "W,", "W]", "W}", "'W'",
+            '"W"', "W\u2028x", "? W"]
 
 
 def generate(cases: int, seed: int, extra: list[str]) -> list[str]:
@@ -478,11 +539,16 @@ def main() -> int:
             files.append(f)
         engine = engine_projections(args.engine, files)
 
+    # A floor, so an engine that refuses everything cannot pass: every seed policy and
+    # every --policy file must be read alike by both, not merely refused by the engine.
+    floor = {text for text in SEEDS + extra}
     disagreements = 0
     counts = {"both accept": 0, "engine refuses, p9 accepts": 0, "both refuse": 0}
     for n, (text, e) in enumerate(zip(inputs, engine)):
         p = p9_projection(p9, text)
         why = compare(e, p)
+        if why is None and text in floor and not (e["ok"] and p["ok"]):
+            why = f"a seed policy is refused (engine: {e.get('error')}; p9: {p.get('error')})"
         if why is not None:
             disagreements += 1
             if disagreements <= args.show:

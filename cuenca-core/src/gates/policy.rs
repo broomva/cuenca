@@ -53,6 +53,9 @@
 //! pass what p9 holds. So the engine refuses what they read differently: a tag, a merge
 //! key `<<`, a plain scalar the two type or value differently (`on`, `1_000`, `12:30`,
 //! `Null`: quote it), a tab, and the characters PyYAML breaks lines at or refuses. It
+//! also refuses whole YAML features the policy has no use for: `%` directives, anchors,
+//! keys that are not scalars, keys split from their `:` in `[..]`/`{..}`, and there
+//! any unquoted value outside a narrow alphabet (r10). It
 //! also refuses every `auto_merge` value p9 refuses, so the gates never run on a policy
 //! under which p9 merges nothing. `scripts/policy-differential.py` checks this in CI: it
 //! feeds generated policies to both and fails on any disagreement about the protected
@@ -67,7 +70,7 @@ use regex::Regex;
 use regex::bytes::Regex as BytesRegex;
 use yaml_rust2::Yaml;
 use yaml_rust2::parser::{Event, Parser};
-use yaml_rust2::scanner::TScalarStyle;
+use yaml_rust2::scanner::{TScalarStyle, Token};
 
 /// Where the base's policy is read from.
 pub const POLICY_PATH: &str = ".control/policy.yaml";
@@ -617,9 +620,39 @@ fn governance(gates: Option<&Yaml>) -> Res<Option<Governance>> {
 fn prescan(text: &str) -> Res<()> {
     let mut parser = Parser::new_from_str(text);
     let mut depth = 0usize;
+    // One entry per open collection: whether it is a mapping whose next node is a key.
+    let mut frames: Vec<Option<bool>> = Vec::new();
     loop {
-        match parser.next_token() {
-            Ok((Event::StreamEnd, _)) => return Ok(()),
+        let next = parser.next_token();
+        if let Ok((
+            Event::Scalar(..)
+            | Event::Alias(_)
+            | Event::SequenceStart(..)
+            | Event::MappingStart(..),
+            mark,
+        )) = &next
+        {
+            // PyYAML cannot hash a mapping or sequence used as a key, even in a section
+            // nothing reads; yaml-rust2 can (r10, A). Only scalar keys are read.
+            if let Some(Some(at_key)) = frames.last_mut() {
+                let key = *at_key;
+                *at_key = !key;
+                if key
+                    && matches!(
+                        next,
+                        Ok((Event::SequenceStart(..) | Event::MappingStart(..), _))
+                    )
+                {
+                    return Err(format!(
+                        "{POLICY_PATH} has a mapping key that is not a scalar (line {}), which the \
+                         gate engine refuses",
+                        mark.line()
+                    ));
+                }
+            }
+        }
+        match next {
+            Ok((Event::StreamEnd, _)) => return token_scan(text),
             // yaml-rust2 turns a key whose tag does not convert (`!!null x:`) into its
             // own "no key yet" marker, and the mapping shifts by one pair and drops its
             // last key before any schema sees it (r7, B and C). p9's loader reads the
@@ -635,15 +668,6 @@ fn prescan(text: &str) -> Res<()> {
                     mark.line()
                 ));
             }
-            // PyYAML, which p9 loads the file with, merges a mapping under a plain `<<`
-            // key into its parent; yaml-rust2 keeps `<<` as an ordinary key, so the
-            // gates would compile defaults where p9 sees rules (r8, B). Refused.
-            Ok((Event::Scalar(value, TScalarStyle::Plain, _, None), mark)) if value == "<<" => {
-                return Err(format!(
-                    "{POLICY_PATH} uses a YAML merge key `<<` (line {}), which the gate engine refuses",
-                    mark.line()
-                ));
-            }
             // PyYAML resolves plain scalars by YAML 1.1 (`on` is true, `1_000` is 1000,
             // `12:30` is 750, `Null` is null), yaml-rust2 by YAML 1.2's core schema, so
             // a plain scalar the two type or value differently is refused (A15).
@@ -656,7 +680,8 @@ fn prescan(text: &str) -> Res<()> {
                     mark.line()
                 ));
             }
-            Ok((Event::SequenceStart(..) | Event::MappingStart(..), mark)) => {
+            Ok((event @ (Event::SequenceStart(..) | Event::MappingStart(..)), mark)) => {
+                frames.push(matches!(event, Event::MappingStart(..)).then_some(true));
                 depth += 1;
                 if depth > MAX_POLICY_DEPTH {
                     return Err(format!(
@@ -665,7 +690,10 @@ fn prescan(text: &str) -> Res<()> {
                     ));
                 }
             }
-            Ok((Event::SequenceEnd | Event::MappingEnd, _)) => depth = depth.saturating_sub(1),
+            Ok((Event::SequenceEnd | Event::MappingEnd, _)) => {
+                frames.pop();
+                depth = depth.saturating_sub(1);
+            }
             Ok((Event::Alias(_), mark)) => {
                 return Err(format!(
                     "{POLICY_PATH} uses a YAML alias (line {}), which the gate engine refuses",
@@ -676,6 +704,58 @@ fn prescan(text: &str) -> Res<()> {
             Err(e) => return Err(format!("{POLICY_PATH} is not valid YAML: {e}")),
         }
     }
+}
+
+/// The YAML features the policy has no use for and PyYAML (p9) reads differently from
+/// yaml-rust2, refused whole rather than character by character (r10, A, B and C): any
+/// `%` directive (yaml-rust2 accepts `%YAML 2.0` and a repeated `%TAG`), any anchor
+/// (aliases are refused, so an anchor does nothing, and PyYAML's anchor names are
+/// narrower), and in a flow collection (`[..]`, `{..}`) any plain scalar outside a
+/// narrow alphabet (so no `?`, `:`, `#`, `|` or `>`), where
+/// PyYAML ends or refuses scalars that yaml-rust2 reads on, and any key whose `:` is on
+/// a later line. Each error says to quote the value. Runs on text the parser accepted.
+fn token_scan(text: &str) -> Res<()> {
+    use yaml_rust2::scanner::{Scanner, TokenType};
+    let refuse = |what: &str, line: usize| {
+        Err(format!(
+            "{POLICY_PATH} uses {what} (line {line}), which the gate engine refuses; quote the value"
+        ))
+    };
+    let mut flow = 0usize;
+    let mut last_line = 0usize;
+    for Token(mark, token) in Scanner::new(text.chars()) {
+        let line = mark.line();
+        match token {
+            TokenType::VersionDirective(..) | TokenType::TagDirective(..) => {
+                return refuse("a `%` directive", line);
+            }
+            TokenType::Anchor(_) => return refuse("a YAML anchor", line),
+            TokenType::FlowSequenceStart | TokenType::FlowMappingStart => flow += 1,
+            TokenType::FlowSequenceEnd | TokenType::FlowMappingEnd => flow = flow.saturating_sub(1),
+            TokenType::Value if flow > 0 && line != last_line => {
+                return refuse("a key split across lines in a flow collection", line);
+            }
+            TokenType::Scalar(TScalarStyle::Plain, value) if flow > 0 && !flow_plain_ok(&value) => {
+                return refuse(
+                    "an unquoted value in a flow collection outside [A-Za-z0-9_./*@+ -]",
+                    line,
+                );
+            }
+            _ => {}
+        }
+        last_line = line;
+    }
+    Ok(())
+}
+
+/// A plain scalar both readers take alike inside `[..]` or `{..}`: words from a narrow
+/// alphabet, not starting with an indicator (`-`, `*`, `@`).
+fn flow_plain_ok(v: &str) -> bool {
+    let mut chars = v.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphanumeric() || "_./+".contains(c))
+        && chars.all(|c| c.is_ascii_alphanumeric() || "_./*@+- ".contains(c))
 }
 
 /// Whether PyYAML (YAML 1.1, `yaml/resolver.py`) and yaml-rust2 (YAML 1.2 core,
@@ -1116,6 +1196,18 @@ cuenca:
             // A merge key: PyYAML merges it, yaml-rust2 would keep `<<` as a key (r8, B).
             b"<<:\n  auto_merge:\n    rules:\n      - {path_touched: CLAUDE.md, action: require_human}\n",
             b"gates:\n  <<: {hard: [{id: G4, pattern: 'x'}]}\n",
+            // Whole YAML features PyYAML reads otherwise (r10, A, B and C).
+            b"%YAML 2.0\n---\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+            b"%TAG !e! tag:a,2000:\n---\nauto_merge: {}\n",
+            b"auto_merge: &a.b {rules: [{path_touched: x, action: require_human}]}\n",
+            b"permissions: {[a]: b}\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+            b"permissions:\n  ? [a]\n  : b\n",
+            b"permissions: {k\n: v}\n",
+            b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, docs/ADR-00?.md]\n",
+            b"auto_merge:\n  rules: [{path_touched: |\n CLAUDE.md, action: require_human}]\n",
+            b"auto_merge:\n  rules: [{path_touched: :x, action: require_human}]\n",
+            b"auto_merge:\n  rules: [{path_touched\n : CLAUDE.md, action: require_human}]\n",
+            b"auto_merge:\n  rules: [{path_touched: a #b, action: require_human}]\n",
             // p9's floors: no looser governance tier, no larger file limit, no
             // switching the Deletion Gate off.
             b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md]\n",

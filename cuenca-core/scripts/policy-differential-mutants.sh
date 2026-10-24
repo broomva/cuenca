@@ -25,8 +25,9 @@ fi
 echo "baseline  $(tail -1 "$backup/log")"
 
 survived=0
+args=("$@") # mutate's own arguments shadow these, so the --p9 passthrough reads a copy
 mutate() { # old, new: in src/gates/policy.rs
-  local file=src/gates/policy.rs old=$1 new=$2; shift 2
+  local file=src/gates/policy.rs old=$1 new=$2
   current=$file; cp "$file" "$backup/file"
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib
@@ -35,11 +36,11 @@ if s.count(sys.argv[2]) != 1: sys.exit("anchor not unique: " + sys.argv[2])
 p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $old"; survived=1; restore; return; fi
-  differential "$@"
+  differential ${args[@]+"${args[@]}"}
   case $? in
-    1) echo "killed    $old ($(grep -m1 -o 'DISAGREE.*' "$backup/log" | cut -c1-100))" ;;
+    1) echo "killed    $old -> $new ($(grep -m1 -o 'DISAGREE.*' "$backup/log" | cut -c1-100))" ;;
     3) echo "NO BUILD  $old (a mutant that does not build proves nothing)"; survived=1 ;;
-    0) echo "SURVIVED  $old"; survived=1 ;;
+    0) echo "SURVIVED  $old -> $new"; survived=1 ;;
     *) echo "ERROR     $old"; cat "$backup/log"; survived=1 ;;
   esac
   restore
@@ -54,7 +55,16 @@ mutate "        let text = text.strip_prefix('\\u{feff}').unwrap_or(text);" ''
 # reading p9 differs on: both expand aliases alike. mutation-check.sh covers it.
 mutate '                Event::Scalar(_, _, _, Some(_))
                 | Event::SequenceStart(_, Some(_))' '                Event::SequenceStart(_, Some(_))'
-mutate '            Ok((Event::Scalar(value, TScalarStyle::Plain, _, None), mark)) if value == "<<" => {' '            Ok((Event::Scalar(value, TScalarStyle::Plain, _, None), mark)) if false && value == "<<" => {'
+# The refusals of whole YAML features (r10, A, B and C).
+mutate '            TokenType::VersionDirective(..) | TokenType::TagDirective(..) => {' '            TokenType::VersionDirective(..) | TokenType::TagDirective(..) if false => {'
+mutate '            TokenType::Anchor(_) => return refuse("a YAML anchor", line),' ''
+mutate '            TokenType::Value if flow > 0 && line != last_line => {' '            TokenType::Value if false => {'
+mutate 'if flow > 0 && !flow_plain_ok(&value) =>' 'if false =>'
+mutate '        .is_some_and(|c| c.is_ascii_alphanumeric() || "_./+".contains(c))' '        .is_some_and(|c| c.is_ascii_alphanumeric() || "_./+-|>:".contains(c))'
+mutate '        && chars.all(|c| c.is_ascii_alphanumeric() || "_./*@+- ".contains(c))' '        && chars.all(|c| c.is_ascii_alphanumeric() || "_./*@+- ?#:".contains(c))'
+mutate '                if key
+                    && matches!(' '                if false
+                    && matches!('
 mutate '                if !plain_scalar_agrees(&value) =>' '                if false =>'
 mutate '    if same.is_match(v) {' '    if true {'
 mutate '                && v.as_bool().is_none()' '                && false'

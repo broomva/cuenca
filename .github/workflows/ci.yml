@@ -77,6 +77,10 @@ jobs:
       - run: cargo build -p cuenca-core --example policy_projection --locked
       # Without --p9 the script downloads p9 at its pinned commit and checks the hash.
       - run: /usr/bin/python3 cuenca-core/scripts/policy-differential.py --engine target/debug/examples/policy_projection --cases 20000
+      # A second pass on a seed that changes every run, so the inputs are not only ever the same 20,000.
+      - run: /usr/bin/python3 cuenca-core/scripts/policy-differential.py --engine target/debug/examples/policy_projection --cases 20000 --seed "$GITHUB_RUN_ID"
+      # Every refusal the differential guards is mutation-proven: each mutant must be caught.
+      - run: PATH=/usr/bin:$PATH cuenca-core/scripts/policy-differential-mutants.sh
 
   msrv:
     name: MSRV Check
