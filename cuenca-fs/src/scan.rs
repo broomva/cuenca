@@ -778,6 +778,24 @@ mod tests {
         assert_eq!(*budget.left.lock().unwrap(), 10);
     }
 
+    /// A file that changed between its listing and its read is read again, and what
+    /// the first read took from the budget is given back first.
+    #[test]
+    fn a_file_read_again_takes_from_the_budget_once() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(dir.path().join("f"), b"abc").unwrap();
+        let item = to_read(dir.path(), "f");
+        // Listed with 3 bytes; holds 5 by the time it is read.
+        fs::write(dir.path().join("f"), b"abcde").unwrap();
+        let budget = Budget::of(Keep {
+            per_file: 10,
+            total: 10,
+        });
+        let found = read_file(item, &budget).unwrap().unwrap();
+        assert_eq!(found.content, Content::Inline(b"abcde".to_vec()));
+        assert_eq!(*budget.left.lock().unwrap(), 5);
+    }
+
     fn to_read(dir: &Path, name: &str) -> ToRead {
         ToRead {
             dir: Arc::new(open_dir(dir).unwrap()),

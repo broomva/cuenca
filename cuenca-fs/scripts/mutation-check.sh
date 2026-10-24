@@ -76,6 +76,7 @@ mutate src/scan.rs '        if size > self.per_file {' '        if false {' --li
 mutate src/scan.rs '        match left.checked_sub(size) {' '        match Some(*left) {' --lib within_the_budget
 mutate src/scan.rs '                budget.give_back(held);
                 return Ok(None);' '                return Ok(None);' --lib removed_after_the_listing
+mutate src/scan.rs '            Ok(None) => budget.give_back(held),' '            Ok(None) => {}' --lib read_again_takes_from_the_budget_once
 # never leaving the root
 mutate src/scan.rs 'let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;' 'let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC;' --lib renamed_out_of_the_root
 mutate src/scan.rs '        Err(Errno::LOOP | Errno::NOTDIR) => return Err(FsError::Unstable(p.abs.clone())),

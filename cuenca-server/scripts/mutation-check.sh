@@ -280,6 +280,8 @@ mutate src/materialise.rs '    cuenca_fs::snapshot_with(dir, head, cache, &optio
 # A small file is uploaded as the scan read it, so a client still writing cannot fail
 # the snapshot (BRO-3456).
 mutate src/materialise.rs '        keep: KEEP,' '        keep: cuenca_fs::Keep::default(),' --lib a_small_file_changed_after_the_scan
+# A scan that publishes nothing puts the stat cache back (P20 r8 A).
+mutate src/materialise.rs 'publish(store, fork, scanned.snap).inspect_err(|_| *cache = scanned.before)' 'publish(store, fork, scanned.snap)' --lib a_failed_snapshot_leaves_the_cache
 mutate src/admin.rs '    if principal.as_str() == cuenca_core::VOLUME_PRINCIPAL {' '    if false {' --test owner_forks keeps_the_volume_keyless
 mutate src/http.rs '            CoreError::OwnerFork(_) => (S::FORBIDDEN, "owner_fork"),' '' --test owner_forks no_key_creates
 mutate src/admin.rs '            let main = ignored_in_main(a, &location)?;' '            let main = a.store.main_tree(&location).map_err(|e| s(&e))?.git_tree_id();' --lib an_owner_fork_of_a_main_tracking
@@ -314,6 +316,7 @@ mutate src/admin.rs 'cuenca_fs::ForkIgnore::for_tree(&main, |oid|' 'cuenca_fs::F
 mutate src/authority.rs 'std::time::Duration::from_secs(5);' 'std::time::Duration::from_secs(0);' --test owner_forks tried_again
 mutate src/authority.rs '                    error: without_host_paths(&error, locked.root(), from),' '                    error,' --test owner_forks cannot_be_snapshotted
 mutate src/authority.rs '        .replace(&dir, fork.as_str())' '' --lib a_snapshot_error_names_no_host_path
+mutate src/authority.rs '.replace(&format!("{root}/"), "<volume>/")' '.replace(&root, "<volume>")' --lib a_snapshot_error_names_no_host_path
 mutate src/http.rs '                visible_location(a, &c, &source.location)?;' '' --test owner_forks needs_reading
 
 # Only what the scan read is uploaded: a folder swapped for a link since never brings an

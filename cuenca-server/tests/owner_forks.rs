@@ -842,13 +842,17 @@ fn a_fork_retrying_its_snapshot_leaves_the_volume_to_others() {
         (status, started.elapsed())
     });
     std::thread::sleep(Duration::from_millis(300));
+    // Three forks one after another, so a lock held across the pauses would have to lose
+    // the race to each of them for this to pass.
     let other = Instant::now();
-    let r = fork_from(&s, &mac, "mac-2", "owner-ipad");
+    for name in ["mac-2", "mac-3", "mac-4"] {
+        let r = fork_from(&s, &mac, name, "owner-ipad");
+        assert_eq!(r.status(), 200, "{}", r.text().unwrap_or_default());
+    }
     let took = other.elapsed();
-    assert_eq!(r.status(), 200, "{}", r.text().unwrap_or_default());
     assert!(
-        took < Duration::from_secs(2),
-        "the second fork waited {took:?} for the first fork's attempts"
+        took < Duration::from_secs(3),
+        "three forks waited {took:?} for the first fork's attempts"
     );
     let (status, first) = stuck.join().unwrap();
     assert_eq!(status, 409);

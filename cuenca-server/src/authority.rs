@@ -421,7 +421,7 @@ fn without_host_paths(error: &str, root: &Path, fork: &ForkName) -> String {
     error
         .replace(&format!("{dir}/"), "")
         .replace(&dir, fork.as_str())
-        .replace(&root, "<volume>")
+        .replace(&format!("{root}/"), "<volume>/")
 }
 
 /// An IPv4 address that arrived as IPv4-mapped IPv6 is the IPv4 address.
@@ -484,6 +484,20 @@ mod tests {
             said("/srv/cuenca/volume/forks: gone"),
             "<volume>/forks: gone"
         );
+        // A short or relative root replaces only whole path prefixes.
+        let fork_path = |root: &str, e: &str| without_host_paths(e, Path::new(root), &fork);
+        assert_eq!(
+            fork_path(
+                ".",
+                "./forks/owner-mac/a.md: changed while it was snapshotted"
+            ),
+            "a.md: changed while it was snapshotted"
+        );
+        assert_eq!(
+            fork_path("vol", "vol/forks/owner-mac/volume.md: Permission denied"),
+            "volume.md: Permission denied"
+        );
+        assert_eq!(fork_path("vol", "vol/forks: gone"), "<volume>/forks: gone");
     }
 
     struct Nobody;
