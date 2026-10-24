@@ -49,6 +49,7 @@ guard_cleanup() {
 # emptied first, so the budget applies to this command alone. Status 124 is a timeout
 # and 125 an exceeded budget; either one is reported on stderr.
 bounded() {
+  [ -s "$guard_backup/pgid" ] && kill -KILL -- "-$(cat "$guard_backup/pgid")" 2>/dev/null
   find "$guard_dir" -mindepth 1 -maxdepth 1 ! -name .backup -exec rm -rf {} +
   python3 "$guard_repo/scripts/bounded.py" --dir "$guard_dir" --pgid-file "$guard_backup/pgid" \
     --budget-mb "${CUENCA_MUT_BUDGET_MB:-4096}" --timeout "${CUENCA_MUT_TIMEOUT:-1800}" -- "$@"

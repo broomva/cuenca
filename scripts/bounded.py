@@ -55,31 +55,51 @@ def main():
         ap.error("no command")
     os.makedirs(a.dir, exist_ok=True)
     running = []
+    stops = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
     def stop(signum, _frame):
+        # No wait here: the main thread may hold Popen's wait lock. The group is killed,
+        # the record removed, and init reaps what is left.
         for child in running:
-            kill_group(child)
-        sys.exit(128 + signum)
+            signal_group(child.pid)
+        if a.pgid_file:
+            unlink(a.pgid_file)
+        os._exit(128 + signum)
 
-    for signum in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+    for signum in stops:
         signal.signal(signum, stop)
+    # Held off until the child is started and recorded, so a signal can't miss it.
+    signal.pthread_sigmask(signal.SIG_BLOCK, stops)
     child = subprocess.Popen(command, env={**os.environ, "TMPDIR": a.dir}, start_new_session=True)
     running.append(child)
     if a.pgid_file:
         with open(a.pgid_file, "w") as f:
             f.write(f"{child.pid}\n")
+    signal.pthread_sigmask(signal.SIG_UNBLOCK, stops)
     try:
         return watch(a, child, command)
     finally:
         if a.pgid_file:
-            os.unlink(a.pgid_file)
+            unlink(a.pgid_file)
+
+
+def signal_group(pgid):
+    # macOS answers EPERM, not ESRCH, for a group of exited but unreaped processes.
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def unlink(path):
+    try:
+        os.unlink(path)
+    except FileNotFoundError:
+        pass
 
 
 def kill_group(child):
-    try:
-        os.killpg(child.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
+    signal_group(child.pid)
     child.wait()
 
 

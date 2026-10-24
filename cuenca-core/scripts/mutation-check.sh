@@ -31,7 +31,10 @@ p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $file: $old"; survived=1; restore; return; fi
   bounded cargo test -q -p cuenca-core "$@" >"$backup/log" 2>&1; local status=$?
-  if [ "$status" -eq 0 ]; then
+  if [ "$status" -ge 128 ]; then
+    # The guard or the test run was itself killed by a signal: no verdict is possible.
+    echo "ABORTED   $file: $old (status $status)"; exit 3
+  elif [ "$status" -eq 0 ]; then
     echo "SURVIVED  $file: $old"; survived=1
   elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' "$backup/log"; then
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; survived=1
