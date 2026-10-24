@@ -91,6 +91,10 @@ def watch(a, child, command):
         try:
             status = child.wait(timeout=a.poll)
             kill_group(child)  # whatever the command left running in its group
+            used = allocated(a.dir)  # an exit between two polls is still measured
+            if used > budget:
+                print(f"bounded: {command[0]} exited after writing {used // (1024 * 1024)} MiB under {a.dir}, budget {a.budget_mb} MiB", file=sys.stderr)
+                return BUDGET
             return status if status >= 0 else 128 - status
         except subprocess.TimeoutExpired:
             pass

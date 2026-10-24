@@ -11,7 +11,9 @@
 #   CUENCA_MUT_TIMEOUT     seconds one cargo test may run, build included (default 1800)
 #
 # A run dir is named run-<pid>. One whose process is gone (killed with SIGKILL, so its
-# EXIT trap never ran) is removed when the next run starts.
+# EXIT trap never ran) is removed when the next run starts. If it died with a mutant in
+# place, .backup/path names the mutated file and .backup/file holds its original; that
+# backup is moved to rescued-<pid> and named on stderr, never deleted.
 guard_repo=$(git rev-parse --show-toplevel)
 guard_root=${CUENCA_MUT_TMPDIR:-/tmp/cuenca-mut}
 case $guard_root in
@@ -21,7 +23,12 @@ esac
 mkdir -p "$guard_root"
 for stale in "$guard_root"/run-*; do
   [ -d "$stale" ] || continue
-  kill -0 "${stale##*/run-}" 2>/dev/null || rm -rf "$stale"
+  kill -0 "${stale##*/run-}" 2>/dev/null && continue
+  if [ -s "$stale/.backup/path" ]; then
+    mv "$stale/.backup" "$guard_root/rescued-${stale##*/run-}"
+    echo "mutation-guard: a killed run left a mutant in $(cat "$guard_root/rescued-${stale##*/run-}/path"); its original is $guard_root/rescued-${stale##*/run-}/file" >&2
+  fi
+  rm -rf "$stale"
 done
 guard_dir=$guard_root/run-$$
 if [ "${#guard_dir}" -gt 64 ]; then

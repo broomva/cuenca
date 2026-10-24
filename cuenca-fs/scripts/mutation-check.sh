@@ -9,7 +9,7 @@ cd "$(dirname "$0")/.."
 backup=$guard_backup
 lock=$(git rev-parse --show-toplevel)/Cargo.lock
 cp "$lock" "$backup/Cargo.lock"
-restore() { [ -n "${current:-}" ] && cp "$backup/file" "$current"; current=; cp "$backup/Cargo.lock" "$lock"; }
+restore() { [ -n "${current:-}" ] && cp "$backup/file" "$current"; current=; rm -f "$backup/path"; cp "$backup/Cargo.lock" "$lock"; }
 trap 'restore; guard_cleanup' EXIT
 trap 'exit 130' INT TERM
 
@@ -22,7 +22,7 @@ echo "baseline  green"
 survived=0
 mutate() { # file, old, new, then the cargo test arguments that should catch it
   local file=$1 old=$2 new=$3; shift 3
-  current=$file; cp "$file" "$backup/file"
+  current=$file; cp "$file" "$backup/file"; echo "$PWD/$file" >"$backup/path"
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
