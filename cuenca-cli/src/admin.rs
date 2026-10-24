@@ -40,6 +40,10 @@ enum Act {
         #[arg(long)]
         changeset: Option<String>,
     },
+    /// Create an owner fork (named `owner-<device>`) of a location, held by the volume:
+    /// shown writable at `forks/<fork>/` for Finder, its edits snapshotted into drafts
+    /// within 60 s. One per device.
+    OwnerFork { location: String, fork: String },
     /// Move a fork to a new holder, by compare-and-swap on its epoch.
     TakeOver {
         fork: String,
@@ -159,6 +163,10 @@ pub fn run(a: Admin) -> anyhow::Result<Report> {
             changeset: changeset
                 .map(|c| named(c, |c| ChangesetId::from_hex(&c)))
                 .transpose()?,
+        },
+        Act::OwnerFork { location, fork } => AdminRequest::OwnerFork {
+            location: named(location, LocationName::new)?,
+            fork: named(fork, ForkName::new)?,
         },
         Act::TakeOver {
             fork,

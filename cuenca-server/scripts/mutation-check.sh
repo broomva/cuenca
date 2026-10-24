@@ -198,7 +198,7 @@ mutate src/materialise.rs '        cuenca_fs::checkout(&full, staged, &self.obje
         remove_any(&here)?;
         cuenca_fs::checkout(&full, &here, &self.objects)?;
         fs::rename(&here, staged)?;' --test materialise killed_while_materialising
-mutate src/materialise.rs '        set_modes(staged)?;' '' --test materialise a_draft_is_shown
+mutate src/materialise.rs '        set_modes(staged, what.modes())?;' '' --test materialise a_draft_is_shown
 mutate src/materialise.rs 'const FILE_MODE: u32 = 0o640;' 'const FILE_MODE: u32 = 0o644;' --test materialise a_draft_is_shown
 mutate src/materialise.rs 'const DIR_MODE: u32 = 0o2750;' 'const DIR_MODE: u32 = 0o2755;' --test materialise a_draft_is_shown
 mutate src/materialise.rs '.permissions().mode() & 0o100 != 0;' '.permissions().mode() & 0o100 == 0;' --test materialise a_draft_is_shown
@@ -207,7 +207,7 @@ mutate src/materialise.rs 'FlockOperation::NonBlockingLockExclusive' 'FlockOpera
 mutate src/materialise.rs '            if self.shown.get(&what) == Some(&tree)
 ' '            if false && self.shown.get(&what) == Some(&tree)
 ' --test materialise a_reopened_volume
-mutate src/materialise.rs '.is_ok_and(|m| m.is_dir())' '.is_ok() && self.root.join(what.rel()).is_dir()' --test materialise a_reopened_volume
+mutate src/materialise.rs '                && fs::symlink_metadata(self.root.join(what.rel())).is_ok_and(|m| m.is_dir())' '                && fs::symlink_metadata(self.root.join(what.rel())).is_ok()' --test materialise a_reopened_volume
 mutate src/materialise.rs '        write_record(&record, tree)?;' '' --test materialise a_reopened_volume
 mutate src/materialise.rs '                && at.elapsed() < self.retry_after' '                && false' --test materialise a_tree_that_fails
 mutate src/materialise.rs '        if let Err(e) = remove_any(&staged)' '        if let Err(e) = Ok::<(), io::Error>(())' --test materialise a_draft_is_shown
@@ -227,7 +227,7 @@ mutate src/materialise.rs '    match rustix::fs::renameat_with(CWD, staged, CWD,
         return fs::rename(&aside, staged);
     }
     match rustix::fs::renameat_with(CWD, staged, CWD, dest, RenameFlags::EXCHANGE) {' --test materialise a_reader_never_sees
-mutate src/materialise.rs '        swap_into_place(staged, &dest)?;' '        if dest.exists() {
+mutate src/materialise.rs '            swap_into_place(staged, &dest)?;' '        if dest.exists() {
             for e in fs::read_dir(staged)? {
                 let e = e?;
                 let to = dest.join(e.file_name());
@@ -244,16 +244,39 @@ mutate src/materialise.rs '        swap_into_place(staged, &dest)?;' '        if
 
 # The record follows the swap: written first, a failed swap leaves it naming a tree
 # that is not shown.
-mutate src/materialise.rs '        swap_into_place(staged, &dest)?;
-        File::open(dest.parent().expect("main/ or forks/"))?.sync_all()?;
-        write_record(&record, tree)?;' '        write_record(&record, tree)?;
-        swap_into_place(staged, &dest)?;
-        File::open(dest.parent().expect("main/ or forks/"))?.sync_all()?;' --test materialise a_failed_swap_records_nothing
+mutate src/materialise.rs '        forget_record(&record)?;
+        if what.is_owner() {' '        forget_record(&record)?;
+        write_record(&record, tree)?;
+        if what.is_owner() {' --test materialise a_failed_swap_records_nothing
 # What the path shows is forgotten before the swap, in memory and on disk: kept, a
 # failure after the swap leaves a record of a tree no longer shown.
 mutate src/materialise.rs '        self.shown.remove(what);
 ' '' --test materialise a_tree_whose_record_failed
 mutate src/materialise.rs '        forget_record(&record)?;
 ' '' --test materialise a_tree_whose_record_failed
+# A record that cannot be forgotten stops the swap (BRO-3447).
+mutate src/materialise.rs '        forget_record(&record)?;
+' '        let _ = forget_record(&record);
+' --test materialise a_record_that_cannot_be_forgotten
+
+# Owner forks (part 2): only owner-* is the volume's, and owner forks never move
+# (cuenca-core's own mutants cover the rules); shown once, writable, never exchanged or
+# rebuilt; adopted without a record; snapshotted into drafts under .forkignore; a
+# failure publishes nothing.
+mutate src/materialise.rs 'const OWNER_DIR_MODE: u32 = 0o2770;' 'const OWNER_DIR_MODE: u32 = 0o2750;' --test owner_forks shown_once
+mutate src/materialise.rs 'const OWNER_FILE_MODE: u32 = 0o660;' 'const OWNER_FILE_MODE: u32 = 0o640;' --test owner_forks shown_once
+mutate src/materialise.rs 'const OWNER_EXEC_MODE: u32 = 0o770;' 'const OWNER_EXEC_MODE: u32 = 0o660;' --test owner_forks shown_once
+mutate src/materialise.rs '            if what.is_owner() && self.owner_shown(&what, tree)? {' '            if false && self.owner_shown(&what, tree)? {' --test owner_forks shown_once
+mutate src/materialise.rs '        if what.is_owner() {
+            // Shown once' '        if false {
+            // Shown once' --test owner_forks adopted
+mutate src/materialise.rs '        if !self.shown.contains_key(what) {
+            write_record' '        if false {
+            write_record' --test owner_forks adopted
+mutate src/materialise.rs '        if snap.is_clean() {' '        if false {' --test owner_forks shown_once
+mutate src/materialise.rs '    let snap = cuenca_fs::snapshot(dir, &head, cache)' '    let snap = cuenca_fs::snapshot_with(dir, &head, cache, &cuenca_fs::SnapshotOptions { rules: Some(&cuenca_fs::ForkIgnore::parse("").unwrap()), drop_ignored: true })' --test owner_forks finder_metadata
+mutate src/admin.rs '    if principal.as_str() == cuenca_core::VOLUME_PRINCIPAL {' '    if false {' --test owner_forks keeps_the_volume_keyless
+mutate src/materialise.rs '            if !is_owner_fork(&fork.name) {' '            if is_owner_fork(&fork.name) {' --test owner_forks
+mutate src/materialise.rs '                if snapped_at.is_none_or(|t| t.elapsed() >= config.snapshot_interval) {' '                if snapped_at.is_none() {' --test owner_forks a_draft_within_60_s
 
 exit $survived

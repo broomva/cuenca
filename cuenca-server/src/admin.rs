@@ -68,6 +68,13 @@ pub enum AdminRequest {
         #[serde(default)]
         changeset: Option<ChangesetId>,
     },
+    /// Create the owner fork `fork` (named `owner-*`) of `location`, held by the volume:
+    /// the materialiser shows it writable at `forks/<fork>/` and snapshots what Finder
+    /// writes there into its drafts (spec section 2a). One per device, by convention.
+    OwnerFork {
+        location: LocationName,
+        fork: ForkName,
+    },
     /// Move a fork to `holder` by compare-and-swap on its epoch.
     TakeOver {
         fork: ForkName,
@@ -195,6 +202,7 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             node,
             grant,
         } => {
+            volume_is_nobody(&principal)?;
             if a.is_banned(&principal) || a.store.revoked(&principal).map_err(|e| s(&e))?.is_some()
             {
                 return Err(format!(
@@ -207,7 +215,10 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
                 .map_err(|e| s(&e))?;
             Ok(json!({ "key": record, "token": token }))
         }
-        AdminRequest::KeyRevoke { principal } => revoke(a, &principal, |p| a.store.revoke(p)),
+        AdminRequest::KeyRevoke { principal } => {
+            volume_is_nobody(&principal)?;
+            revoke(a, &principal, |p| a.store.revoke(p))
+        }
         AdminRequest::KeyList => Ok(json!({ "keys": a.keys.list() })),
         AdminRequest::LocationAdd {
             name,
@@ -262,6 +273,13 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
                 .map(|l| l.main.to_hex());
             Ok(json!({ "offset": offset, "changeset": requested, "main": main }))
         }
+        AdminRequest::OwnerFork { location, fork } => {
+            let offset = a
+                .store
+                .create_fork(&fork, &location, &Holder::volume())
+                .map_err(|e| s(&e))?;
+            Ok(json!({ "offset": offset, "fork": fork }))
+        }
         AdminRequest::TakeOver {
             fork,
             expected_epoch,
@@ -276,6 +294,18 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             Ok(json!({ "epoch": epoch }))
         }
     }
+}
+
+/// The volume's principal has no key and is never revoked: minting one would let a
+/// request write owner forks as the volume, and revoking it would stop every owner
+/// fork's snapshots for good.
+fn volume_is_nobody(principal: &PrincipalName) -> Result<(), String> {
+    if principal.as_str() == cuenca_core::VOLUME_PRINCIPAL {
+        return Err(format!(
+            "principal {principal:?} is the volume's, which holds owner forks; it has no key"
+        ));
+    }
+    Ok(())
 }
 
 /// Snapshot `dir` against an empty tree and ingest every blob it names. The store

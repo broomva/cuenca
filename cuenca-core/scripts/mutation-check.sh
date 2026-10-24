@@ -95,6 +95,10 @@ mutate src/store.rs 'let target = changeset.apply(&load_tree(&trees, changeset.b
 # The transition rules (one copy, used by the writer and by replay).
 mutate src/state.rs 'if view.location(name)?.is_some() {' 'if false {' --test store
 mutate src/state.rs 'if view.fork(name)?.is_some() {' 'if false {' --test store
+mutate src/state.rs 'if is_owner_fork(name) != holder.is_volume() {' 'if false {' --test forks only_the_volume
+mutate src/state.rs 'if is_owner_fork(name) || holder.is_volume() {' 'if holder.is_volume() {' --test forks never_taken_over
+mutate src/state.rs 'if is_owner_fork(name) || holder.is_volume() {' 'if is_owner_fork(name) {' --test forks never_taken_over
+mutate src/owner.rs 'fork.as_str().starts_with(OWNER_FORK_PREFIX)' 'fork.as_str().contains(OWNER_FORK_PREFIX)' --test forks only_the_volume
 mutate src/state.rs 'if *base != loc.main {' 'if false {' --lib
 mutate src/state.rs 'if ChangesetId::of(changeset) != *id {' 'if false {' --lib
 mutate src/state.rs '&& head == *id' '&& false' --test store

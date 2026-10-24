@@ -17,7 +17,7 @@ use crate::checks::{CheckRun, CheckStatus};
 use crate::error::{CoreError, Result};
 use crate::event::{ChangesetId, Event};
 use crate::names::{ForkName, LocationName, PrincipalName};
-use crate::owner::{Holder, Writer, sibling_name};
+use crate::owner::{Holder, OWNER_FORK_PREFIX, Writer, is_owner_fork, sibling_name};
 
 /// A location as the log has it now. Fields added later are `#[serde(default)]`, so
 /// rows written by this version still decode.
@@ -312,6 +312,12 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             if name.as_str().contains("-from") {
                 return Err(CoreError::ReservedName(name.to_string()));
             }
+            if is_owner_fork(name) != holder.is_volume() {
+                return Err(CoreError::OwnerFork(format!(
+                    "fork {name:?}: a fork named {OWNER_FORK_PREFIX}* is an owner fork, held by \
+                     the volume, and the volume holds nothing else (holder {holder})"
+                )));
+            }
             if view.fork(name)?.is_some() {
                 return Err(CoreError::ForkExists(name.to_string()));
             }
@@ -382,6 +388,14 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
         } => {
             not_revoked(view, &holder.principal)?;
             let mut state = fork(view, name)?;
+            // Owner forks never move (spec section 2a): there is no fence for Finder to
+            // cross. And the volume takes nothing over.
+            if is_owner_fork(name) || holder.is_volume() {
+                return Err(CoreError::OwnerFork(format!(
+                    "fork {name:?} cannot move to {holder}: owner forks never move, and the \
+                     volume holds only owner forks"
+                )));
+            }
             if state.epoch() != *expected_epoch {
                 return Err(CoreError::EpochMismatch {
                     fork: name.to_string(),

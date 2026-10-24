@@ -354,6 +354,36 @@ fn a_failed_swap_records_nothing() {
     assert_eq!(pass.built, vec![(Shown::Fork(fork("f1")), cs.target)]);
 }
 
+/// A record that cannot be forgotten stops the swap: the path keeps its previous tree,
+/// whole, and is tried again. (State unwritable to a non-root runner, as CI's are.)
+#[test]
+fn a_record_that_cannot_be_forgotten_stops_the_swap() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = setup(dir.path());
+    let root = dir.path().join("volume");
+    let mut volume = Volume::open(&root, store.object_dir()).unwrap();
+    volume.converge(&store).unwrap();
+    let before = volume.shown(&Shown::Fork(fork("f1"))).unwrap();
+
+    let base = store.fork_head(&fork("f1")).unwrap();
+    let cs = change(&store, &base, &[("new", Entry::File, b"new\n")]);
+    store.publish_draft(&fork("f1"), &writer(), &cs).unwrap();
+    let records = root.join(".cuenca/state/forks");
+    std::fs::set_permissions(&records, std::fs::Permissions::from_mode(0o500)).unwrap();
+    let pass = volume.converge(&store).unwrap();
+    std::fs::set_permissions(&records, std::fs::Permissions::from_mode(0o755)).unwrap();
+    assert_eq!(pass.failed.len(), 1, "{pass:?}");
+    assert_eq!(
+        read_back(&root.join("forks/f1")),
+        before,
+        "swapped although its record was not forgotten"
+    );
+    assert!(staging_is_empty(&root));
+    volume.set_retry_after(Duration::ZERO);
+    let pass = volume.converge(&store).unwrap();
+    assert_eq!(pass.built, vec![(Shown::Fork(fork("f1")), cs.target)]);
+}
+
 /// A record that cannot be written after its swap (here, a directory where its
 /// temporary file goes) is not believed: when the fork goes back to the tree it showed
 /// before, the volume shows that tree again, in the same process and after a restart.

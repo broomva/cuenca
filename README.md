@@ -78,7 +78,19 @@ Run the authority with `--gh <path>` if `gh` is not on its `PATH`. The authority
 
 With `--volume` (or `CUENCA_VOLUME`), the authority keeps every location's main at `<dir>/main/<location>/` and every fork's head at `<dir>/forks/<fork>/` as plain folders, for stock Samba to serve to Finder. It checks the log for growth every second, so a published draft shows within a few seconds. Each tree is checked out into `<dir>/.cuenca/staging/`, flushed to disk, and swapped into place in one atomic exchange, so a reader sees a whole tree the log has held, never a half-written one. Before a swap the path's record is forgotten, and it is written again after, so an authority that fails or is killed while materialising rebuilds that path on its next pass or restart. Folders are `2750` and files `0640` (`0750` for executables): Samba's account reads them through the authority's group and cannot change them. Only one authority may materialise a volume at a time.
 
-Every fork is shown read-only for now. Owner forks that Finder writes, snapshotted back into drafts, come next (BRO-3256).
+**Owner forks** are the folders Finder writes. The owner makes one per device on the authority's host:
+
+```bash
+cuenca admin owner-fork <location> owner-mac
+```
+
+It is held by the volume itself, never by a key, and it never moves: it cannot be taken over, and the volume holds nothing but `owner-*` forks. The authority shows it once at `<dir>/forks/owner-mac/`, writable through the group: folders `2770`, files `0660`, executables `0770`. After that, the folder is never replaced or swapped, so an edit is never moved out from under Finder. Every 10 s the authority snapshots each owner fork under its location's `.forkignore`, so `.DS_Store`, `._*` and the other defaults are left out, and publishes the changes as a draft written by the volume. An edit is in the log well inside the spec's 60 s.
+
+The snapshot records Finder's own conversions as changes:
+- a symlink saved as an XSym file becomes a change of kind;
+- a lost executable bit becomes a change of mode.
+
+`cuenca diff` shows both. A file the authority cannot read, or one that keeps changing, fails that fork's snapshot loudly, with the path in the log output. Nothing of the fork is published until a later pass succeeds. Forking an owner fork into a checkout comes next (BRO-3256 part 3).
 
 More crates land as the plan's nodes do. Install, operate and recover sections arrive with the close-out node (BRO-3260).
 
