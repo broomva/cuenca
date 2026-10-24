@@ -35,8 +35,15 @@
 //! # Filesystem
 //!
 //! The volume needs a filesystem with atomic exchange (`renameat2(RENAME_EXCHANGE)` on
-//! Linux: ext4, btrfs, xfs, tmpfs; `renamex_np(RENAME_SWAP)` on APFS). Elsewhere every
-//! update of a tree already shown fails, loudly, and is retried.
+//! Linux: ext4, btrfs, xfs, tmpfs; `renamex_np(RENAME_SWAP)` on APFS) and an exclusive
+//! rename (`RENAME_NOREPLACE` / `RENAME_EXCL`). Elsewhere every tree fails, loudly, and is
+//! retried.
+//!
+//! The volume's directory belongs to the materialiser: whatever is under `main/` and
+//! `forks/` at a path the log names is replaced by the log's tree.
+//!
+//! "Whole" is per lookup: a reader that opens `forks/<fork>/` after a swap sees the new
+//! tree, one that opened it before keeps the old one, which is then removed beneath it.
 //!
 //! # Not here yet
 //!
@@ -211,7 +218,9 @@ impl Volume {
         }
         let mut pass = Pass::default();
         for (what, tree) in want {
-            if self.shown.get(&what) == Some(&tree) && self.root.join(what.rel()).is_dir() {
+            if self.shown.get(&what) == Some(&tree)
+                && fs::symlink_metadata(self.root.join(what.rel())).is_ok_and(|m| m.is_dir())
+            {
                 self.failed.remove(&what);
                 pass.unchanged += 1;
                 continue;

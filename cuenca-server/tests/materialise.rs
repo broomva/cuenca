@@ -157,6 +157,17 @@ fn a_draft_is_shown_whole_and_read_only() {
     // The replaced tree is gone.
     assert!(staging_is_empty(&root));
 
+    // A draft that deletes a path: it is gone from the volume, and the rest is the draft.
+    let head = store.fork_head(&fork("f1")).unwrap();
+    let cs2 = Changeset::new(&head, vec![Op::delete(path("src/lib.rs"))]).unwrap();
+    store.publish_draft(&fork("f1"), &writer(), &cs2).unwrap();
+    volume.converge(&store).unwrap();
+    assert!(
+        !shown.join("src/lib.rs").exists(),
+        "a deleted file is still shown"
+    );
+    assert_eq!(read_back(&shown), cs2.target);
+
     // Nothing changed: nothing built.
     let pass = volume.converge(&store).unwrap();
     assert!(pass.built.is_empty(), "{pass:?}");
@@ -176,6 +187,22 @@ fn a_reopened_volume_rebuilds_nothing_it_shows() {
     let pass = volume.converge(&store).unwrap();
     assert!(pass.built.is_empty(), "{pass:?}");
     assert_eq!(pass.unchanged, 2);
+
+    // A shown tree replaced by a symlink behind the volume's back is shown again, and
+    // what the link pointed at is left alone.
+    let outside = dir.path().join("outside");
+    std::fs::create_dir(&outside).unwrap();
+    std::fs::write(outside.join("keep"), b"keep\n").unwrap();
+    std::fs::remove_dir_all(root.join("forks/f1")).unwrap();
+    std::os::unix::fs::symlink(&outside, root.join("forks/f1")).unwrap();
+    let pass = volume.converge(&store).unwrap();
+    assert_eq!(pass.built.len(), 1, "{pass:?}");
+    assert!(
+        std::fs::symlink_metadata(root.join("forks/f1"))
+            .unwrap()
+            .is_dir()
+    );
+    assert_eq!(std::fs::read(outside.join("keep")).unwrap(), b"keep\n");
 
     // A shown tree removed behind the volume's back is shown again.
     std::fs::remove_dir_all(root.join("forks/f1")).unwrap();
@@ -308,18 +335,41 @@ fn a_reader_never_sees_a_shown_tree_missing() {
     let done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let reader = {
         let done = done.clone();
-        let shown = root.join("forks/f1/d0");
+        let fork_dir = root.join("forks/f1");
+        let shown = fork_dir.join("d0");
         std::thread::spawn(move || {
-            let (mut looks, mut gaps) = (0u64, 0u64);
+            let (mut looks, mut gaps, mut mixed) = (0u64, 0u64, 0u64);
             while !done.load(std::sync::atomic::Ordering::SeqCst) {
                 looks += 1;
                 if !shown.is_dir() {
                     gaps += 1;
                 }
+                // Two files at opposite ends of the tree, read through one handle on the
+                // shown directory: they come from one draft, or the tree was mixed. (A
+                // replaced tree is removed while it may still be open: a read that fails
+                // proves nothing either way.)
+                if let Ok(dir) = std::fs::File::open(&fork_dir) {
+                    let read = |name: &str| -> Option<String> {
+                        let fd = rustix::fs::openat(
+                            &dir,
+                            name,
+                            rustix::fs::OFlags::RDONLY,
+                            rustix::fs::Mode::empty(),
+                        )
+                        .ok()?;
+                        std::io::read_to_string(std::fs::File::from(fd)).ok()
+                    };
+                    if let (Some(a), Some(b)) = (read("d0/f0"), read("d3/f1499")) {
+                        let draft = |s: &str| s.split(' ').next().map(str::to_string);
+                        if draft(&a) != draft(&b) {
+                            mixed += 1;
+                        }
+                    }
+                }
                 // Not a busy spin: the suite's other tests run beside this one.
                 std::thread::yield_now();
             }
-            (looks, gaps)
+            (looks, gaps, mixed)
         })
     };
     for n in 1..=8 {
@@ -330,9 +380,13 @@ fn a_reader_never_sees_a_shown_tree_missing() {
         assert_eq!(pass.built, vec![(Shown::Fork(fork("f1")), cs.target)]);
     }
     done.store(true, std::sync::atomic::Ordering::SeqCst);
-    let (looks, gaps) = reader.join().unwrap();
+    let (looks, gaps, mixed) = reader.join().unwrap();
     assert!(looks > 1000, "the reader looked only {looks} times");
     assert_eq!(gaps, 0, "{gaps} of {looks} looks found forks/f1 missing");
+    assert_eq!(
+        mixed, 0,
+        "{mixed} of {looks} looks found files of two drafts in one tree"
+    );
 }
 
 /// A record's temporary file is never another fork's record: forks `f1.tmp` and `f1.x`
@@ -462,7 +516,7 @@ fn spawn_child(dir: &Path) -> Child {
         .args(["--ignored", "--exact", "child_materialiser", "--nocapture"])
         .env(DIR_ENV, dir)
         .stdout(Stdio::null())
-        .stderr(Stdio::null())
+        .stderr(std::fs::File::create(dir.join("child-stderr")).unwrap())
         .spawn()
         .unwrap();
     let start = Instant::now();
@@ -476,18 +530,35 @@ fn spawn_child(dir: &Path) -> Child {
     child
 }
 
-/// Wait for the child to start a pass, then a random part of the last pass's length.
-fn aim(dir: &Path, seed: u64) {
+/// Wait until the child has a tree staged (it is inside a materialisation), then a
+/// random part of half the last pass's length, so the kill lands somewhere between the
+/// checkout and the removal of the replaced tree. Panics, with the child's stderr, if the
+/// child exits on its own.
+fn aim(dir: &Path, child: &mut Child, seed: u64) {
+    let staging = dir.join("volume/.cuenca/staging");
     let start = Instant::now();
-    while !dir.join("in-pass").exists() {
-        assert!(start.elapsed() < Duration::from_secs(60), "no pass started");
-        std::thread::sleep(Duration::from_micros(200));
+    loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            let err = std::fs::read_to_string(dir.join("child-stderr")).unwrap_or_default();
+            panic!("the child exited on its own ({status}):\n{err}");
+        }
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "no tree staged in 60 s"
+        );
+        let staged = std::fs::read_dir(&staging)
+            .map(|mut d| d.next().is_some())
+            .unwrap_or(false);
+        if staged && dir.join("in-pass").exists() {
+            break;
+        }
+        std::thread::sleep(Duration::from_micros(100));
     }
     let last: u64 = std::fs::read_to_string(dir.join("pass-us"))
         .ok()
         .and_then(|s| s.parse().ok())
         .unwrap_or(50_000);
-    std::thread::sleep(Duration::from_micros(seed % last.max(1)));
+    std::thread::sleep(Duration::from_micros(seed % (last / 2).max(1)));
 }
 
 /// Kill the materialiser at random moments inside a pass, until 10 kills have left a
@@ -513,7 +584,7 @@ fn killed_while_materialising() {
             .wrapping_add(1442695040888963407);
         // Let a pass or two finish first, so the last pass's length is known.
         std::thread::sleep(Duration::from_millis(200));
-        aim(dir.path(), seed >> 33);
+        aim(dir.path(), &mut child, seed >> 33);
         child.kill().unwrap();
         child.wait().unwrap();
 
