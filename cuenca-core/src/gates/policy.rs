@@ -48,6 +48,16 @@
 //! `path_touched`). A policy that cannot be compiled is reported as a failing `policy`
 //! result and the built-in defaults run instead; it never makes the gates pass.
 //!
+//! **Read as p9 reads it.** p9 loads the file with PyYAML (YAML 1.1), the engine with
+//! yaml-rust2 (YAML 1.2), and wherever the two read a file differently the gates could
+//! pass what p9 holds. So the engine refuses what they read differently: a tag, a merge
+//! key `<<`, a plain scalar the two type or value differently (`on`, `1_000`, `12:30`,
+//! `Null`: quote it), a tab, and the characters PyYAML breaks lines at or refuses. It
+//! also refuses every `auto_merge` value p9 refuses, so the gates never run on a policy
+//! under which p9 merges nothing. `scripts/policy-differential.py` checks this in CI: it
+//! feeds generated policies to both and fails on any disagreement about the protected
+//! paths, the governance tier or the secret paths (owner ask A15).
+//!
 //! The file must be UTF-8, at most [`MAX_POLICY_BYTES`], nest at most
 //! [`MAX_POLICY_DEPTH`] levels, and must not use YAML aliases: the loader copies an
 //! aliased node at every use, so a few lines of aliases could expand without bound, and
@@ -166,6 +176,13 @@ pub(crate) const SCHEMA: &[Schema] = &[
         open: false,
     },
     Schema {
+        // p9's keys (`_parse_gates`, `p20`).
+        path: "auto_merge.gates.p20",
+        known: &["pass_score", "max_loc", "max_files", "public_api_paths"],
+        required: &[],
+        open: false,
+    },
+    Schema {
         path: "auto_merge.gates.governance",
         known: &[
             "paths",
@@ -268,10 +285,15 @@ impl Policy {
         // PyYAML, which p9 loads the file with, also breaks lines at U+0085, U+2028 and
         // U+2029; yaml-rust2 does not, so rules p9 reads could be one string here (r9, B).
         // No YAML parser should see a character the other reads differently: these, and
-        // every other control character but tab, LF and CR, are refused.
+        // every other control character but LF and CR, are refused. A tab too: PyYAML
+        // refuses one where yaml-rust2 reads it as space (after `key:`, as indentation),
+        // so p9 would refuse a policy the gates ran on; and so is every character
+        // PyYAML's reader refuses as unprintable (U+FFFE, U+FFFF) (A15 differential).
         if let Some((at, c)) = text.char_indices().find(|&(_, c)| {
-            matches!(c, '\u{85}' | '\u{2028}' | '\u{2029}')
-                || (c.is_control() && !matches!(c, '\t' | '\n' | '\r'))
+            matches!(
+                c,
+                '\u{85}' | '\u{2028}' | '\u{2029}' | '\u{fffe}' | '\u{ffff}'
+            ) || (c.is_control() && !matches!(c, '\n' | '\r'))
         }) {
             let line = text[..at].matches('\n').count() + 1;
             return Err(format!(
@@ -335,6 +357,43 @@ impl Policy {
             }
         }
 
+        // The rest of `auto_merge` is checked as p9 checks it: a policy p9 refuses
+        // merges nothing under p9, so the gates must not run on it either (A15).
+        for key in [
+            "enabled",
+            "require_no_requested_changes",
+            "require_branch_up_to_date",
+            "delete_branch",
+        ] {
+            if let Some(v) = auto_merge.get(key)
+                && v.as_bool().is_none()
+            {
+                return Err(format!("auto_merge.{key} is not true or false"));
+            }
+        }
+        if let Some(method) = string(auto_merge.get("merge_method"), "auto_merge.merge_method")?
+            && !["squash", "merge", "rebase"].contains(&method.as_str())
+        {
+            return Err("auto_merge.merge_method is not squash, merge or rebase".into());
+        }
+        let default_action = string(
+            auto_merge.get("default_action"),
+            "auto_merge.default_action",
+        )?;
+        let default_action = default_action.as_deref().unwrap_or("notify");
+        if !RULE_ACTIONS.contains(&default_action) {
+            return Err(format!(
+                "auto_merge.default_action is not one of {RULE_ACTIONS:?}"
+            ));
+        }
+        // p9 reads `gates:` with no value as gated mode.
+        let gated = auto_merge.get("gates").is_some();
+        if gated && default_action == "auto" {
+            return Err(
+                "auto_merge.default_action is auto, but gates are set: p9 refuses it".into(),
+            );
+        }
+
         // auto_merge.rules[action: require_human].path_touched. Every rule is checked
         // as p9 checks it, so a misspelt action or target is an error, never a rule
         // that protects nothing (r4, C).
@@ -348,6 +407,11 @@ impl Policy {
                 let action = action.as_deref().unwrap_or("notify");
                 if !RULE_ACTIONS.contains(&action) {
                     return Err(format!("{key}.action is not one of {RULE_ACTIONS:?}"));
+                }
+                if gated && action == "auto" {
+                    return Err(format!(
+                        "{key}.action is auto, but gates are set: a rule may only block"
+                    ));
                 }
                 let branch = string(rule.get("branch_pattern"), &format!("{key}.branch_pattern"))?;
                 let path = string(rule.get("path_touched"), &format!("{key}.path_touched"))?;
@@ -444,11 +508,57 @@ fn governance(gates: Option<&Yaml>) -> Res<Option<Governance>> {
     };
     // A misspelt `governance` would drop the tier (r5).
     let gates = Section::read(gates, "auto_merge.gates", "auto_merge.gates")?;
+    // p9's other keys feed no gate here, but a value p9 refuses is refused (A15).
+    for key in ["review_bots", "aggregate_checks"] {
+        names(gates.get(key), &format!("auto_merge.gates.{key}"))?;
+    }
+    let p20 = match gates.get("p20") {
+        Some(Yaml::Null) => None,
+        p20 => p20,
+    };
+    let p20 = Section::read(p20, "auto_merge.gates.p20", "auto_merge.gates.p20")?;
+    for (key, lo, hi) in [
+        ("pass_score", 7, 10),
+        ("max_loc", 0, 200),
+        ("max_files", 0, 1),
+    ] {
+        if let Some(n) = int(p20.get(key), &format!("auto_merge.gates.p20.{key}"))?
+            && !(lo..=hi).contains(&n)
+        {
+            return Err(format!(
+                "auto_merge.gates.p20.{key} is {n}; p9 allows {lo} to {hi}"
+            ));
+        }
+    }
+    names(
+        p20.get("public_api_paths"),
+        "auto_merge.gates.p20.public_api_paths",
+    )?;
     let gov = match gates.get("governance") {
         Some(Yaml::Null) => None,
         gov => gov,
     };
     let gov = Section::read(gov, KEY, KEY)?;
+    if let Some(strata) = names(
+        gov.get("required_strata"),
+        &format!("{KEY}.required_strata"),
+    )? {
+        let mut strata = strata;
+        strata.sort();
+        strata.dedup();
+        if strata != ["A", "B", "C"] {
+            return Err(format!("{KEY}.required_strata must be all of A, B and C"));
+        }
+    }
+    if let Some(checks) = names(
+        gov.get("required_checks"),
+        &format!("{KEY}.required_checks"),
+    )? && !checks.iter().any(|c| c == "stability-check")
+    {
+        return Err(format!(
+            "{KEY}.required_checks must include stability-check"
+        ));
+    }
     let paths = match strings(gov.get("paths"), &format!("{KEY}.paths"))? {
         None => GOVERNANCE_PATHS.iter().map(|p| p.to_string()).collect(),
         Some(paths) => {
@@ -534,6 +644,18 @@ fn prescan(text: &str) -> Res<()> {
                     mark.line()
                 ));
             }
+            // PyYAML resolves plain scalars by YAML 1.1 (`on` is true, `1_000` is 1000,
+            // `12:30` is 750, `Null` is null), yaml-rust2 by YAML 1.2's core schema, so
+            // a plain scalar the two type or value differently is refused (A15).
+            Ok((Event::Scalar(value, TScalarStyle::Plain, _, None), mark))
+                if !plain_scalar_agrees(&value) =>
+            {
+                return Err(format!(
+                    "{POLICY_PATH} has the unquoted value {value:?} (line {}), which YAML 1.1 \
+                     and 1.2 read differently; quote it",
+                    mark.line()
+                ));
+            }
             Ok((Event::SequenceStart(..) | Event::MappingStart(..), mark)) => {
                 depth += 1;
                 if depth > MAX_POLICY_DEPTH {
@@ -554,6 +676,39 @@ fn prescan(text: &str) -> Res<()> {
             Err(e) => return Err(format!("{POLICY_PATH} is not valid YAML: {e}")),
         }
     }
+}
+
+/// Whether PyYAML (YAML 1.1, `yaml/resolver.py`) and yaml-rust2 (YAML 1.2 core,
+/// `Yaml::from_str`) read the plain scalar `v` alike: a string to both, or a spelling of
+/// a boolean, null, decimal integer or decimal fraction both resolve to the same value.
+fn plain_scalar_agrees(v: &str) -> bool {
+    static YAML11: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    static SAME: std::sync::OnceLock<Regex> = std::sync::OnceLock::new();
+    // PyYAML's implicit resolvers: bool, float, int, merge, null, timestamp, value.
+    let yaml11 = YAML11.get_or_init(|| {
+        Regex::new(concat!(
+            r"^(?:yes|Yes|YES|no|No|NO|true|True|TRUE|false|False|FALSE|on|On|ON|off|Off|OFF",
+            r"|[-+]?(?:[0-9][0-9_]*)\.[0-9_]*(?:[eE][-+][0-9]+)?|\.[0-9_]+(?:[eE][-+][0-9]+)?",
+            r"|[-+]?[0-9][0-9_]*(?::[0-5]?[0-9])+\.[0-9_]*|[-+]?\.(?:inf|Inf|INF)|\.(?:nan|NaN|NAN)",
+            r"|[-+]?0b[0-1_]+|[-+]?0[0-7_]+|[-+]?(?:0|[1-9][0-9_]*)|[-+]?0x[0-9a-fA-F_]+",
+            r"|[-+]?[1-9][0-9_]*(?::[0-5]?[0-9])+",
+            r"|<<|~|null|Null|NULL|",
+            r"|[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]",
+            r"|[0-9][0-9][0-9][0-9]-[0-9][0-9]?-[0-9][0-9]?(?:[Tt]|[ \t]+)[0-9][0-9]?:[0-9][0-9]:[0-9][0-9](?:\.[0-9]*)?(?:[ \t]*(?:Z|[-+][0-9][0-9]?(?::[0-9][0-9])?))?",
+            r"|=)$",
+        ))
+        .expect("YAML 1.1 resolvers")
+    });
+    // Spellings both read as one value (an i64 for the integers: past it yaml-rust2
+    // reads a float).
+    let same = SAME.get_or_init(|| {
+        Regex::new(r"^(?:|true|True|TRUE|false|False|FALSE|~|null|-?(?:0|[1-9][0-9]{0,17})|-?(?:0|[1-9][0-9]*)\.[0-9]+)$")
+            .expect("shared spellings")
+    });
+    if same.is_match(v) {
+        return true;
+    }
+    !yaml11.is_match(v) && matches!(Yaml::from_str(v), Yaml::String(_))
 }
 
 /// A pattern that does not compile, named by its key and never quoted: a pattern can
@@ -727,6 +882,18 @@ fn strings(y: Option<&Yaml>, key: &str) -> Res<Option<Vec<String>>> {
         .map(Some)
 }
 
+/// A list of non-empty strings when present, as p9's `_str_tuple` reads one.
+fn names(y: Option<&Yaml>, key: &str) -> Res<Option<Vec<String>>> {
+    let names = strings(y, key)?;
+    if names
+        .as_ref()
+        .is_some_and(|n| n.iter().any(String::is_empty))
+    {
+        return Err(format!("{key} holds an empty string"));
+    }
+    Ok(names)
+}
+
 fn int(y: Option<&Yaml>, key: &str) -> Res<Option<u64>> {
     let Some(y) = y else {
         return Ok(None);
@@ -830,7 +997,7 @@ auto_merge:
     - path_touched: .control/policy.yaml
       action: require_human
     - path_touched: docs/
-      action: auto
+      action: notify
   gates:
     governance:
       paths: [claude.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, docs/ADR*]
@@ -878,6 +1045,57 @@ cuenca:
                 got.map(|p| p.protected.len())
             );
         }
+    }
+
+    #[test]
+    fn a_plain_scalar_yaml_1_1_reads_differently_is_refused() {
+        // Each of these is a string to yaml-rust2 or a number other than PyYAML's, so
+        // the protected path p9 reads (`True`, `1000`, `750`) is not the engine's (A15).
+        for v in [
+            "on",
+            "Off",
+            "yes",
+            "NO",
+            "Null",
+            "NULL",
+            "1_000",
+            "12:30",
+            "24:00:00",
+            "017",
+            "0o17",
+            "0x1F",
+            "0b11",
+            "+1",
+            "1e3",
+            ".inf",
+            ".NaN",
+            "1.",
+            "2026-10-24",
+            "=",
+            "99999999999999999999",
+        ] {
+            let text = format!(
+                "auto_merge:\n  rules:\n    - path_touched: {v}\n      action: require_human\n"
+            );
+            assert!(Policy::parse(text.as_bytes()).is_err(), "{v} parsed Ok");
+        }
+        // Both read these alike.
+        for v in [
+            "CLAUDE.md",
+            "true",
+            "~",
+            "null",
+            "0",
+            "-12",
+            "86400",
+            "0.3",
+            "a:b",
+            "y",
+        ] {
+            assert!(plain_scalar_agrees(v), "{v}");
+        }
+        let quoted = "auto_merge:\n  rules:\n    - {path_touched: 'on', action: require_human}\n";
+        assert_eq!(Policy::parse(quoted.as_bytes()).unwrap().protected, ["on"]);
     }
 
     #[test]
@@ -964,6 +1182,27 @@ cuenca:
             b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '[z-ab]']\n",
             b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '']\n",
             "gates:\n  hard:\n    - {id: \"G4\u{200b}\", pattern: x}\n".as_bytes(),
+            // What p9 refuses in `auto_merge` (A15 differential): p9 merges nothing on
+            // such a policy, so the gates do not run on it either.
+            b"auto_merge:\n  enabled: 'true'\n",
+            b"auto_merge:\n  delete_branch: ~\n",
+            b"auto_merge:\n  merge_method: fast\n",
+            b"auto_merge:\n  default_action: always\n",
+            b"auto_merge:\n  default_action: auto\n  gates:\n",
+            b"auto_merge:\n  rules:\n    - {branch_pattern: x, action: auto}\n  gates: {}\n",
+            b"auto_merge:\n  gates:\n    review_bots: ['']\n",
+            b"auto_merge:\n  gates:\n    aggregate_checks: x\n",
+            b"auto_merge:\n  gates:\n    p20:\n      pass_score: 6\n",
+            b"auto_merge:\n  gates:\n    p20:\n      max_loc: 201\n",
+            b"auto_merge:\n  gates:\n    p20:\n      max_files: 2\n",
+            b"auto_merge:\n  gates:\n    p20:\n      max_file: 1\n",
+            b"auto_merge:\n  gates:\n    p20: []\n",
+            b"auto_merge:\n  gates:\n    p20:\n      public_api_paths: ~\n",
+            b"auto_merge:\n  gates:\n    governance:\n      required_strata: [A, B]\n",
+            b"auto_merge:\n  gates:\n    governance:\n      required_checks: [ci]\n",
+            // A tab, which PyYAML refuses where yaml-rust2 reads a space.
+            b"auto_merge:\t\n  rules: []\n",
+            "auto_merge:\n  rules: []\n# \u{fffe}\n".as_bytes(),
         ] {
             assert!(Policy::parse(bad).is_err(), "{:?}", String::from_utf8_lossy(bad));
         }
@@ -984,6 +1223,8 @@ auto_merge:
     - {path_touched: CLAUDE.md, action: require_human}
     - {branch_pattern: 'release/*', action: notify}
   gates:
+    p20:
+      pass_score: 7
     governance:
       paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml]
       l3_max_per_window: 1

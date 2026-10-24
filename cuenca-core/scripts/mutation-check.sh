@@ -284,7 +284,20 @@ mutate src/gates/mod.rs 'findings.truncate(MAX_FINDINGS_PER_GATE);' '' --lib
 mutate src/gates/policy.rs '            Ok((Event::Alias(_), mark)) => {' '            Ok((Event::Alias(_), mark)) if false => {' --lib
 mutate src/gates/policy.rs 'if bytes.len() > MAX_POLICY_BYTES {' 'if false {' --lib
 # P20 r9 (B): a line break PyYAML reads and yaml-rust2 does not is refused.
-mutate src/gates/policy.rs "matches!(c, '\\u{85}' | '\\u{2028}' | '\\u{2029}')" 'false' --lib
+mutate src/gates/policy.rs "                '\\u{85}' | '\\u{2028}' | '\\u{2029}' | '\\u{fffe}' | '\\u{ffff}'" "                '\\u{fffe}' | '\\u{ffff}'" --lib
+# A15 differential: a tab, a plain scalar YAML 1.1 reads otherwise, and what p9 refuses
+# in auto_merge are refused. scripts/policy-differential-mutants.sh proves the
+# differential test catches each of these too.
+mutate src/gates/policy.rs "|| (c.is_control() && !matches!(c, '\\n' | '\\r'))" "|| (c.is_control() && !matches!(c, '\\t' | '\\n' | '\\r'))" --lib
+mutate src/gates/policy.rs '                if !plain_scalar_agrees(&value) =>' '                if false =>' --lib
+mutate src/gates/policy.rs '                && v.as_bool().is_none()' '                && false' --lib
+mutate src/gates/policy.rs '            && !["squash", "merge", "rebase"].contains(&method.as_str())' '            && false' --lib
+mutate src/gates/policy.rs '        if gated && default_action == "auto" {' '        if false {' --lib
+mutate src/gates/policy.rs '                if gated && action == "auto" {' '                if false {' --lib
+mutate src/gates/policy.rs '            && !(lo..=hi).contains(&n)' '            && false' --lib
+mutate src/gates/policy.rs '        if strata != ["A", "B", "C"] {' '        if false {' --lib
+mutate src/gates/policy.rs ')? && !checks.iter().any(|c| c == "stability-check")' ')? && false' --lib
+mutate src/gates/policy.rs '.is_some_and(|n| n.iter().any(String::is_empty))' '.is_some_and(|_| false)' --lib
 mutate src/gates/policy.rs '                _ => return Err(format!("{at}: unknown key {key:?}")),' '                _ => {}' --lib
 mutate src/store.rs '        let bytes = if matches!(entry, Entry::Symlink(_)) {' '        let bytes = if false {' --lib
 

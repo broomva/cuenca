@@ -35,7 +35,7 @@ auto_merge:
     - path_touched: /CLAUDE.md
       action: require_human
     - path_touched: docs/
-      action: auto
+      action: notify
   gates:
     governance:
       paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml]
