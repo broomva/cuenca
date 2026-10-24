@@ -53,8 +53,12 @@ pub enum CoreError {
     WrongLocation { fork: String, location: String },
     #[error("changeset {changeset} is not the head of fork {fork:?}")]
     NotHead { fork: String, changeset: String },
-    #[error("fork name {0:?} contains \"-from\", which is kept for sibling forks")]
+    #[error(
+        "fork name {0:?} is kept: \"-from\" names sibling forks, and \"owner\" would give one an owner fork's name"
+    )]
     ReservedName(String),
+    #[error("{0}")]
+    OwnerFork(String),
     #[error("principal {0:?} is revoked")]
     Revoked(String),
     #[error("{holder} does not hold fork {fork:?} under epoch {epoch}")]

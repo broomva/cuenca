@@ -212,6 +212,7 @@ impl From<CoreError> for ApiError {
             | CoreError::BadRemote(_)
             | CoreError::WrongLocation { .. } => (S::BAD_REQUEST, "invalid"),
             CoreError::ReservedName(_) => (S::BAD_REQUEST, "reserved_name"),
+            CoreError::OwnerFork(_) => (S::FORBIDDEN, "owner_fork"),
             CoreError::Hash(_) | CoreError::OidMismatch { .. } => {
                 (S::UNPROCESSABLE_ENTITY, "bad_blob")
             }

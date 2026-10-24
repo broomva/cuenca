@@ -1443,7 +1443,7 @@ mod tests {
                 holder: agent(),
             },
         );
-        assert!(corrupt(&store).contains("kept for sibling forks"));
+        assert!(corrupt(&store).contains("names sibling forks"));
     }
 
     /// A verify record names the head it judged and the main it read the checks from;

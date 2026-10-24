@@ -470,7 +470,7 @@ fn two_nodes_whose_ids_differ_only_in_case_are_each_kept() {
 #[test]
 fn a_fork_cannot_take_a_name_kept_for_siblings() {
     let (_d, store, _) = forked();
-    for name in ["f-from-nagentcntrl-e1", "x-from.00", "a-fromage"] {
+    for name in ["f-from-nagentcntrl-e1", "x-from.00", "a-fromage", "owner"] {
         assert!(matches!(
             store.create_fork(&fork(name), &loc("l"), &agent()),
             Err(CoreError::ReservedName(n)) if n == name
@@ -478,6 +478,78 @@ fn a_fork_cannot_take_a_name_kept_for_siblings() {
     }
     store
         .create_fork(&fork("from-here"), &loc("l"), &agent())
+        .unwrap();
+}
+
+/// Owner forks (spec section 2a): a fork named `owner-*` is held by the volume and the
+/// volume holds nothing else; nothing appends when either half is broken.
+#[test]
+fn only_the_volume_holds_an_owner_fork_and_only_owner_forks() {
+    let (_d, store, _) = forked();
+    let len = store.len().unwrap();
+    let refused = [
+        ("owner-mac", agent()),
+        ("owner-mac", owner()),
+        ("mac", Holder::volume()),
+        ("mac", holder("volume", "nOtherCNTRL")),
+        ("owner-mac", holder("volume", "nOtherCNTRL")),
+        ("owners", Holder::volume()),
+    ];
+    for (name, who) in refused {
+        assert!(
+            matches!(
+                store.create_fork(&fork(name), &loc("l"), &who),
+                Err(CoreError::OwnerFork(_))
+            ),
+            "{name} by {who}"
+        );
+    }
+    assert_eq!(store.len().unwrap(), len);
+    // Only the prefix makes an owner fork.
+    store
+        .create_fork(&fork("not-owner-mac"), &loc("l"), &agent())
+        .unwrap();
+    store
+        .create_fork(&fork("owner-mac"), &loc("l"), &Holder::volume())
+        .unwrap();
+    let f = store.fork(&fork("owner-mac")).unwrap().unwrap();
+    assert_eq!((f.epoch(), f.holder()), (1, Some(&Holder::volume())));
+    assert!(cuenca_core::is_owner_fork(&f.name));
+}
+
+/// Owner forks never move: no takeover of one, by anyone, and no takeover by the volume
+/// of anything else.
+#[test]
+fn an_owner_fork_is_never_taken_over_and_the_volume_takes_nothing() {
+    let (_d, store, _) = forked();
+    store
+        .create_fork(&fork("owner-mac"), &loc("l"), &Holder::volume())
+        .unwrap();
+    let len = store.len().unwrap();
+    for who in [owner(), agent(), Holder::volume()] {
+        assert!(matches!(
+            store.take_over(&fork("owner-mac"), 1, &who),
+            Err(CoreError::OwnerFork(_))
+        ));
+    }
+    for who in [Holder::volume(), holder("volume", "nOwnerMacCNTRL")] {
+        assert!(matches!(
+            store.take_over(&fork("f"), 1, &who),
+            Err(CoreError::OwnerFork(_))
+        ));
+    }
+    assert_eq!(store.len().unwrap(), len);
+    assert_eq!(store.fork(&fork("owner-mac")).unwrap().unwrap().epoch(), 1);
+    // The volume writes its owner fork like any holder, and only the volume does.
+    let main = store.fork_head(&fork("owner-mac")).unwrap();
+    let next = tree(&store, &[("a", b"2")]);
+    let cs = Changeset::between(&main, &next);
+    assert!(matches!(
+        store.publish_draft(&fork("owner-mac"), &w1(), &cs),
+        Err(CoreError::NotHolder { .. })
+    ));
+    store
+        .publish_draft(&fork("owner-mac"), &Writer::new(Holder::volume(), 1), &cs)
         .unwrap();
 }
 

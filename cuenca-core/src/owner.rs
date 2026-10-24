@@ -68,6 +68,36 @@ impl fmt::Display for Holder {
     }
 }
 
+/// The principal name the volume holds owner forks under. No key is ever minted for
+/// it, so no request can write as the volume; only the authority's own snapshotter does.
+pub const VOLUME_PRINCIPAL: &str = "volume";
+
+/// What every owner fork's name starts with: `forks/owner-<name>/` in the volume.
+pub const OWNER_FORK_PREFIX: &str = "owner-";
+
+impl Holder {
+    /// The volume, which holds every owner fork (spec section 2a: "An owner fork in the
+    /// volume is held by the volume itself"). Its node is the volume too: the authority's
+    /// host, whichever it is.
+    pub fn volume() -> Self {
+        Self {
+            principal: PrincipalName::new(VOLUME_PRINCIPAL).expect("a valid name"),
+            node: NodeId::new("volume").expect("a valid node"),
+        }
+    }
+
+    /// Whether this is the volume's principal, on whatever node.
+    pub fn is_volume(&self) -> bool {
+        self.principal.as_str() == VOLUME_PRINCIPAL
+    }
+}
+
+/// Whether `fork` is named as an owner fork. The rules keep the name and the holder
+/// together: an owner fork is held by the volume, and the volume holds nothing else.
+pub fn is_owner_fork(fork: &ForkName) -> bool {
+    fork.as_str().starts_with(OWNER_FORK_PREFIX)
+}
+
 /// Who asks to write a fork, and the fencing epoch they hold it under.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Writer {

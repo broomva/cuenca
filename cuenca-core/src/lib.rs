@@ -71,7 +71,10 @@ pub use blobs::MAX_BLOB_BYTES;
 pub use error::{CoreError, Result};
 pub use event::{ChangesetId, Event, Record};
 pub use names::{ForkName, LocationName, MAX_NAME_BYTES, NameError, PrincipalName};
-pub use owner::{Holder, MAX_NODE_BYTES, NodeId, Writer, sibling_name};
+pub use owner::{
+    Holder, MAX_NODE_BYTES, NodeId, OWNER_FORK_PREFIX, VOLUME_PRINCIPAL, Writer, is_owner_fork,
+    sibling_name,
+};
 pub use state::{
     Export, Fork, Landing, LandingStep, Location, MAX_LANDING_TEXT, MainMove, Verified,
     export_branch,

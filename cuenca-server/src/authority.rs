@@ -77,6 +77,20 @@ impl Authority {
         std::fs::create_dir_all(dir)?;
         let store = Store::open(dir.join("store")).map_err(std::io::Error::other)?;
         let keys = KeyRing::open(dir.join("keys.json"))?;
+        // The volume's principal has no key (it holds owner forks); one on file was
+        // written by hand or by an older build, and is refused rather than honoured.
+        if keys
+            .list()
+            .iter()
+            .any(|k| k.principal.as_str() == cuenca_core::VOLUME_PRINCIPAL)
+        {
+            return Err(std::io::Error::other(format!(
+                "{}: holds a key for principal {:?}, which is the volume's and has no key; \
+                 remove it",
+                dir.join("keys.json").display(),
+                cuenca_core::VOLUME_PRINCIPAL
+            )));
+        }
         // Uploads a crash interrupted are never resumed.
         let staging = dir.join("staging");
         if staging.exists() {
