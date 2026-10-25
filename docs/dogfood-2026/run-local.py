@@ -266,6 +266,8 @@ class Trial:
                 snap, elapsed = self.cli("snapshot", "--dir", str(co), env=env)
                 assert snap["flush"]["pending"] == 0 and len(snap["flush"]["published"]) == 1, snap
                 projection = self.visible(name, relative, content, t)
+                verified, _ = self.cli("verify", "--dir", str(co), env=env)
+                assert verified["passed"] and len(verified["checks"]) == 1, verified
                 landed, request_seconds = self.cli("land", "--dir", str(co), "--wait", "0", env=env)
                 assert landed["waiting_for"] == "owner", landed
                 return {"fork": name, "round": rounds, "published": snap["flush"]["published"],
