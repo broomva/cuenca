@@ -17,10 +17,9 @@ fn worktree_fork_edits_snapshot_and_isolation() {
     // Register the richer location independently of site().
     a.admin(&["location", "add", "rich", "--dir", s(site.path())]);
     let agent = Agent::login(&a, &a.mint("builder", &["--location", "rich"]));
-    agent.ok(&["fork", "rich", "--name", "harness"]);
     let temp = tempfile::tempdir().unwrap();
     let root = temp.path().join("work");
-    let out = agent.ok(&["worktree", "harness", s(&root)]);
+    let out = agent.ok(&["fork", "rich", "--name", "harness", "--checkout", s(&root)]);
     assert!(root.join(".git").is_file());
     assert_eq!(
         git(&root, &["rev-parse", "--show-toplevel"]),
@@ -91,8 +90,12 @@ fn worktree_refuses_nonempty_symlink_and_nested_destinations() {
     let occupied = temp.path().join("occupied");
     std::fs::create_dir(&occupied).unwrap();
     std::fs::write(occupied.join("keep"), "untouched").unwrap();
-    let (code, v) = agent.run(&["worktree", "harness", s(&occupied)]);
+    let (code, v) = agent.run(&["worktree", "missing", s(&occupied)]);
     assert_ne!(code, 0, "{v}");
+    assert!(
+        v["error"].as_str().unwrap().contains("missing or empty"),
+        "{v}"
+    );
     assert_eq!(
         std::fs::read_to_string(occupied.join("keep")).unwrap(),
         "untouched"
@@ -101,6 +104,13 @@ fn worktree_refuses_nonempty_symlink_and_nested_destinations() {
     let link = temp.path().join("link");
     std::os::unix::fs::symlink(&occupied, &link).unwrap();
     assert_ne!(agent.run(&["worktree", "harness", s(&link)]).0, 0);
+    let empty = temp.path().join("empty");
+    std::fs::create_dir(&empty).unwrap();
+    std::fs::remove_file(&link).unwrap();
+    std::os::unix::fs::symlink(&empty, &link).unwrap();
+    let (code, v) = agent.run(&["worktree", "harness", s(&link)]);
+    assert_ne!(code, 0, "{v}");
+    assert!(std::fs::read_dir(&empty).unwrap().next().is_none());
     let root = temp.path().join("root");
     agent.ok(&["checkout", "harness", s(&root)]);
     assert_ne!(

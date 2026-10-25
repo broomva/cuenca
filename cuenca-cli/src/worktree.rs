@@ -10,7 +10,7 @@ use anyhow::{Context as _, ensure};
 use cuenca_core::ForkName;
 use cuenca_fs::{BlobSource, Fetched};
 use cuenca_tree::GitOid;
-use cuenca_tree::git::{Blobs, REDIRECTING_ENV, Repo};
+use cuenca_tree::git::{Blobs, Repo};
 use serde_json::json;
 
 use crate::local::{Local, State};
@@ -38,9 +38,6 @@ fn git(dir: &Path, args: &[&std::ffi::OsStr], input: &[u8]) -> anyhow::Result<St
         if key.to_string_lossy().starts_with("GIT_") {
             cmd.env_remove(key);
         }
-    }
-    for key in REDIRECTING_ENV {
-        cmd.env_remove(key);
     }
     let mut child = cmd
         .arg("-C")
@@ -82,6 +79,11 @@ fn git(dir: &Path, args: &[&std::ffi::OsStr], input: &[u8]) -> anyhow::Result<St
 /// exclusively owned by this caller until return (as with `cuenca checkout`).
 /// Failures preserve destination files; no force removal or reset is performed.
 pub fn checkout(client: &Client, fork: &str, dest: &Path) -> anyhow::Result<Report> {
+    ensure!(
+        !std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink()),
+        "worktree destination must not be a symlink: {}",
+        dest.display()
+    );
     let name = ForkName::new(fork)?;
     let root = Local::prepare(dest)?;
     ensure!(

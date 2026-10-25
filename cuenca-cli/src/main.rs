@@ -49,6 +49,9 @@ enum Verb {
         /// The fork's name (lowercase ASCII, digits, `.`, `_`, `-`); generated if absent.
         #[arg(long)]
         name: Option<String>,
+        /// Materialise the new fork as a git worktree for a harness.
+        #[arg(long)]
+        checkout: Option<PathBuf>,
     },
     /// Materialise a fork's head in a directory (missing or empty) and make it a checkout.
     Checkout { fork: String, dir: PathBuf },
@@ -189,13 +192,28 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             location,
             from,
             name,
+            checkout,
         } => {
             let of = match (&location, &from) {
                 (_, Some(f)) => verbs::ForkOf::Fork(f),
                 (Some(l), None) => verbs::ForkOf::Location(l),
                 (None, None) => unreachable!("clap requires a location or --from"),
             };
-            verbs::fork(&client()?, of, name.as_deref())?
+            let client = client()?;
+            let created = verbs::fork(&client, of, name.as_deref())?;
+            match checkout {
+                None => created,
+                Some(dir) => {
+                    let fork = created.json["fork"]["name"]
+                        .as_str()
+                        .context("created fork name")?;
+                    cuenca_cli::worktree::checkout(&client, fork, &dir).with_context(|| {
+                        format!(
+                            "fork {fork} was created; retry with `cuenca worktree {fork} <dir>`"
+                        )
+                    })?
+                }
+            }
         }
         Verb::Checkout { fork, dir } => verbs::checkout(&client()?, &fork, &dir)?,
         Verb::Worktree { fork, dir } => cuenca_cli::worktree::checkout(&client()?, &fork, &dir)?,
