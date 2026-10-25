@@ -173,4 +173,13 @@ mutate src/verbs.rs '        exit: if matches!(status.as_str(), "failed" | "drop
 mutate src/verbs.rs '        Some(from) => client.branch_fork(&name, from)?,' '        Some(_) => client.create_fork(&name, &location)?,' --test cli every_agent_verb
 mutate src/mcp.rs '            Self::Fork(f) if f.location.is_some() == f.from.is_some() => {' '            Self::Fork(f) if false && f.location.is_some() == f.from.is_some() => {' --test mcp owner_acts_are_no_tools
 
+# Harness worktrees: refuse redirected destinations and foreign Git environments;
+# preserve the exact Cuenca bytes rather than Git's attribute conversions.
+mutate src/worktree.rs '!std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink())' 'true' --test worktree worktree_refuses
+mutate src/worktree.rs '!root.exists() || (root.is_dir() && std::fs::read_dir(&root)?.next().is_none())' 'true' --test worktree worktree_refuses
+mutate src/worktree.rs 'let root = Local::prepare(dest)?;' 'let root = std::path::absolute(dest)?;' --test worktree worktree_refuses
+mutate src/worktree.rs 'if key.to_string_lossy().starts_with("GIT_") {' 'if false {' --test worktree worktree_ignores
+mutate src/worktree.rs '            "--no-checkout".as_ref(),' '' --test worktree worktree_fork
+mutate src/worktree.rs '    git(&root, &["read-tree".as_ref(), commit.as_ref()], b"")?;' '' --test worktree worktree_fork
+
 exit $survived
