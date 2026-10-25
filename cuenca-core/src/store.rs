@@ -240,10 +240,11 @@ impl Store {
                 });
             }
             match &record.event {
-                Event::LocationAdded { remote, .. } => {
-                    if let Some(remote) = remote {
-                        check_remote(remote)?;
-                    }
+                Event::LocationAdded {
+                    remote: Some(remote),
+                    ..
+                } => {
+                    check_remote(remote)?;
                 }
                 Event::DraftPublished { changeset, id, .. }
                 | Event::DraftFenced { changeset, id, .. } => {
