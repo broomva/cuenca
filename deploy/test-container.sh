@@ -62,5 +62,24 @@ mv /usr/bin/gh /gh; expect_fail "no gh"; mv /gh /usr/bin/gh
 sed -i "s/^   vfs objects = .*/   vfs objects = fruit/" /etc/samba/smb.conf; expect_fail "no streams_xattr"; cp /smb.ok /etc/samba/smb.conf
 sed -i "s/^   map to guest = Never/   map to guest = Bad User/" /etc/samba/smb.conf; expect_fail "guest mapping"; cp /smb.ok /etc/samba/smb.conf
 bash /deploy/check.sh --no-services >/dev/null || fail "restored host does not pass"
+
+# wait-tailnet waits for the IPv4 address and for the IPv6 address `tailscale ip -6` names.
+# `ip` and `tailscale` are stubs that read /fake/{v4,v6,ts6}.
+mkdir -p /fake
+printf "#!/bin/sh\ncase \"\$1\" in -4) cat /fake/v4 2>/dev/null;; -6) cat /fake/v6 2>/dev/null;; esac; true\n" >/fake/ip
+printf "#!/bin/sh\n[ \"\$1 \$2\" = \"ip -6\" ] && cat /fake/ts6 2>/dev/null; true\n" >/fake/tailscale
+chmod 755 /fake/ip /fake/tailscale
+v4="3: tailscale0    inet 100.64.0.1/32 scope global tailscale0"
+v6() { echo "3: tailscale0    inet6 $1/128 scope global "; }
+wt() { PATH=/fake:$PATH CUENCA_WAIT_SECS=${2:-2} sh /deploy/wait-tailnet 2>/tmp/wt; }
+wt_fails() { if wt; then fail "wait-tailnet passed: $1"; fi; grep -q -- "$2" /tmp/wt || { cat /tmp/wt; fail "wrong reason: $1"; }; }
+wt_fails "no address at all" "missing an IPv4 address"
+echo "$v4" >/fake/v4; wt || fail "wait-tailnet failed on an IPv4-only node"
+echo fd7a:115c:a1e0::1 >/fake/ts6
+wt_fails "the IPv6 address not yet on tailscale0" "missing its IPv6 address fd7a:115c:a1e0::1"
+v6 fd7a:115c:a1e0::12 >/fake/v6; wt_fails "another IPv6 address with the same prefix" "missing its IPv6 address fd7a:115c:a1e0::1"
+rm /fake/v6; (sleep 2; v6 fd7a:115c:a1e0::1 >/fake/v6) & wt x 10 || fail "wait-tailnet gave up while the IPv6 address arrived"
+wait; rm /fake/v4; wt_fails "IPv6 without IPv4" "missing an IPv4 address"
+echo "test-container: wait-tailnet waits for both tailnet addresses"
 echo "test-container: all passed"
 '
