@@ -737,6 +737,195 @@ fn a_pull_request_from_the_branch_at_another_commit_fails_the_landing() {
     assert!(up.creates().is_empty());
 }
 
+/// The landing's failure reason, once it is recorded.
+fn failed(s: &Server) -> String {
+    let step = wait_for(s.authority.store(), &f1(), |st| {
+        matches!(st, LandingStep::Failed { .. })
+    });
+    let LandingStep::Failed { reason } = step else {
+        unreachable!()
+    };
+    reason
+}
+
+/// A push GitHub refuses by rule (push protection, a file over its limit, a token
+/// without the `workflow` scope) is refused again on every retry: the landing fails
+/// once, with GitHub's words, and opens nothing.
+#[test]
+fn a_push_github_refuses_by_rule_fails_the_landing() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (_a1, _id) = requested(&s, &up, Some(&up.url));
+    let hook = up.remote.join("hooks").join("pre-receive");
+    std::fs::write(
+        &hook,
+        "#!/bin/sh\necho 'error: GH013: Repository rule violations found for refs/heads/cp.' >&2\nexit 1\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&hook, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
+    let reason = failed(&s);
+    assert!(reason.contains("GH013"), "{reason}");
+    assert!(up.creates().is_empty());
+    assert!(up.git(&["for-each-ref", "refs/heads/cp/"]).is_empty());
+}
+
+/// A remote whose history fails fsck (here a commit with a malformed date) is refused
+/// on every fetch: the landing fails rather than retrying forever.
+#[test]
+fn a_remote_history_that_fails_fsck_fails_the_landing() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (_a1, _id) = requested(&s, &up, Some(&up.url));
+    let head = up.git(&["rev-parse", "main"]);
+    let tree = up.git(&["rev-parse", "main^{tree}"]);
+    let raw = format!(
+        "tree {tree}\nparent {head}\nauthor A <a@example.invalid> not-a-date +0000\ncommitter A <a@example.invalid> 0 +0000\n\nbad date\n"
+    );
+    let mut child = Command::new("git")
+        .args([
+            "hash-object",
+            "-t",
+            "commit",
+            "--literally",
+            "-w",
+            "--stdin",
+        ])
+        .current_dir(&up.remote)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    std::io::Write::write_all(&mut child.stdin.take().unwrap(), raw.as_bytes()).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success());
+    let bad = String::from_utf8(out.stdout).unwrap();
+    up.git(&["update-ref", "refs/heads/main", bad.trim()]);
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
+    let reason = failed(&s);
+    assert!(reason.contains("fsck error"), "{reason}");
+    assert!(up.creates().is_empty());
+}
+
+/// No `gh` where the configuration names it: the landing fails, naming the call.
+#[test]
+fn a_missing_gh_fails_the_landing() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (_a1, _id) = requested(&s, &up, Some(&up.url));
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.gh = tmp.path().join("no-gh-here");
+    let _lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    let reason = failed(&s);
+    assert!(reason.starts_with("running gh pr list"), "{reason}");
+}
+
+/// `gh pr list --head cp/<id>` also lists pull requests from other people's forks
+/// with a branch of that name; one of those, at another commit, is not this landing's.
+#[test]
+fn a_pull_request_from_another_repository_is_not_the_landings() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (_a1, id) = requested(&s, &up, Some(&up.url));
+    std::fs::create_dir_all(tmp.path().join("prs")).unwrap();
+    std::fs::write(
+        tmp.path().join("prs").join(format!("cp_{id}.cross")),
+        format!(
+            r#"{{"number":99,"url":"https://github.com/someone/land/pull/99","headRefOid":"1111111111111111111111111111111111111111","headRefName":"cp/{id}","isCrossRepository":true}}"#
+        ),
+    )
+    .unwrap();
+    let _lander = Lander::spawn(
+        s.authority.clone(),
+        up.land_config(tmp.path().join("repos")),
+    )
+    .unwrap();
+    let step = wait_for(s.authority.store(), &f1(), |st| {
+        in_review(st) || matches!(st, LandingStep::Failed { .. })
+    });
+    let LandingStep::InReview { pr, .. } = step else {
+        panic!("{step:?}")
+    };
+    assert_ne!(pr, 99);
+    assert_eq!(up.creates().len(), 1);
+}
+
+/// A takeover drops the old holder's landing request; the error its retries hit is
+/// no longer shown on the fork.
+#[test]
+fn a_takeover_clears_the_dropped_landings_retry_error() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (_a1, _id) = requested(&s, &up, Some(&up.url));
+    let a2 = s.mint("a2", PrincipalKind::Agent, NB, grant(&["l1"], &[]));
+    s.whois.node(NB);
+    // The remote is unreachable: every round retries, with the error shown.
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.git_config = vec![format!(
+        "url.file://{}.insteadOf={}",
+        tmp.path().join("gone.git").display(),
+        up.url
+    )];
+    let _lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    let error = |s: &Server| -> Value {
+        let v: Value = s.get(&a2, "/v1/forks/f1/landing").json().unwrap();
+        v["error"].clone()
+    };
+    let start = Instant::now();
+    while error(&s).is_null() {
+        assert!(start.elapsed() < Duration::from_secs(60), "no retry error");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    let v = s.admin(AdminRequest::TakeOver {
+        fork: f1(),
+        expected_epoch: 1,
+        principal: PrincipalName::new("a2").unwrap(),
+        node: NodeId::new(NB).unwrap(),
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let start = Instant::now();
+    while !error(&s).is_null() {
+        assert!(start.elapsed() < Duration::from_secs(60), "{}", error(&s));
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A location whose remote is not on GitHub could be landed by no one: it is refused
+/// when it is added.
+#[test]
+fn a_location_with_a_remote_off_github_is_refused() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    for remote in ["https://gitlab.com/broomva/cuenca", "/srv/git/x.git"] {
+        let v = s.admin(AdminRequest::LocationAdd {
+            name: l1(),
+            remote: Some(remote.into()),
+            git: Some(GitSource {
+                repo: up.work.clone(),
+                rev: "HEAD".into(),
+            }),
+            dir: None,
+        });
+        assert_eq!(v["ok"], false, "{v}");
+        assert!(v.to_string().contains("not a GitHub repository"), "{v}");
+    }
+    assert!(s.authority.store().location(&l1()).unwrap().is_none());
+}
+
 // ---- kill the authority at each landing step -----------------------------------------
 
 const DIR_ENV: &str = "CUENCA_LAND_CRASH_DIR";

@@ -226,6 +226,16 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             git,
             dir,
         } => {
+            // Only GitHub remotes land, through a pull request; a location with another
+            // remote could be landed by neither the lander nor `admin land`.
+            if let Some(r) = &remote
+                && crate::land::github_slug(r).is_none()
+            {
+                return Err(format!(
+                    "remote {r:?} is not a GitHub repository; only GitHub remotes land \
+                     (https://github.com/<owner>/<repo>, git@github.com:<owner>/<repo>)"
+                ));
+            }
             let tree = match (git, dir) {
                 (Some(_), Some(_)) => return Err("give git or dir, not both".into()),
                 (None, None) => Tree::new(),
