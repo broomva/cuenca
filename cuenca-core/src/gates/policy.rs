@@ -241,6 +241,16 @@ pub struct Governance {
     pub window_ms: u64,
 }
 
+impl Governance {
+    /// Whether `path` matches any of the tier's globs, as the `governance_rate` gate
+    /// matches it.
+    pub fn matches(&self, path: &str) -> bool {
+        self.paths
+            .iter()
+            .any(|p| super::builtin::glob(p).is_match(path))
+    }
+}
+
 /// The settings compiled from one policy file.
 #[derive(Debug, Clone)]
 pub struct Policy {
@@ -454,10 +464,12 @@ impl Policy {
             policy.max_file_bytes = max;
         }
         if let Some(paths) = strings(section.get("secret_paths"), "cuenca.gates.secret_paths")? {
-            for p in paths {
+            for (i, p) in paths.into_iter().enumerate() {
                 one_more_pattern(&policy)?;
                 policy.secret_paths.push(
-                    compile(&p).map_err(|e| not_compiled("cuenca.gates.secret_paths[]", &e))?,
+                    compile(&p).map_err(|e| {
+                        not_compiled(&format!("cuenca.gates.secret_paths[{i}]"), &e)
+                    })?,
                 );
             }
         }
@@ -468,7 +480,7 @@ impl Policy {
             for (i, p) in patterns.into_iter().enumerate() {
                 one_more_pattern(&policy)?;
                 let re = compile_bytes(&p)
-                    .map_err(|e| not_compiled("cuenca.gates.secret_patterns[]", &e))?;
+                    .map_err(|e| not_compiled(&format!("cuenca.gates.secret_patterns[{i}]"), &e))?;
                 policy
                     .secret_patterns
                     .push((format!("policy pattern {}", i + 1), re));
@@ -632,19 +644,25 @@ fn prescan(text: &str) -> Res<()> {
             mark,
         )) = &next
         {
-            // PyYAML cannot hash a mapping or sequence used as a key, even in a section
-            // nothing reads; yaml-rust2 can (r10, A). Only scalar keys are read.
+            // PyYAML cannot hash a mapping or sequence used as a key, and it folds
+            // non-string keys that yaml-rust2 keeps distinct (`1` and `true`, `0` and
+            // `false`, `1.0` and `1`, `null` and `~` and an empty key), even in an open
+            // section nothing reads (r10 and r11, A). Only string keys are read.
             if let Some(Some(at_key)) = frames.last_mut() {
                 let key = *at_key;
                 *at_key = !key;
                 if key
-                    && matches!(
+                    && (matches!(
                         next,
                         Ok((Event::SequenceStart(..) | Event::MappingStart(..), _))
-                    )
+                    ) || matches!(
+                        &next,
+                        Ok((Event::Scalar(v, TScalarStyle::Plain, _, None), _))
+                            if !matches!(Yaml::from_str(v), Yaml::String(_))
+                    ))
                 {
                     return Err(format!(
-                        "{POLICY_PATH} has a mapping key that is not a scalar (line {}), which the \
+                        "{POLICY_PATH} has a mapping key that is not a string (line {}), which the \
                          gate engine refuses",
                         mark.line()
                     ));
@@ -670,13 +688,14 @@ fn prescan(text: &str) -> Res<()> {
             }
             // PyYAML resolves plain scalars by YAML 1.1 (`on` is true, `1_000` is 1000,
             // `12:30` is 750, `Null` is null), yaml-rust2 by YAML 1.2's core schema, so
-            // a plain scalar the two type or value differently is refused (A15).
+            // a plain scalar the two type or value differently is refused, without
+            // echoing it (an unquoted secret pattern can reach here: r11, A).
             Ok((Event::Scalar(value, TScalarStyle::Plain, _, None), mark))
                 if !plain_scalar_agrees(&value) =>
             {
                 return Err(format!(
-                    "{POLICY_PATH} has the unquoted value {value:?} (line {}), which YAML 1.1 \
-                     and 1.2 read differently; quote it",
+                    "{POLICY_PATH} has an unquoted value (line {}), which YAML 1.1 and 1.2 read \
+                     differently; quote it",
                     mark.line()
                 ));
             }
@@ -953,10 +972,11 @@ fn strings(y: Option<&Yaml>, key: &str) -> Res<Option<Vec<String>>> {
     };
     items
         .iter()
-        .map(|i| {
-            i.as_str()
+        .enumerate()
+        .map(|(i, item)| {
+            item.as_str()
                 .map(str::to_string)
-                .ok_or_else(|| format!("{key} holds a non-string"))
+                .ok_or_else(|| format!("{key}[{i}] is not a string"))
         })
         .collect::<Res<Vec<_>>>()
         .map(Some)
@@ -1202,6 +1222,13 @@ cuenca:
             b"auto_merge: &a.b {rules: [{path_touched: x, action: require_human}]}\n",
             b"permissions: {[a]: b}\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
             b"permissions:\n  ? [a]\n  : b\n",
+            // Mapping keys PyYAML folds to the same value in an open section (r11, A).
+            b"permissions:\n  1: first\n  true: second\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+            b"permissions:\n  0: first\n  false: second\n",
+            b"permissions:\n  0x0: first\n  0o0: second\n",
+            b"permissions:\n  1.0: first\n  1: second\n",
+            b"permissions:\n  ? \n  : first\n  ~: second\n",
+            b"permissions:\n  null: first\n  ~: second\n",
             b"permissions: {k\n: v}\n",
             b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, docs/ADR-00?.md]\n",
             b"auto_merge:\n  rules: [{path_touched: |\n CLAUDE.md, action: require_human}]\n",
@@ -1272,6 +1299,7 @@ cuenca:
             // A governance glob is refused if empty or if it does not compile, rather
             // than matching nothing (r7, A).
             b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '[z-ab]']\n",
+            b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '[Z-a]']\n",
             b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '']\n",
             "gates:\n  hard:\n    - {id: \"G4\u{200b}\", pattern: x}\n".as_bytes(),
             // What p9 refuses in `auto_merge` (A15 differential): p9 merges nothing on
@@ -1541,6 +1569,16 @@ cuenca:
             let text = format!("cuenca:\n  gates:\n    {key}: [\"{secretish}\"]\n");
             let e = Policy::parse(text.as_bytes()).unwrap_err();
             assert!(!e.contains("PRODUCTION"), "{e}");
+            assert!(e.contains(&format!("cuenca.gates.{key}[0]")), "{e}");
+            let unquoted = format!("cuenca:\n  gates:\n    {key}: [012345678901234567890]\n");
+            let e = Policy::parse(unquoted.as_bytes()).unwrap_err();
+            assert!(!e.contains("0123456789"), "{e}");
+            let non_str = format!("cuenca:\n  gates:\n    {key}: [123456789012345678]\n");
+            let e = Policy::parse(non_str.as_bytes()).unwrap_err();
+            assert!(
+                !e.contains("1234567890") && e.contains(&format!("cuenca.gates.{key}[0]")),
+                "{e}"
+            );
         }
         let g4 = format!("gates:\n  hard:\n    - id: G4\n      pattern: \"{secretish}\"\n");
         assert!(

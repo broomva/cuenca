@@ -3,11 +3,33 @@
 //!
 //! A line is `{"file", "ok": false, "error"}` when the policy does not compile, else
 //! `{"file", "ok": true, "protected", "governance", "secret_paths"}`: the
-//! `require_human` paths, the governance tier (`null` or its paths and window in
-//! seconds) and the secret-path patterns the policy adds to the built-in one.
+//! `require_human` paths, the governance tier (`null` or its paths, which of
+//! [`SAMPLE_PATHS`] they match, and the window in seconds) and the secret-path patterns
+//! the policy adds to the built-in one.
 
 use cuenca_core::gates::Policy;
 use serde_json::json;
+
+const SAMPLE_PATHS: &[&str] = &[
+    "CLAUDE.md",
+    "claude.md",
+    "x/CLAUDE.md",
+    "AGENTS.md",
+    "METALAYER.md",
+    ".control/policy.yaml",
+    ".control/rcs-parameters.toml",
+    "docs/charter.md",
+    "docs/ADR-001.md",
+    "docs/a.md",
+    "docs/ab.md",
+    "0",
+    "-",
+    "a",
+    "b",
+    "z",
+    "[",
+    "]",
+];
 
 fn main() {
     let builtin = Policy::default().secret_paths.len();
@@ -21,6 +43,11 @@ fn main() {
                 "protected": p.protected,
                 "governance": p.governance.map(|g| json!({
                     "paths": g.paths,
+                    "matches": SAMPLE_PATHS
+                        .iter()
+                        .copied()
+                        .filter(|s| g.matches(s))
+                        .collect::<Vec<_>>(),
                     "window_seconds": g.window_ms / 1000,
                 })),
                 "secret_paths": p.secret_paths[builtin..]

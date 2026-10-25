@@ -26,8 +26,9 @@ echo "baseline  $(tail -1 "$backup/log")"
 
 survived=0
 args=("$@") # mutate's own arguments shadow these, so the --p9 passthrough reads a copy
-mutate() { # old, new: in src/gates/policy.rs
+mutate() { # [file] old, new (default file: src/gates/policy.rs)
   local file=src/gates/policy.rs old=$1 new=$2
+  if [ $# -eq 3 ]; then file=$1; old=$2; new=$3; fi
   current=$file; cp "$file" "$backup/file"
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib
@@ -63,8 +64,12 @@ mutate 'if flow > 0 && !flow_plain_ok(&value) =>' 'if false =>'
 mutate '        .is_some_and(|c| c.is_ascii_alphanumeric() || "_./+".contains(c))' '        .is_some_and(|c| c.is_ascii_alphanumeric() || "_./+-|>:".contains(c))'
 mutate '        && chars.all(|c| c.is_ascii_alphanumeric() || "_./*@+- ".contains(c))' '        && chars.all(|c| c.is_ascii_alphanumeric() || "_./*@+- ?#:".contains(c))'
 mutate '                if key
-                    && matches!(' '                if false
-                    && matches!('
+                    && (matches!(' '                if false
+                    && (matches!('
+mutate 'if !matches!(Yaml::from_str(v), Yaml::String(_))' 'if false'
+mutate src/gates/builtin.rs 'let mut k = 1;' 'let mut k = 0;'
+mutate src/gates/builtin.rs 'if chunks[m - 1].last() <= Some(&'"'"'@'"'"') && chunk.first() >= Some(&'"'"'['"'"') {' 'if false {'
+mutate src/gates/builtin.rs 'pattern.to_lowercase()' 'pattern'
 mutate '                if !plain_scalar_agrees(&value) =>' '                if false =>'
 mutate '    if same.is_match(v) {' '    if true {'
 mutate '                && v.as_bool().is_none()' '                && false'

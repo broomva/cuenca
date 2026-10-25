@@ -329,7 +329,8 @@ pub(super) fn glob(pattern: &str) -> Regex {
 /// `fnmatch` reads differently); a compiled policy has none ([`super::policy`]).
 pub(super) fn try_glob(pattern: &str) -> Result<Regex, regex::Error> {
     let mut re = String::from("(?is)^");
-    let chars: Vec<char> = pattern.chars().collect();
+    // p9 lowercases `pat` before `fnmatch` translates its character classes.
+    let chars: Vec<char> = pattern.to_lowercase().chars().collect();
     let mut i = 0;
     while i < chars.len() {
         match chars[i] {
@@ -350,19 +351,39 @@ pub(super) fn try_glob(pattern: &str) -> Result<Regex, regex::Error> {
                 if j >= chars.len() {
                     re.push_str("\\[");
                 } else {
-                    let body: String = chars[i + 1..j].iter().collect();
-                    let (neg, body) = match body.strip_prefix('!') {
-                        Some(rest) => (true, rest.to_string()),
-                        None => (false, body),
-                    };
+                    let neg = chars[i + 1] == '!';
+                    let body = &chars[if neg { i + 2 } else { i + 1 }..j];
+                    // Split on range `-` as CPython's `fnmatch._translate` does: a
+                    // leading or trailing `-`, or one right after a range, is literal
+                    // (`[--a]` is the range `-..=a`, matching `0`, not set subtraction: r11, A).
+                    let mut chunks: Vec<&[char]> = Vec::new();
+                    let mut cur = 0;
+                    let mut k = 1;
+                    while let Some(pos) = body
+                        .get(k..body.len().saturating_sub(1))
+                        .and_then(|s| s.iter().position(|&c| c == '-'))
+                    {
+                        let dash = k + pos;
+                        chunks.push(&body[cur..dash]);
+                        cur = dash + 1;
+                        k = dash + 3;
+                    }
+                    chunks.push(&body[cur..]);
                     re.push('[');
                     if neg {
                         re.push('^');
                     }
-                    for c in body.chars() {
-                        if c == '-' {
+                    for (m, chunk) in chunks.iter().enumerate() {
+                        if m > 0 {
+                            // p9 runs `fnmatch` on `path.lower()` without `(?i)`, so a
+                            // range across `A..=Z` (`[--a]`) never sees `A..=Z` there;
+                            // under `(?i)` it would also match `a..=z`.
+                            if chunks[m - 1].last() <= Some(&'@') && chunk.first() >= Some(&'[') {
+                                re.push_str("-@\\[");
+                            }
                             re.push('-');
-                        } else {
+                        }
+                        for c in *chunk {
                             re.push_str(&regex::escape(&c.to_string()));
                         }
                     }
@@ -396,6 +417,18 @@ mod tests {
             ("[!ab].txt", "b.txt", false),
             ("[!ab].txt", "c.txt", true),
             ("[a-c].txt", "B.txt", true),
+            ("[--a]", "0", true),
+            ("[--a]", "-", true),
+            ("[--a]", "a", true),
+            ("[--a]", "A", true),
+            ("[--a]", "b", false),
+            ("[-a]", "-", true),
+            ("[-a]", "0", false),
+            ("[a-]", "-", true),
+            ("[a-c-e]", "b", true),
+            ("[a-c-e]", "-", true),
+            ("[a-c-e]", "d", false),
+            ("[]a]", "]", true),
             ("[", "[", true),
             (".control/policy.yaml", ".control/policyxyaml", false),
         ];

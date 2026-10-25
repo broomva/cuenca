@@ -307,8 +307,12 @@ mutate src/gates/policy.rs 'if flow > 0 && !flow_plain_ok(&value) =>' 'if false 
 mutate src/gates/policy.rs '        .is_some_and(|c| c.is_ascii_alphanumeric() || "_./+".contains(c))' '        .is_some_and(|c| c.is_ascii_alphanumeric() || "_./+-|>:".contains(c))' --lib
 mutate src/gates/policy.rs '        && chars.all(|c| c.is_ascii_alphanumeric() || "_./*@+- ".contains(c))' '        && chars.all(|c| c.is_ascii_alphanumeric() || "_./*@+- ?#:".contains(c))' --lib
 mutate src/gates/policy.rs '                if key
-                    && matches!(' '                if false
-                    && matches!(' --lib
+                    && (matches!(' '                if false
+                    && (matches!(' --lib
+mutate src/gates/policy.rs 'if !matches!(Yaml::from_str(v), Yaml::String(_))' 'if false' --lib
+mutate src/gates/builtin.rs 'let mut k = 1;' 'let mut k = 0;' --lib
+mutate src/gates/builtin.rs 'if chunks[m - 1].last() <= Some(&'"'"'@'"'"') && chunk.first() >= Some(&'"'"'['"'"') {' 'if false {' --lib
+mutate src/gates/builtin.rs 'pattern.to_lowercase()' 'pattern' --lib
 mutate src/store.rs '        let bytes = if matches!(entry, Entry::Symlink(_)) {' '        let bytes = if false {' --lib
 
 # Gate engine floors (P20 r1, C): p9's governance tier and the size limit cannot be loosened; an unreadable check manifest fails.

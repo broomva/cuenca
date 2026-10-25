@@ -95,9 +95,35 @@ def load_p9(path: Path):
     return module
 
 
+SAMPLE_PATHS = (
+    "CLAUDE.md", "claude.md", "x/CLAUDE.md", "AGENTS.md", "METALAYER.md",
+    ".control/policy.yaml", ".control/rcs-parameters.toml", "docs/charter.md",
+    "docs/ADR-001.md", "docs/a.md", "docs/ab.md", "0", "-", "a", "b", "z", "[", "]",
+)
+
+
+def non_string_key(node) -> str | None:
+    if isinstance(node, dict):
+        for k, v in node.items():
+            if not isinstance(k, str):
+                return f"a non-string mapping key {k!r}"
+            found = non_string_key(v)
+            if found is not None:
+                return found
+    elif isinstance(node, list):
+        for item in node:
+            found = non_string_key(item)
+            if found is not None:
+                return found
+    return None
+
+
 def pyyaml_secret_paths(data) -> list[str] | str:
     """`gates.hard[id: G4].pattern` and `cuenca.gates.secret_paths` as PyYAML reads
     them, or a string saying why the shape is not one the engine may accept."""
+    bad_key = non_string_key(data)
+    if bad_key is not None:
+        return bad_key
     out: list[str] = []
     gates = data.get("gates")
     if gates is not None:
@@ -150,7 +176,11 @@ def p9_projection(p9, text: str) -> dict:
     gov = None
     if am.gates is not None:
         g = am.gates.governance
-        gov = {"paths": list(g.paths), "window_seconds": g.l3_window_seconds}
+        gov = {
+            "paths": list(g.paths),
+            "matches": [s for s in SAMPLE_PATHS if p9._path_matches(s, g.paths)],
+            "window_seconds": g.l3_window_seconds,
+        }
     return {
         "ok": True,
         "protected": [r.path_touched for r in am.rules
@@ -380,6 +410,14 @@ FIXED = [
     # Round 10, A: the shape two mutants together let through as engine [] vs p9 ['x'].
     "# c auto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
     "note: x\u2028# c auto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    # Round 11, A: non-string mapping keys PyYAML folds to the same value in open mappings,
+    # and character-class globs with a leading `-`, trailing `-`, or chained ranges.
+    "permissions:\n  1: first\n  true: second\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "permissions:\n  0: first\n  false: second\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "permissions:\n  1.0: first\n  1: second\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "permissions:\n  ? \n  : first\n  ~: second\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
+    "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '[--a]', '[-a]', '[a-]', '[a-c-e]']\n",
+    "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '[Z-a]']\n",
 ]
 
 ODD_SCALARS = [
