@@ -1,6 +1,6 @@
 {
-  "acceptance-remaining.json": "1b518bc9ddba3c0a68adc41374b595a0c0c8eae0220f7b39a2a1a66ec5ac0675",
-  "acceptance.json": "e476a38ce4c8a564c7fe584684653ee4c87b1306ed4cc2a9557b27ef92d60d34",
+  "acceptance-remaining.json": "acf979ba8bd3e42bc793683dfd32a8c4a94918ac7a40ab2e7acb402347a11530",
+  "acceptance.json": "d444e04b663dc32d521b9330b11943d84013e68e81ac151ee8dda24deddc766d",
   "acknowledged.json": "acf8e0e505e86886ad2b7235a2e6f19ca05fcf4e850a046c233bb99741e97c13",
   "benchmarks.json": "f25afaa68469811e39074291a36945b8b56d11fe0feb0b5795df2aa34145c3a9",
   "ci-audit.log": "8e1698627b8a1aa368d7df51dd327b4760fcc4a43b8e48226edd152058a9cc51",
@@ -12,6 +12,7 @@
   "ci-msrv.log": "dc64d3cb6346fa82940f08c5e679b4583f0d46e76538e7dade7c9686c8d5e7c6",
   "ci-summary.json": "f0bc4845b7500431f8d115f4f3e1148ea27534ceade4be78550c56ec0b750573",
   "ci-test.log": "94b1a83e2fb02b5a1b3123dd390f4ded594a355eaacc5b9945973ae04732bf20",
+  "cleanup-inventory.json": "e54bf9917b91ec4e6e2be369511eb812773d61651a280c8dcbe4ee3df7e1bb0a",
   "commands.jsonl": "b3a1ab630125d3a3b65c37c6effa8468f7ce32bb4bcd46c76fd348180cfaa67c",
   "deploy-summary.json": "643e8422de556adc7995c5335424b74e364ea9fc1815a0cb4afc9397c8ea82c1",
   "envelope.json": "2aa19b3b4fe78dbd71f07eafca0f6a08cefbf9335d6f3c42a7d049544d037994",

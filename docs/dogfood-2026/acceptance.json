@@ -1,5 +1,5 @@
 {
-  "observed_utc": "2026-10-25T12:47Z",
+  "observed_utc": "2026-10-25T12:50Z",
   "command": "test -s docs/dogfood-2026.md && BROOMVA_WORKSPACE=~/broomva python3 ~/broomva/scripts/cuenca_finish_line_check.py dogfood docs/dogfood-2026.md",
   "exit": 1,
   "stdout": "",

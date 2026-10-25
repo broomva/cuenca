@@ -91,7 +91,9 @@ check for live authority requests, close only a discarded trial PR if still open
 and remove only its retired branch with an expected-SHA lease. Preserve merged
 PR history and verify the archive before removing that trial's scratch state.
 The [workflow guide](dogfood-local-workflow.md#disposable-authority-cleanup) contains
-the exact #30 inventory and conditional cleanup commands. This update performs no
+the exact #30 inventory and conditional cleanup commands. The
+[read-only inventory](dogfood-2026/cleanup-inventory.json) confirms the recorded
+remote export branch still exists at its expected SHA. This update performs no
 remote cleanup.
 
 ## R35 — real MCP workflow and useful GitHub change (pending)
@@ -146,7 +148,8 @@ If main moves, record the rebased candidate and merged result and verify the hea
 change is contained; never infer equality with the original candidate from PR
 status alone. For an ordinary merge also verify head ancestry.
 
-[GitHub checks at the exported head](dogfood-2026/github-pr-30.json) report SUCCESS
+[GitHub checks at the exported head](dogfood-2026/github-pr-30.json) (preserved
+pre-merge snapshot) report SUCCESS
 for Format, Lint, Test (Linux), Test (macOS), MSRV Check, Security Audit,
 Deploy (container), and CodeRabbit. This records observed checks, not a claim that
 all merge reviews/rules have been satisfied. Local verify's empty manifest is
