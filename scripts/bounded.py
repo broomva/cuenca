@@ -56,6 +56,9 @@ def main():
     if not command:
         ap.error("no command")
     os.makedirs(a.dir, exist_ok=True)
+    # mutation-guard.sh starts us in the background, where bash ignores SIGINT and SIGQUIT.
+    # SIGINT gets a handler below; SIGQUIT would stay ignored in every test, so restore it.
+    signal.signal(signal.SIGQUIT, signal.SIG_DFL)
     running = []
     stops = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
 
