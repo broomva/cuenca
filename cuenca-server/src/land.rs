@@ -30,9 +30,11 @@
 //! round and shown at `GET /v1/forks/{fork}/landing`; errors that will not (no commit of
 //! the remote has the base's tree, the branch is someone else's, the holder was revoked,
 //! GitHub refused the push by rule ([`refused_for_good`]), the remote's history fails
-//! fsck, no `git` or `gh` binary) are recorded as `LandingFailed`. Once the cause is
-//! fixed, landing again takes a new draft: a repeated request for the same changeset
-//! is the failed one.
+//! fsck) are recorded as `LandingFailed`. A missing `git` or `gh` binary is retried:
+//! the host can gain it. Once the cause is fixed, landing again takes a new draft
+//! with a changed tree: changeset ids are content-addressed, so the same edit from
+//! that fork is the failed changeset again. A failing fsck has no owner-side fix
+//! yet (BRO-3484).
 //!
 //! Identity: `gh` with the token already on the authority host (spec section 0, "the
 //! shared gh login at first"; the GitHub App is BRO-3305), as git's credential helper
@@ -476,15 +478,17 @@ pub fn github_slug(remote: &str) -> Option<String> {
 
 /// Whether git's `stderr` from a failed call says the remote will refuse it again,
 /// whatever the retry: GitHub's push rules (GH013: push protection, rulesets), its
-/// file size limit (GH001), a token without the `workflow` scope, or a fetched history
-/// that fails `transfer.fsckObjects` (a legacy `badDate`, say). The same commit pushed
-/// or fetched again meets the same refusal.
+/// file size limit (GH001, as an error: over 50 MB it is only a warning), a token not
+/// allowed to touch workflow files (a PAT without the `workflow` scope, an App or
+/// fine-grained token without the `workflows` permission), or a fetched history that
+/// fails `transfer.fsckObjects` (a legacy `badDate`, say). The same commit pushed or
+/// fetched again meets the same refusal.
 fn refused_for_good(stderr: &str) -> bool {
     const MARKERS: [&str; 5] = [
-        "GH001:",
-        "GH013:",
+        "error: GH001:",
+        "error: GH013:",
         "push declined due to repository rule violations",
-        "without `workflow` scope",
+        "to create or update workflow",
         "fsck error",
     ];
     MARKERS.iter().any(|m| stderr.contains(m))
@@ -855,15 +859,7 @@ fn output_within(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
-        .map_err(|e| {
-            let message = format!("running {what}: {e}");
-            // No binary there: every retry would meet the same absence.
-            if e.kind() == std::io::ErrorKind::NotFound {
-                LandError::Fail(message)
-            } else {
-                LandError::Retry(message)
-            }
-        })?;
+        .map_err(|e| LandError::Retry(format!("running {what}: {e}")))?;
     let mut stdin = child.stdin.take();
     let input = input.to_vec();
     let writer = std::thread::spawn(move || {
@@ -943,6 +939,7 @@ mod tests {
             " ! [remote rejected] cp/x -> cp/x (push declined due to repository rule violations)",
             "remote: error: GH001: Large files detected.",
             " ! [remote rejected] cp/x -> cp/x (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)",
+            " ! [remote rejected] cp/x -> cp/x (refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflows` permission)",
             "error: object 1234: badDate: invalid author/committer line - bad date\nfatal: fsck error in packed object",
         ] {
             assert!(refused_for_good(stderr), "{stderr}");
@@ -952,6 +949,7 @@ mod tests {
             "remote: Internal Server Error",
             " ! [rejected] cp/x -> cp/x (stale info)",
             "fatal: the remote end hung up unexpectedly",
+            "remote: warning: GH001: Large files detected. You may want to try Git Large File Storage.\nerror: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502",
         ] {
             assert!(!refused_for_good(stderr), "{stderr}");
         }

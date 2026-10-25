@@ -817,18 +817,37 @@ fn a_remote_history_that_fails_fsck_fails_the_landing() {
     assert!(up.creates().is_empty());
 }
 
-/// No `gh` where the configuration names it: the landing fails, naming the call.
+/// No `gh` where the configuration names it: the host can gain one, so the landing
+/// is retried, with the error naming the call, rather than failed.
 #[test]
-fn a_missing_gh_fails_the_landing() {
+fn a_missing_gh_is_retried() {
     let s = Server::start();
     let tmp = tempfile::tempdir().unwrap();
     let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
-    let (_a1, _id) = requested(&s, &up, Some(&up.url));
+    let (a1, _id) = requested(&s, &up, Some(&up.url));
     let mut config = up.land_config(tmp.path().join("repos"));
     config.gh = tmp.path().join("no-gh-here");
     let _lander = Lander::spawn(s.authority.clone(), config).unwrap();
-    let reason = failed(&s);
-    assert!(reason.starts_with("running gh pr list"), "{reason}");
+    let start = Instant::now();
+    let error = loop {
+        let v: Value = s.get(&a1, "/v1/forks/f1/landing").json().unwrap();
+        if let Some(e) = v["error"].as_str() {
+            break e.to_string();
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "{v}");
+        std::thread::sleep(Duration::from_millis(50));
+    };
+    assert!(error.starts_with("running gh pr list"), "{error}");
+    let step = s
+        .authority
+        .store()
+        .fork(&f1())
+        .unwrap()
+        .unwrap()
+        .landing
+        .unwrap()
+        .step;
+    assert!(!matches!(step, LandingStep::Failed { .. }), "{step:?}");
 }
 
 /// `gh pr list --head cp/<id>` also lists pull requests from other people's forks
