@@ -54,8 +54,8 @@ class Trial:
         (self.root / "tmp").mkdir()
         self.fixture = self.root / "tailscale-fixture"
         self.fixture.write_text('#!/bin/sh\ncase "$1" in\n'
-                                'whois) echo \'{"Node":{"StableID":"dogfood-local-node"}}\' ;;\n'
-                                'status) echo \'{"Self":{"ID":"dogfood-local-node"}}\' ;;\n'
+                                'whois) echo \'{"Node":{"StableID":"dogfoodlocalnode"}}\' ;;\n'
+                                'status) echo \'{"Self":{"ID":"dogfoodlocalnode"}}\' ;;\n'
                                 '*) exit 1 ;;\nesac\n')
         self.fixture.chmod(0o700)
         with socket.socket() as s:
@@ -113,7 +113,7 @@ class Trial:
 
     def login(self):
         key = self.admin("key", "mint", "dogfood-mac", "--kind", "agent", "--node",
-                         "dogfood-local-node", "--location", "scratch", "--location", "cuenca", private=True)
+                         "dogfoodlocalnode", "--location", "scratch", "--location", "cuenca", private=True)
         config = self.root / "config.json"
         config.write_text(json.dumps({"url": self.url, "token": key["token"]}))
         config.chmod(0o600)
@@ -229,7 +229,7 @@ class Trial:
             state = self.root / name
             state.mkdir()
             key = self.admin("key", "mint", name, "--kind", "agent", "--node",
-                             "dogfood-local-node", "--location", "scratch", private=True)
+                             "dogfoodlocalnode", "--location", "scratch", private=True)
             config = state / "config.json"
             config.write_text(json.dumps({"url": self.url, "token": key["token"]}))
             config.chmod(0o600)
