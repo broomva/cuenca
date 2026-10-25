@@ -4,7 +4,9 @@ mod fixture;
 use cuenca_core::{LocationName, Store};
 use cuenca_server::materialise::Volume;
 use cuenca_tree::Tree;
+use sha2::{Digest, Sha256};
 use std::fs;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
@@ -181,13 +183,44 @@ fn main() -> anyhow::Result<()> {
     // Forge a committed point after a complete backup: never silently fall back.
     let forged = root.join("forged");
     copy_tree(&baseline, &forged)?;
+    let mut commits: Vec<_> = fs::read_dir(forged.join("manifests"))?
+        .map(|e| e.map(|e| e.path()))
+        .collect::<std::io::Result<_>>()?;
+    commits.sort();
+    let envelope_path = commits.last().unwrap();
+    let mut envelope: serde_json::Value = serde_json::from_slice(&fs::read(envelope_path)?)?;
+    let cipher = fs::read(forged.join("objects").join(format!(
+        "{}.age",
+        envelope["manifest"]["sha256"].as_str().unwrap()
+    )))?;
+    let decrypt_key: age::x25519::Identity = fs::read_to_string(&identity)?
+        .trim()
+        .parse()
+        .map_err(anyhow::Error::msg)?;
+    let mut reader = age::Decryptor::new(cipher.as_slice())?
+        .decrypt(std::iter::once(&decrypt_key as &dyn age::Identity))?;
+    let mut plain = Vec::new();
+    reader.read_to_end(&mut plain)?;
+    let mut signed: serde_json::Value = serde_json::from_slice(&plain)?;
+    signed["signature"] = serde_json::Value::String("00".repeat(64));
+    let mut cipher = Vec::new();
+    let recipient = decrypt_key.to_public();
+    let mut writer =
+        age::Encryptor::with_recipients(std::iter::once(&recipient as &dyn age::Recipient))?
+            .wrap_output(&mut cipher)?;
+    writer.write_all(&serde_json::to_vec(&signed)?)?;
+    writer.finish()?;
+    let hash = hex::encode(Sha256::digest(&cipher));
+    fs::write(forged.join("objects").join(format!("{hash}.age")), &cipher)?;
+    envelope["manifest"]["sha256"] = serde_json::Value::String(hash.clone());
+    envelope["manifest"]["size"] = serde_json::Value::from(cipher.len());
     fs::write(
         forged
             .join("manifests")
-            .join(format!("{:020}-{}.json", after.len() + 1, "0".repeat(64))),
-        b"{\"format_version\":1,\"manifest\":{\"sha256\":\"forged\",\"size\":0}}",
+            .join(format!("{:020}-{hash}.json", after.len() + 1)),
+        serde_json::to_vec(&envelope)?,
     )?;
-    let status = Command::new(&bin)
+    let out = Command::new(&bin)
         .args([
             "restore",
             "--objects",
@@ -199,16 +232,14 @@ fn main() -> anyhow::Result<()> {
             "--trust-key",
             trust.to_str().unwrap(),
         ])
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()?;
+        .output()?;
     anyhow::ensure!(
-        !status.success() && !root.join("forged-restore").exists(),
-        "forged manifest accepted"
+        !out.status.success()
+            && !root.join("forged-restore").exists()
+            && String::from_utf8_lossy(&out.stderr).contains("invalid authority signature"),
+        "forged manifest was not refused by signature verification"
     );
-    println!(
-        "forged_manifest=refused (encrypted authority-signature forgery also covered by unit test)"
-    );
+    println!("forged_manifest=refused reason=invalid_authority_signature fallback=refused");
     println!(
         "DOGFOOD source_offset={new_offset:?} previous_offset={old_offset:?} restored_offset={new_offset:?} verified_blobs={count} old_fork_ids={} new_fork_ids={} kill_boundaries={} wall_ms={}",
         forks.join(","),
