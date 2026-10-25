@@ -5,6 +5,7 @@
 //! <volume>/main/<location>/   the location's main
 //! <volume>/forks/<fork>/      the fork's head: its latest draft, or its base before one
 //! <volume>/forks/owner-<x>/   an owner fork: written in place from Finder, snapshotted
+//! <volume>/status/<fork>.txt  why an owner fork's snapshots fail, while they do
 //! <volume>/.cuenca/           the materialiser's own state, 0700: staging and records
 //! ```
 //!
@@ -40,6 +41,9 @@
 //! [`VolumeConfig::snapshot_interval`] (10 s by default; the spec's row is 60 s). A file
 //! the authority cannot read, or one that keeps changing, fails that fork's snapshot
 //! loudly, naming the path, and nothing of it is published until a later pass succeeds.
+//! So that the owner sees it in Finder, not only in the authority's log, the failure is
+//! also written to `status/<fork>.txt` (read-only, like `main/`), which the next
+//! snapshot that succeeds removes.
 //!
 //! # Modes
 //!
@@ -229,6 +233,8 @@ pub struct Volume {
     retry_after: Duration,
     /// Each owner fork's stat cache, so a snapshot reads only files that changed.
     caches: HashMap<ForkName, cuenca_fs::StatCache>,
+    /// The error each owner fork's status file holds, as written by this materialiser.
+    statuses: HashMap<ForkName, String>,
     /// The lock that keeps this the volume's only materialiser, held while it lives.
     _lock: File,
     next_staging: u64,
@@ -263,6 +269,8 @@ impl Volume {
         let state = private.join("state");
         for dir in ["main", "forks"] {
             fs::create_dir_all(state.join(dir))?;
+        }
+        for dir in ["main", "forks", STATUS] {
             let shown = root.join(dir);
             fs::create_dir_all(&shown)?;
             fs::set_permissions(&shown, fs::Permissions::from_mode(DIR_MODE))?;
@@ -277,6 +285,7 @@ impl Volume {
             failed: HashMap::new(),
             retry_after: RETRY_AFTER,
             caches: HashMap::new(),
+            statuses: HashMap::new(),
             _lock: lock,
             next_staging: 0,
         })
@@ -472,9 +481,53 @@ impl Volume {
             return None;
         }
         let cache = self.caches.entry(fork.name.clone()).or_default();
-        Some(snapshot_one(store, fork, &dir, cache))
+        let result = snapshot_one(store, fork, &dir, cache);
+        if let Err(e) = self.set_status(&fork.name, result.as_ref().err()) {
+            tracing::warn!(fork = %fork.name, error = %e, "could not update the fork's status file");
+        }
+        Some(result)
+    }
+
+    /// Write why `fork`'s snapshot failed to `status/<fork>.txt`, or remove the file
+    /// once a snapshot succeeds. The file is staged and renamed into place, so a reader
+    /// sees a whole one; it is rewritten only when the error changes, so its
+    /// modification time is when this failure was first seen.
+    fn set_status(&mut self, fork: &ForkName, error: Option<&String>) -> io::Result<()> {
+        let path = self.root.join(STATUS).join(format!("{fork}.txt"));
+        let Some(error) = error else {
+            self.statuses.remove(fork);
+            return match fs::remove_file(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            };
+        };
+        if self.statuses.get(fork) == Some(error) {
+            return Ok(());
+        }
+        let text = format!(
+            "The authority cannot snapshot owner fork {fork}:\n\n  {error}\n\nNothing \
+             written to forks/{fork}/ is published until this is fixed. The authority tries \
+             again every few seconds and removes this file once it succeeds; the file's \
+             modification time is when this failure was first seen.\n"
+        );
+        let staged = self.staging.join(self.next_staging.to_string());
+        self.next_staging += 1;
+        let written = (|| {
+            fs::write(&staged, text)?;
+            fs::set_permissions(&staged, fs::Permissions::from_mode(FILE_MODE))?;
+            fs::rename(&staged, &path)
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&staged);
+        }
+        written?;
+        self.statuses.insert(fork.clone(), error.clone());
+        Ok(())
     }
 }
+
+/// The volume's directory of owner fork status files.
+const STATUS: &str = "status";
 
 /// The file content a snapshot of an owner fork keeps from its read and uploads as it
 /// was hashed, so a client still writing a file cannot fail the upload. A larger file,
