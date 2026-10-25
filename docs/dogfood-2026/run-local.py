@@ -192,7 +192,7 @@ class Trial:
         self.metrics["primary_verify"] = self.call("verify", dir=str(co))
         self.metrics["primary_land_started_utc"] = utc()
         start = time.monotonic()
-        self.metrics["primary_land"] = self.call("land", dir=str(co), wait=0)
+        self.metrics["primary_land"] = self.call("land", dir=str(co))
         if self.args.github:
             # An open PR is the finish of this builder's authority, never a merge.
             self.metrics["primary_land"], _ = self.cli("land", "--dir", str(co), "--wait", "120")
@@ -206,7 +206,7 @@ class Trial:
         verify = self.call("verify", dir=str(waitco))
         assert verify["passed"] and len(verify["checks"]) == 1, verify
         self.metrics["scratch_verify"] = verify
-        self.metrics["owner_wait"] = self.call("land", dir=str(waitco), wait=0)
+        self.metrics["owner_wait"] = self.call("land", dir=str(waitco))
         assert self.metrics["owner_wait"]["waiting_for"] == "owner"
         save(self.out / "workflow.json", self.metrics)
 
@@ -289,9 +289,9 @@ class Trial:
             save(self.out / f"log-{name}.json", log)
             records = [r for r in log["records"] if r["event"]["event"] == "draft_published"]
             # Retain raw ids/offsets; compare ids, not just totals.
-            ids = [r["event"]["changeset"]["id"] for r in records]
+            ids = [r["event"]["id"] for r in records]
             expected = [p for a in acknowledged if a["fork"] == name for p in a["published"]]
-            expected_ids = [p if isinstance(p, str) else p["changeset"] for p in expected]
+            expected_ids = [p if isinstance(p, str) else p["id"] for p in expected]
             counts = Counter(ids)
             audit.append({"fork": name, "acknowledged_ids": expected_ids,
                           "journal_ids": ids, "lost": sum(counts[x] == 0 for x in expected_ids),
