@@ -1,0 +1,31 @@
+{
+  "observed_utc": "2026-10-25T07:25:57Z",
+  "os": "26.5.2",
+  "architecture": "arm64",
+  "authority_identity": "local Cuenca process, current macOS user; loopback fixture dogfoodlocalnode",
+  "runner_identity": "same macOS user; phase-2 advisory checks, no sandbox custody proof",
+  "bind": "127.0.0.1 (ephemeral local port; see commands.jsonl)",
+  "state": "/Volumes/Broomva/scratch/bro-3259/trial-5/authority",
+  "source_sha": "d2f3b92ae3c5af53ece908aa7cf1c668f5b0cda3",
+  "artifacts": {
+    "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca": "82ad074fd352a654e8f963be895d3b982c84e398e39d157cfada032d11cc800b",
+    "/Volumes/Broomva/scratch/bro-3259/trial-5/tailscale-fixture": "1e95ccbceb4447476c633fa5d29904fcfe161c0bf791ec39165bd4c08411d3f1",
+    "/Volumes/Broomva/scratch/bro-3259/trial-5/seed/.cuenca/checks.toml": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+  },
+  "credential_values": "omitted; scratch authority and client configs stay outside Git",
+  "authority_argv": [
+    "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+    "serve",
+    "--state",
+    "/Volumes/Broomva/scratch/bro-3259/trial-5/authority",
+    "--bind",
+    "127.0.0.1:60615",
+    "--unsafe-bind",
+    "--admin-socket",
+    "/Volumes/Broomva/scratch/bro-3259/trial-5/admin.sock",
+    "--tailscale",
+    "/Volumes/Broomva/scratch/bro-3259/trial-5/tailscale-fixture",
+    "--volume",
+    "/Volumes/Broomva/scratch/bro-3259/trial-5/volume"
+  ]
+}

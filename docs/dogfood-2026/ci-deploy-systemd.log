@@ -1,0 +1,3 @@
+deploy/test-systemd.sh: line 8: $1: unbound variable
+deploy/test-systemd.sh: line 8: cd: null directory
+deploy/test-systemd.sh: line 8: $1: unbound variable

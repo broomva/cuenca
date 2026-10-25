@@ -1,0 +1,12 @@
+{
+  "observed_utc": "2026-10-25T07:25:57Z",
+  "pr": "https://github.com/broomva/cuenca/pull/30",
+  "candidate_tree": "ccdf02aa132117edd64fd9346837efef120dc422",
+  "export_commit": "f340cb61cf44db2442202a1a0254de9f03bcbc26",
+  "export_tree": "ccdf02aa132117edd64fd9346837efef120dc422",
+  "candidate_equals_export_tree": true,
+  "merged_sha": null,
+  "candidate_equals_merged_tree": null,
+  "pending_reason": "PR is open; builder must not merge",
+  "github_commit_url": "https://github.com/broomva/cuenca/commit/f340cb61cf44db2442202a1a0254de9f03bcbc26"
+}
