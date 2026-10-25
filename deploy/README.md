@@ -76,3 +76,31 @@ Re-running `install.sh` with the same arguments changes nothing except restartin
 - **After a reboot:** both units are enabled and come back on their own. `check.sh` confirms it.
 - **The volume looks wrong:** the volume is derived from the log. Stop `cuenca`, move the volume aside, and start `cuenca`. It rebuilds `main/` and every agent fork. Owner forks are written from Finder, so move them back from the old volume before deleting it, and the next snapshot picks them up.
 - **Lost state:** restore the log and blobs from backup (BRO-3258).
+
+## Local backup/restore fixture (BRO-3258)
+
+Build `cargo build -p cuenca-server --bin cuenca-backup`, then run
+`bash deploy/restore-drill.sh` on the SSD. The drill generates **TEST ONLY** age and
+signing keys under `/Volumes/Broomva/scratch/bro-3258`, kills backup subprocesses
+at each publication boundary, restores and verifies every reachable historical
+blob, opens the owner's fork and resumes an intent once. Its last line reports
+fixture path; keys and plaintext stay there, never in a PR. Remove that disposable
+fixture after retaining the nonsecret receipt. The caller may set
+`CUENCA_DRILL_SCRATCH`, `CARGO_TARGET_DIR`, or `CUENCA_BACKUP_BIN`.
+
+For a stopped throwaway authority, `bash deploy/backup.sh --source <state/store>
+--objects <fixture> --recipient <public-recipient-file> --signing-key <seed-file>`.
+Restore with `cuenca-backup restore --objects <fixture> --destination <new-store>
+--identity <owner-mediated-identity-file> --trust-key <independently-pinned-public-key>`.
+The destination parent must exist; an existing destination is refused. Do not take
+trust from the backup itself. The CLI must not open a running authority's redb
+store. The library exports one consistent read snapshot through its live handle.
+After independent provisioning and credential minting, use the restored directory
+as the authority's `state/store`; cached Git exports and volume projections rebuild.
+
+See [local format ADR](../docs/adr/2026-10-25-local-backup-fixture.md) for format,
+resource limits and external custody. Mutation slice:
+`CUENCA_MUT_TMPDIR=/Volumes/Broomva/scratch/b3258m bash
+cuenca-server/scripts/mutation-check.sh --restore-only` (keep the run path ≤64 bytes).
+
+node stays incomplete: R2 restore pending the backup-custody owner grant; RPO timer waits on BRO-3461
