@@ -30,8 +30,9 @@
 //! round and shown at `GET /v1/forks/{fork}/landing`; errors that will not (no commit of
 //! the remote has the base's tree, the branch is someone else's, the holder was revoked,
 //! GitHub refused the push by rule ([`refused_for_good`]), the remote's history fails
-//! fsck, no `git` or `gh` binary) are recorded as `LandingFailed`. Asking again after
-//! the cause is fixed starts a new landing.
+//! fsck, no `git` or `gh` binary) are recorded as `LandingFailed`. Once the cause is
+//! fixed, landing again takes a new draft: a repeated request for the same changeset
+//! is the failed one.
 //!
 //! Identity: `gh` with the token already on the authority host (spec section 0, "the
 //! shared gh login at first"; the GitHub App is BRO-3305), as git's credential helper
