@@ -1361,3 +1361,59 @@ fn a_verify_is_recorded_for_the_holder_against_the_bases_list() {
         404
     );
 }
+
+/// BRO-3336: a fork grant names a fork, and fork names are first-come. The grant
+/// reads a fork only of a location the key is granted too, so whoever creates the
+/// granted name first, from a location the grantee is not granted, shows it nothing.
+#[test]
+fn a_fork_grant_does_not_read_a_fork_of_a_location_it_is_not_granted() {
+    let s = Server::start();
+    s.add_location("l1");
+    s.add_location("l2");
+    // a4 is granted l1 and a fork name that does not exist yet.
+    let a4 = s.mint("a4", Agent, NB, grant(&["l1"], &["planned"]));
+    // a1 is granted l2 and creates that name first, from l2.
+    let a1 = s.mint("a1", Agent, NA, grant(&["l2"], &[]));
+    s.whois.node(NA);
+    let r = s.post(
+        &a1,
+        "/v1/forks",
+        json!({ "fork": "planned", "location": "l2" }),
+    );
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let cs = s.write(&a1, &Tree::new(), &[("l2-secret.txt", b"l2 only\n")]);
+    assert_eq!(s.publish(&a1, "planned", 1, &cs).status(), 200);
+    s.whois.node(NB);
+    for path in [
+        "/v1/forks/planned",
+        "/v1/forks/planned/tree",
+        "/v1/forks/planned/history",
+    ] {
+        let r = s.get(&a4, path);
+        assert_eq!(r.status(), 404, "{path}");
+        assert!(!r.text().unwrap().contains("l2-secret"), "{path}");
+    }
+    let listed: Value = s.get(&a4, "/v1/forks").json().unwrap();
+    assert_eq!(listed, json!([]), "{listed}");
+    // Forking it reads it, so that is refused as absence too.
+    let r = s.post(
+        &a4,
+        "/v1/forks",
+        json!({ "fork": "a4-copy", "from": "planned" }),
+    );
+    assert_eq!(r.status(), 404);
+    // The same grant reads the name when it is a fork of l1.
+    let s2 = Server::start();
+    s2.add_location("l1");
+    let a4 = s2.mint("a4", Agent, NB, grant(&["l1"], &["planned"]));
+    let a1 = s2.mint("a1", Agent, NA, grant(&["l1"], &[]));
+    s2.whois.node(NA);
+    let r = s2.post(
+        &a1,
+        "/v1/forks",
+        json!({ "fork": "planned", "location": "l1" }),
+    );
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    s2.whois.node(NB);
+    assert_eq!(s2.get(&a4, "/v1/forks/planned").status(), 200);
+}
