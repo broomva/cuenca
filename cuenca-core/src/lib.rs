@@ -79,4 +79,4 @@ pub use state::{
     Export, Fork, Landing, LandingStep, Location, MAX_LANDING_TEXT, MainMove, Verified,
     export_branch,
 };
-pub use store::{BlobBatch, BlobInfo, Published, ReplaySummary, Snapshot, Store};
+pub use store::{BlobBatch, BlobInfo, JournalPrefix, Published, ReplaySummary, Snapshot, Store};

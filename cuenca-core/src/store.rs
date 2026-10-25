@@ -185,6 +185,73 @@ impl Store {
         Ok(txn)
     }
 
+    /// Export a stable journal prefix and all historical trees it references from
+    /// one redb read transaction. Blobs are immutable and never pruned.
+    pub fn export_prefix(&self) -> Result<JournalPrefix> {
+        let txn = self.db.begin_read()?;
+        let records = txn.open_table(LOG)?.iter()?.map(|row| {
+            let (k, v) = row?;
+            decode_record(k.value(), v.value())
+        }).collect::<Result<Vec<_>>>()?;
+        let table = txn.open_table(TREES)?;
+        let mut trees = BTreeMap::new();
+        for oid in prefix_roots(&records) {
+            trees.insert(oid, load_tree(&table, oid)?);
+        }
+        Ok(JournalPrefix { records, trees })
+    }
+
+    /// Rebuild projections from a verified backup, preserving offsets and times.
+    /// Refuses a nonempty store. Admission and transition rules still apply; all
+    /// journal/projection/tree writes commit together, or none do.
+    pub fn import_prefix(&self, prefix: &JournalPrefix) -> Result<()> {
+        for (oid, tree) in &prefix.trees {
+            if tree.git_tree_id() != *oid { return Err(CoreError::CorruptTree(*oid)); }
+            self.check_entries(tree.entries())?;
+        }
+        let txn = self.begin()?;
+        let mut log = txn.open_table(LOG)?;
+        if !log.is_empty()? {
+            return Err(CoreError::Inconsistent("restore needs an empty store".into()));
+        }
+        let mut trees = txn.open_table(TREES)?;
+        for tree in prefix.trees.values() { store_tree(&mut trees, tree)?; }
+        let mut view = Tables {
+            locations: txn.open_table(LOCATIONS)?,
+            forks: txn.open_table(FORKS)?,
+            changesets: txn.open_table(CHANGESETS)?,
+            revoked: txn.open_table(REVOKED)?,
+        };
+        for (expected, record) in prefix.records.iter().enumerate() {
+            if record.offset != expected as u64 {
+                return Err(CoreError::CorruptLog { offset: record.offset, reason: "restore offset gap".into() });
+            }
+            match &record.event {
+                Event::LocationAdded { remote, .. } => {
+                    if let Some(remote) = remote { check_remote(remote)?; }
+                }
+                Event::DraftPublished { changeset, id, .. } | Event::DraftFenced { changeset, id, .. } => {
+                    if ChangesetId::of(changeset) != *id {
+                        return Err(CoreError::Inconsistent("restore changeset id".into()));
+                    }
+                    let target = changeset.apply(&load_tree(&trees, changeset.base)?)?;
+                    if target != load_tree(&trees, changeset.target)? {
+                        return Err(CoreError::CorruptTree(changeset.target));
+                    }
+                }
+                _ => {}
+            }
+            if !matches!(apply(&mut view, record.offset, &record.event)?, Applied::Fresh) {
+                return Err(CoreError::Inconsistent("restore duplicated event".into()));
+            }
+            log.insert(record.offset, to_json(record).as_slice())?;
+        }
+        for oid in prefix_roots(&prefix.records) { load_tree(&trees, oid)?; }
+        drop(view); drop(trees); drop(log);
+        txn.commit()?;
+        Ok(())
+    }
+
     // ---- blobs ------------------------------------------------------------------
 
     /// Ingest a blob that claims to be `claimed`, streaming `size` bytes from
@@ -1021,6 +1088,24 @@ fn decode_record(offset: u64, bytes: &[u8]) -> Result<Record> {
         });
     }
     Ok(record)
+}
+
+/// Version-independent journal export. The backup envelope owns format versioning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JournalPrefix {
+    pub records: Vec<Record>,
+    pub trees: BTreeMap<GitOid, Tree>,
+}
+
+fn prefix_roots(records: &[Record]) -> std::collections::BTreeSet<GitOid> {
+    records.iter().flat_map(|r| match &r.event {
+        Event::LocationAdded { main, .. } => vec![*main],
+        Event::ForkCreated { base, .. } | Event::ForkBranched { base, .. } => vec![*base],
+        Event::DraftPublished { changeset, .. } | Event::DraftFenced { changeset, .. } => vec![changeset.base, changeset.target],
+        Event::VerifyRecorded { base, candidate, .. } => vec![*base, *candidate],
+        _ => vec![],
+    }).collect()
 }
 
 /// The store at one moment ([`Store::snapshot`]).
