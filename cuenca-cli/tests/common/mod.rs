@@ -369,7 +369,8 @@ impl Upstream {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, content).unwrap();
         }
-        git(&work, &["add", "-A"]);
+        // Explicit fixture files must not disappear because of a host global ignore.
+        git(&work, &["add", "--force", "-A"]);
         git(&work, &["commit", "-q", "-m", "init"]);
         git(
             dir.path(),

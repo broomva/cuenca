@@ -45,7 +45,12 @@ jobs:
         with:
           toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
+      # Worktree bootstrap refuses symlinks in every supplied path component.
+      # Use a physical temp path (macOS may supply a /var -> /private alias).
+      - run: |
+          mkdir -p "$RUNNER_TEMP/cuenca"
+          export TMPDIR="$(cd "$RUNNER_TEMP/cuenca" && pwd -P)"
+          cargo test --workspace --locked
 
   test-macos:
     name: Test (macOS)
@@ -56,7 +61,12 @@ jobs:
         with:
           toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
+      # Worktree bootstrap refuses symlinks in every supplied path component.
+      # Use a physical temp path (macOS may supply a /var -> /private alias).
+      - run: |
+          mkdir -p "$RUNNER_TEMP/cuenca"
+          export TMPDIR="$(cd "$RUNNER_TEMP/cuenca" && pwd -P)"
+          cargo test --workspace --locked
 
   msrv:
     name: MSRV Check

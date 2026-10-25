@@ -178,6 +178,11 @@ pub fn prepare(dest: &Path) -> anyhow::Result<PathBuf> {
         let _probe =
             tempfile::tempfile_in(&root).context("worktree destination is not writable")?;
     }
+    // A new worktree and sibling staging directory also need a writable parent.
+    let parent = root
+        .parent()
+        .context("worktree destination has no parent")?;
+    let _probe = tempfile::tempfile_in(parent).context("worktree parent is not writable")?;
     Local::prepare_root(root)
 }
 
