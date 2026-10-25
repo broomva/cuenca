@@ -26,8 +26,18 @@ cuenca --json worktree task-124 "$HOME/cuenca-forks/task-124"
 `worktree FORK DIR` and `fork --checkout DIR` produce real detached Git worktrees.
 Their synthetic commit/index matches the full Cuenca fork, including content
 `.gitignore` excludes. The destination must be missing or empty, with an existing
-parent; symlink paths, existing Cuenca checkouts and nested Cuenca checkouts are
-refused. A failed `fork --checkout` keeps the new fork: retry with `worktree`.
+parent. Every user-supplied path component is checked without following links;
+`link/`, `link/.`, `link//`, `link/new`, and symlinked ancestors are refused.
+Use physical absolute paths (for example `pwd -P`), including for temporary roots.
+Existing Cuenca checkouts, nested checkouts and read-only empty destinations are
+also refused. `fork --checkout` validates the destination before creating a fork.
+Failures after remote creation retain the fork for retry with `worktree`.
+
+`worktree` and `fork --checkout` are **CLI-only host bootstrap verbs**. They are
+not tools/options in `cuenca mcp`; run them on the host before starting an MCP
+session in the resulting directory. The creation report includes `clean` and
+`ignored`, as plain checkout does, and persists the same stat cache. The scanner's
+normal racy-mtime rule still rehashes files too new to cache safely.
 
 The JSON result gives `root`, `fork`, `head` (Cuenca tree), `commit` (synthetic Git
 commit), and `git_dir` (private backing store). It has no Git remote or upstream
@@ -131,3 +141,29 @@ move. Removing a Git worktree does not release a Cuenca fork.
 First checkout cost is proportional to all fork files and Git object ingestion;
 package installation is separate. See the [BRO-3311 dogfood receipt](dogfood-bro-3311.md) for measured
 local timings, actual harness output, and launch/deployment limits.
+
+
+## Reclaim a stale private Git store
+
+Deleting/recreating a checkout path does not remove its old private repository.
+This is deliberate: it may hold local-only commits worth recovering, and a reused
+path does not authorize deleting them. Stop the harness, check Cuenca's queued
+snapshots separately, and inspect the exact old `git_dir` from the creation report.
+The following commands operate on that one store, never all `repo-*` directories:
+
+```sh
+old_store=/absolute/path/from/the/old/report/git_dir
+# Inspect the old detached commits before pruning missing working directories.
+git --git-dir="$old_store" worktree list --porcelain
+git --git-dir="$old_store" reflog show --all
+git --git-dir="$old_store" worktree prune --dry-run --expire=now
+# Only after confirming the original checkout is gone and nothing needs recovery:
+git --git-dir="$old_store" worktree prune --expire=now
+git --git-dir="$old_store" worktree list --porcelain
+# Proceed only when the listing contains just the bare store, no live worktree:
+rm -ri -- "$old_store"
+```
+
+A recreated worktree has a different `git_dir`; do not remove that live store or the
+checkout registration/outbox. This Git cleanup neither publishes queued snapshots
+nor releases a Cuenca fork. See ADR 0001 for the retention decision.
