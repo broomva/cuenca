@@ -25,7 +25,20 @@ guard_repo=$(git rev-parse --show-toplevel)
 guard_lock=$(git rev-parse --absolute-git-dir)/cuenca-mutation.lock
 exec 9>>"$guard_lock"
 if ! python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; then
-  echo "mutation-guard: another mutation sweep runs in $guard_repo (pid $(cat "$guard_lock" 2>/dev/null || echo unknown)); wait for it to finish" >&2
+  # The file names the holder's shell pid and, once known, its pgid file. bounded.py
+  # inherits fd 9, so a SIGKILLed sweep's test runner keeps the lock until its tests
+  # exit; that is meant (they still build in the checkout), but then the pid is dead.
+  read -r guard_holder guard_holder_pgid <"$guard_lock" 2>/dev/null
+  if [ -n "$guard_holder" ] && ps -p "$guard_holder" >/dev/null 2>&1; then
+    echo "mutation-guard: another mutation sweep runs in $guard_repo (pid $guard_holder); wait for it to finish" >&2
+  else
+    echo "mutation-guard: the sweep that locked $guard_repo (pid ${guard_holder:-unknown}) is gone, but an orphaned test runner still holds $guard_lock" >&2
+    if [ -n "$guard_holder_pgid" ] && [ -s "$guard_holder_pgid" ]; then
+      echo "  its tests run as process group $(cat "$guard_holder_pgid"): kill -KILL -- -$(cat "$guard_holder_pgid")" >&2
+    else
+      echo "  find it with: lsof $guard_lock" >&2
+    fi
+  fi
   exit 2
 fi
 echo $$ >"$guard_lock"
@@ -67,6 +80,7 @@ fi
 # The script's own backups and logs sit in .backup, which bounded() keeps.
 guard_backup=$guard_dir/.backup
 mkdir -p "$guard_backup"
+echo "$$ $guard_backup/pgid" >"$guard_lock"
 export TMPDIR=$guard_dir
 # A group left behind by a SIGKILLed bounded.py. Call before restoring the source, so an
 # orphaned cargo cannot rewrite it afterwards.
