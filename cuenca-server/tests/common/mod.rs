@@ -292,16 +292,18 @@ key=$(printf %s "$head" | tr / _)
 mkdir -p "$DIR/prs"
 case "$cmd" in
   "pr list")
+    # A pull request from someone's fork with the same branch name, listed first.
+    cross=$(cat "$DIR/prs/$key.cross" 2>/dev/null)
     if [ -f "$DIR/prs/$key" ]; then
       n=$(cat "$DIR/prs/$key")
       oid=$(cat "$DIR/prs/$key.oid" 2>/dev/null || git --git-dir="$REMOTE" rev-parse "refs/heads/$head")
-      printf '[{{"number":%s,"url":"https://github.com/%s/pull/%s","headRefOid":"%s","headRefName":"%s"}}]\n' "$n" "$repo" "$n" "$oid" "$head"
+      printf '[%s{{"number":%s,"url":"https://github.com/%s/pull/%s","headRefOid":"%s","headRefName":"%s","isCrossRepository":false}}]\n' "${{cross:+$cross,}}" "$n" "$repo" "$n" "$oid" "$head"
     else
-      echo '[]'
+      printf '[%s]\n' "$cross"
     fi ;;
   "pr create")
     cat > "$DIR/body.$key"
-    n=$(( $(ls "$DIR/prs" | grep -cv '\.oid$') + 1 ))
+    n=$(( $(ls "$DIR/prs" | grep -cv '\.') + 1 ))
     echo "$n" > "$DIR/prs/$key"
     echo "$head $base $repo" >> "$DIR/creates.log"
     echo "https://github.com/$repo/pull/$n" ;;

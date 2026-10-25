@@ -28,8 +28,13 @@
 //!
 //! Errors that may pass (the network, GitHub, a full disk) are retried on the next
 //! round and shown at `GET /v1/forks/{fork}/landing`; errors that will not (no commit of
-//! the remote has the base's tree, the branch is someone else's, the holder was revoked)
-//! are recorded as `LandingFailed`.
+//! the remote has the base's tree, the branch is someone else's, the holder was revoked,
+//! GitHub refused the push by rule ([`refused_for_good`]), the remote's history fails
+//! fsck) are recorded as `LandingFailed`. A missing `git` or `gh` binary is retried:
+//! the host can gain it. Once the cause is fixed, landing again takes a new draft
+//! with a changed tree: changeset ids are content-addressed, so the same edit from
+//! that fork is the failed changeset again. A failing fsck has no owner-side fix
+//! yet (BRO-3484).
 //!
 //! Identity: `gh` with the token already on the authority host (spec section 0, "the
 //! shared gh login at first"; the GitHub App is BRO-3305), as git's credential helper
@@ -190,6 +195,8 @@ impl Worker {
                 return;
             }
             let Some(landing) = fork.landing.clone() else {
+                // A takeover dropped the request: its last error is not the fork's now.
+                self.a.set_landing_error(&fork.name, None);
                 continue;
             };
             if !in_flight(&landing.step) {
@@ -469,6 +476,24 @@ pub fn github_slug(remote: &str) -> Option<String> {
     (ok(owner) && ok(repo)).then(|| format!("{owner}/{repo}"))
 }
 
+/// Whether git's `stderr` from a failed call says the remote will refuse it again,
+/// whatever the retry: GitHub's push rules (GH013: push protection, rulesets), its
+/// file size limit (GH001, as an error: over 50 MB it is only a warning), a token not
+/// allowed to touch workflow files (a PAT without the `workflow` scope, an App or
+/// fine-grained token without the `workflows` permission), or a fetched history that
+/// fails `transfer.fsckObjects` (a legacy `badDate`, say). The same commit pushed or
+/// fetched again meets the same refusal.
+fn refused_for_good(stderr: &str) -> bool {
+    const MARKERS: [&str; 5] = [
+        "error: GH001:",
+        "error: GH013:",
+        "push declined due to repository rule violations",
+        "to create or update workflow",
+        "fsck error",
+    ];
+    MARKERS.iter().any(|m| stderr.contains(m))
+}
+
 /// git, run on the location's bare repository with a clean environment.
 struct Git<'c> {
     config: &'c LandConfig,
@@ -525,11 +550,17 @@ impl<'c> Git<'c> {
         let what = format!("git {}", args.first().copied().unwrap_or(""));
         let out = output_within(self.command(dir, args), input, self.config.timeout, &what)?;
         if !out.status.success() {
-            return Err(LandError::Retry(format!(
+            let stderr = String::from_utf8_lossy(&out.stderr);
+            let message = format!(
                 "git {} failed: {}",
                 args.first().copied().unwrap_or(""),
-                String::from_utf8_lossy(&out.stderr).trim()
-            )));
+                stderr.trim()
+            );
+            return Err(if refused_for_good(&stderr) {
+                LandError::Fail(message)
+            } else {
+                LandError::Retry(message)
+            });
         }
         String::from_utf8(out.stdout)
             .map_err(|_| LandError::Retry(format!("git {args:?} printed non-UTF-8")))
@@ -757,6 +788,7 @@ impl Gh<'_> {
             url: String,
             head_ref_oid: String,
             head_ref_name: String,
+            is_cross_repository: bool,
         }
         let out = self.run(
             &[
@@ -769,7 +801,7 @@ impl Gh<'_> {
                 "--state",
                 "all",
                 "--json",
-                "number,url,headRefOid,headRefName",
+                "number,url,headRefOid,headRefName,isCrossRepository",
                 "--limit",
                 "20",
             ],
@@ -777,7 +809,11 @@ impl Gh<'_> {
         )?;
         let prs: Vec<Pr> = serde_json::from_str(&out)
             .map_err(|e| LandError::Retry(format!("gh pr list printed {out:?}: {e}")))?;
-        let mut ours = prs.into_iter().filter(|p| p.head_ref_name == export.branch);
+        // `--head` matches the branch name in any repository: a pull request from
+        // someone's fork with a branch of that name is not ours.
+        let mut ours = prs
+            .into_iter()
+            .filter(|p| p.head_ref_name == export.branch && !p.is_cross_repository);
         match ours.next() {
             None => Ok(None),
             Some(p) if p.head_ref_oid == export.commit.to_hex() => Ok(Some((p.number, p.url))),
@@ -894,7 +930,30 @@ impl LandingErrors {
 
 #[cfg(test)]
 mod tests {
-    use super::github_slug;
+    use super::{github_slug, refused_for_good};
+
+    #[test]
+    fn github_refusals_and_fsck_errors_are_for_good() {
+        for stderr in [
+            "remote: error: GH013: Repository rule violations found for refs/heads/cp/x.",
+            " ! [remote rejected] cp/x -> cp/x (push declined due to repository rule violations)",
+            "remote: error: GH001: Large files detected.",
+            " ! [remote rejected] cp/x -> cp/x (refusing to allow a Personal Access Token to create or update workflow `.github/workflows/ci.yml` without `workflow` scope)",
+            " ! [remote rejected] cp/x -> cp/x (refusing to allow a GitHub App to create or update workflow `.github/workflows/ci.yml` without `workflows` permission)",
+            "error: object 1234: badDate: invalid author/committer line - bad date\nfatal: fsck error in packed object",
+        ] {
+            assert!(refused_for_good(stderr), "{stderr}");
+        }
+        for stderr in [
+            "fatal: unable to access 'https://github.com/o/r/': Could not resolve host: github.com",
+            "remote: Internal Server Error",
+            " ! [rejected] cp/x -> cp/x (stale info)",
+            "fatal: the remote end hung up unexpectedly",
+            "remote: warning: GH001: Large files detected. You may want to try Git Large File Storage.\nerror: RPC failed; HTTP 502 curl 22 The requested URL returned error: 502",
+        ] {
+            assert!(!refused_for_good(stderr), "{stderr}");
+        }
+    }
 
     #[test]
     fn only_github_remotes_have_a_slug() {
