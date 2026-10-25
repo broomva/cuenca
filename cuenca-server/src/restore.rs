@@ -444,3 +444,329 @@ pub fn test_keys(dir: &Path) -> Result<()> {
     }
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use cuenca_core::LocationName;
+    use cuenca_tree::{Entry, RepoPath, Tree};
+
+    struct Fixture {
+        dir: tempfile::TempDir,
+        objects: std::path::PathBuf,
+        identity: age::x25519::Identity,
+        signer: SigningKey,
+    }
+    impl Fixture {
+        fn new() -> Self {
+            let dir = tempfile::tempdir().unwrap();
+            let objects = dir.path().join("objects");
+            let identity = age::x25519::Identity::generate();
+            let signer = SigningKey::from_bytes(&[3; 32]);
+            let source = Store::open(dir.path().join("source")).unwrap();
+            backup(
+                &source,
+                &objects,
+                &identity.to_public(),
+                &signer,
+                |_| Ok(()),
+            )
+            .unwrap();
+            let bytes = b"secret test content";
+            let oid = GitOid::for_blob(bytes);
+            source
+                .ingest_blob(oid, bytes.len() as u64, bytes.as_slice())
+                .unwrap();
+            let tree =
+                Tree::from_entries([(RepoPath::new("private-name").unwrap(), Entry::File(oid))])
+                    .unwrap();
+            source
+                .add_location(&LocationName::new("fixture").unwrap(), None, &tree)
+                .unwrap();
+            backup(
+                &source,
+                &objects,
+                &identity.to_public(),
+                &signer,
+                |_| Ok(()),
+            )
+            .unwrap();
+            Self {
+                dir,
+                objects,
+                identity,
+                signer,
+            }
+        }
+        fn newest(&self) -> std::path::PathBuf {
+            let mut paths: Vec<_> = fs::read_dir(self.objects.join("manifests"))
+                .unwrap()
+                .map(|p| p.unwrap().path())
+                .collect();
+            paths.sort();
+            paths.pop().unwrap()
+        }
+        fn signed(&self) -> Signed {
+            let envelope: Envelope =
+                serde_json::from_slice(&fs::read(self.newest()).unwrap()).unwrap();
+            serde_json::from_slice(
+                &decrypt(
+                    &self.identity,
+                    &object_bytes(&self.objects, &envelope.manifest).unwrap(),
+                    MAX_MANIFEST,
+                )
+                .unwrap(),
+            )
+            .unwrap()
+        }
+        fn publish(&self, signed: &Signed) {
+            let old = self.newest();
+            let cipher = encrypt(
+                &self.identity.to_public(),
+                &serde_json::to_vec(signed).unwrap(),
+            )
+            .unwrap();
+            let object = upload(&self.objects, cipher, "test", &mut |_| Ok(())).unwrap();
+            let name = format!("{:020}-{}.json", signed.manifest.records, object.sha256);
+            let envelope = Envelope {
+                format_version: FORMAT_VERSION,
+                manifest: object,
+            };
+            fs::remove_file(old).unwrap();
+            durable_write(
+                &self.objects.join("manifests"),
+                &name,
+                &serde_json::to_vec(&envelope).unwrap(),
+            )
+            .unwrap();
+        }
+        fn edit(&self, edit: impl FnOnce(&mut Manifest)) {
+            let mut signed = self.signed();
+            edit(&mut signed.manifest);
+            signed.signature = hex::encode(
+                self.signer
+                    .sign(&signed_bytes(&signed.manifest).unwrap())
+                    .to_bytes(),
+            );
+            self.publish(&signed);
+        }
+        fn refuses(&self, reason: &str) {
+            let target = self.dir.path().join("restored");
+            let error = restore(
+                &self.objects,
+                &target,
+                &self.identity,
+                &self.signer.verifying_key(),
+            )
+            .unwrap_err();
+            assert!(
+                error.to_string().contains(reason),
+                "expected {reason}, got {error:#}"
+            );
+            assert!(!target.exists());
+        }
+        fn path(&self, object: &Object) -> std::path::PathBuf {
+            self.objects
+                .join("objects")
+                .join(format!("{}.age", object.sha256))
+        }
+    }
+    #[test]
+    fn forged_manifest_is_refused_without_falling_back() {
+        let f = Fixture::new();
+        let mut signed = f.signed();
+        signed.signature = hex::encode([0u8; 64]);
+        f.publish(&signed);
+        f.refuses("invalid authority signature");
+    }
+    #[test]
+    fn independently_pinned_trust_refuses_an_attacker_key() {
+        let f = Fixture::new();
+        let mut signed = f.signed();
+        let attacker = SigningKey::from_bytes(&[9; 32]);
+        signed.manifest.signing_key_id = digest(attacker.verifying_key().as_bytes());
+        signed.signature = hex::encode(
+            attacker
+                .sign(&signed_bytes(&signed.manifest).unwrap())
+                .to_bytes(),
+        );
+        f.publish(&signed);
+        f.refuses("invalid authority signature");
+    }
+    #[test]
+    fn signed_offset_and_journal_offset_guards_refuse() {
+        let f = Fixture::new();
+        f.edit(|m| m.offset = Some(9));
+        f.refuses("manifest offset mismatch");
+        let f = Fixture::new();
+        let mut signed = f.signed();
+        let journal = decrypt(
+            &f.identity,
+            &object_bytes(&f.objects, &signed.manifest.journal).unwrap(),
+            MAX_JOURNAL,
+        )
+        .unwrap();
+        let mut prefix: JournalPrefix = serde_json::from_slice(&journal).unwrap();
+        prefix.records[0].offset = 9;
+        let journal = serde_json::to_vec(&prefix).unwrap();
+        signed.manifest.journal = upload(
+            &f.objects,
+            encrypt(&f.identity.to_public(), &journal).unwrap(),
+            "test",
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        signed.manifest.journal_sha256 = digest(&journal);
+        signed.manifest.journal_size = journal.len() as u64;
+        signed.signature = hex::encode(
+            f.signer
+                .sign(&signed_bytes(&signed.manifest).unwrap())
+                .to_bytes(),
+        );
+        f.publish(&signed);
+        f.refuses("journal offset mismatch");
+    }
+    #[test]
+    fn signed_plaintext_hash_size_and_oid_guards_refuse() {
+        let f = Fixture::new();
+        f.edit(|m| m.blobs[0].sha256 = "00".repeat(32));
+        f.refuses("plaintext blob hash mismatch");
+        let f = Fixture::new();
+        f.edit(|m| m.blobs[0].size += 1);
+        f.refuses("plaintext blob size mismatch");
+        let f = Fixture::new();
+        // Different valid ciphertext with matching SHA-256 and size, but wrong git oid.
+        let replacement = b"different content";
+        let object = upload(
+            &f.objects,
+            encrypt(&f.identity.to_public(), replacement).unwrap(),
+            "test",
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        f.edit(|m| {
+            m.blobs[0].object = object;
+            m.blobs[0].sha256 = digest(replacement);
+            m.blobs[0].size = replacement.len() as u64;
+        });
+        f.refuses("plaintext blob oid mismatch");
+    }
+    #[test]
+    fn missing_truncated_and_hash_corrupted_objects_refuse() {
+        let f = Fixture::new();
+        let blob = f.signed().manifest.blobs.remove(0);
+        fs::remove_file(f.path(&blob.object)).unwrap();
+        assert!(
+            restore(
+                &f.objects,
+                &f.dir.path().join("restore"),
+                &f.identity,
+                &f.signer.verifying_key()
+            )
+            .is_err()
+        );
+        let f = Fixture::new();
+        let blob = f.signed().manifest.blobs.remove(0);
+        let path = f.path(&blob.object);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes.pop();
+        fs::write(path, bytes).unwrap();
+        f.refuses("ciphertext size mismatch");
+        let f = Fixture::new();
+        let blob = f.signed().manifest.blobs.remove(0);
+        let path = f.path(&blob.object);
+        let mut bytes = fs::read(&path).unwrap();
+        bytes[0] ^= 1;
+        fs::write(path, bytes).unwrap();
+        f.refuses("ciphertext hash mismatch");
+    }
+    #[test]
+    fn incomplete_and_duplicate_blob_lists_refuse() {
+        let f = Fixture::new();
+        f.edit(|m| m.blobs.clear());
+        f.refuses("blob reachability mismatch");
+        let f = Fixture::new();
+        f.edit(|m| m.blobs.push(m.blobs[0].clone()));
+        f.refuses("blob reachability mismatch");
+    }
+    #[test]
+    fn journal_digest_size_and_unknown_formats_refuse() {
+        let f = Fixture::new();
+        f.edit(|m| m.journal_sha256 = "00".repeat(32));
+        f.refuses("journal integrity mismatch");
+        let f = Fixture::new();
+        f.edit(|m| m.journal_size += 1);
+        f.refuses("journal integrity mismatch");
+        let f = Fixture::new();
+        f.edit(|m| m.format_version += 1);
+        f.refuses("unknown manifest format");
+        let f = Fixture::new();
+        f.edit(|m| m.signing_key_id = "00".repeat(32));
+        f.refuses("wrong signing key id");
+    }
+    #[test]
+    fn envelope_tampering_and_truncation_refuse() {
+        let f = Fixture::new();
+        let mut e: Envelope = serde_json::from_slice(&fs::read(f.newest()).unwrap()).unwrap();
+        e.format_version += 1;
+        fs::write(f.newest(), serde_json::to_vec(&e).unwrap()).unwrap();
+        f.refuses("unknown envelope format");
+        let f = Fixture::new();
+        fs::write(f.newest(), b"{").unwrap();
+        assert!(
+            restore(
+                &f.objects,
+                &f.dir.path().join("restore"),
+                &f.identity,
+                &f.signer.verifying_key()
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn wrong_decryption_key_refuses_and_public_envelope_hides_metadata() {
+        let f = Fixture::new();
+        assert!(
+            restore(
+                &f.objects,
+                &f.dir.path().join("restore"),
+                &age::x25519::Identity::generate(),
+                &f.signer.verifying_key()
+            )
+            .is_err()
+        );
+        let public = fs::read_to_string(f.newest()).unwrap();
+        for secret in [
+            "private-name",
+            "fixture",
+            "secret test content",
+            "journal_sha256",
+            "signing_key_id",
+        ] {
+            assert!(!public.contains(secret));
+        }
+    }
+    #[test]
+    fn backup_refuses_corrupt_source_and_incomplete_upload_never_commits() {
+        let f = Fixture::new();
+        let source = Store::open(f.dir.path().join("source")).unwrap();
+        let oid = f.signed().manifest.blobs[0].oid.to_hex();
+        fs::write(
+            source.object_dir().join(&oid[..2]).join(&oid[2..]),
+            b"corrupt",
+        )
+        .unwrap();
+        let out = f.dir.path().join("bad");
+        assert!(
+            backup(
+                &source,
+                &out,
+                &f.identity.to_public(),
+                &f.signer,
+                |_| Ok(())
+            )
+            .is_err()
+        );
+        assert_eq!(fs::read_dir(out.join("manifests")).unwrap().count(), 0);
+    }
+}
