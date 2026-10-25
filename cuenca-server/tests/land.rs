@@ -879,7 +879,7 @@ fn a_takeover_clears_the_dropped_landings_retry_error() {
         tmp.path().join("gone.git").display(),
         up.url
     )];
-    let _lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    let lander = Lander::spawn(s.authority.clone(), config.clone()).unwrap();
     let error = |s: &Server| -> Value {
         let v: Value = s.get(&a2, "/v1/forks/f1/landing").json().unwrap();
         v["error"].clone()
@@ -889,6 +889,8 @@ fn a_takeover_clears_the_dropped_landings_retry_error() {
         assert!(start.elapsed() < Duration::from_secs(60), "no retry error");
         std::thread::sleep(Duration::from_millis(50));
     }
+    // The takeover lands between rounds, not under a step that would see it go.
+    drop(lander);
     let v = s.admin(AdminRequest::TakeOver {
         fork: f1(),
         expected_epoch: 1,
@@ -896,9 +898,11 @@ fn a_takeover_clears_the_dropped_landings_retry_error() {
         node: NodeId::new(NB).unwrap(),
     });
     assert_eq!(v["ok"], true, "{v}");
+    assert!(!error(&s).is_null(), "the error outlives the lander");
+    let _lander = Lander::spawn(s.authority.clone(), config).unwrap();
     let start = Instant::now();
     while !error(&s).is_null() {
-        assert!(start.elapsed() < Duration::from_secs(60), "{}", error(&s));
+        assert!(start.elapsed() < Duration::from_secs(10), "{}", error(&s));
         std::thread::sleep(Duration::from_millis(50));
     }
 }
