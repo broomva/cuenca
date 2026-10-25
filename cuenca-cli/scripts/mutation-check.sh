@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Mutation check for cuenca-cli: each mutant breaks one guarantee, and the tests must
 # fail for every one. Run from the crate directory: scripts/mutation-check.sh
+# Use --worktree to prove just the harness adapter guards (full CLI baseline still runs).
 # Prints one line per mutant and exits non-zero if any mutant survives. The source is
 # restored after each mutant, also on interrupt. Exit codes: ../scripts/mutation-guard.sh.
 set -uo pipefail
+worktree_only=${1:-}
+case $worktree_only in
+  '' | --worktree) ;;
+  *) echo 'usage: mutation-check.sh [--worktree]' >&2; exit 2 ;;
+esac
 cd "$(dirname "$0")/.."
 . ../scripts/mutation-guard.sh
 backup=$guard_backup
@@ -35,6 +41,7 @@ echo "baseline  green"
 survived=0
 mutate() { # file, old, new, then the cargo test arguments that should catch it
   local file=$1 old=$2 new=$3; shift 3
+  if [ "$worktree_only" = --worktree ] && [ "$file" != src/worktree.rs ]; then return; fi
   cp "$file" "$backup/file" && echo "$PWD/$file" >"$backup/path" || { echo "cannot back up $file"; exit 6; }
   current=$file
   if ! python3 - "$file" "$old" "$new" <<'PY'
