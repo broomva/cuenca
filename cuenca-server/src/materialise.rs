@@ -246,6 +246,8 @@ impl Volume {
     /// Leftovers of a materialiser that was killed are removed: what it was staging was
     /// never shown.
     pub fn open(root: &Path, objects: &Path) -> io::Result<Self> {
+        // Absolute, so a host path is told apart from a path in a fork by where it starts.
+        let root = &std::path::absolute(root)?;
         fs::create_dir_all(root)?;
         fs::set_permissions(root, fs::Permissions::from_mode(DIR_MODE))?;
         let private = root.join(".cuenca");
@@ -553,34 +555,38 @@ fn snapshot_one(
     publish_scanned(store, fork, scanned, cache)
 }
 
-/// A scan of an owner fork not yet published, and its stat cache as it was before.
+/// A scan of an owner fork not yet published, and the stat cache that scan left. The
+/// fork's own cache is not touched until the scan's draft is published.
 struct Scanned {
     snap: cuenca_fs::Snapshot,
-    before: cuenca_fs::StatCache,
+    cache: cuenca_fs::StatCache,
 }
 
 fn scan_fork(
     store: &Store,
     fork: &cuenca_core::Fork,
     dir: &Path,
-    cache: &mut cuenca_fs::StatCache,
+    cache: &cuenca_fs::StatCache,
 ) -> Result<Scanned, String> {
     let head = store.tree(fork.head).map_err(|e| e.to_string())?;
-    let before = cache.clone();
-    let snap = scan(dir, &head, cache).map_err(|e| e.to_string())?;
-    Ok(Scanned { snap, before })
+    let mut cache = cache.clone();
+    let snap = scan(dir, &head, &mut cache).map_err(|e| e.to_string())?;
+    Ok(Scanned { snap, cache })
 }
 
 /// Publish a scan. The stat cache may only name content the log holds, since a file it
-/// answers is not read and so would be uploaded by path: a scan that publishes nothing
-/// puts the cache back as it was before that scan.
+/// answers is not read and so would be uploaded by path: the scan's cache replaces the
+/// fork's only once its publish returns, so a scan whose publish fails (or panics)
+/// leaves the cache as it was.
 fn publish_scanned(
     store: &Store,
     fork: &cuenca_core::Fork,
     scanned: Scanned,
     cache: &mut cuenca_fs::StatCache,
 ) -> Result<SnapshotOne, String> {
-    publish(store, fork, scanned.snap).inspect_err(|_| *cache = scanned.before)
+    let published = publish(store, fork, scanned.snap)?;
+    *cache = scanned.cache;
+    Ok(published)
 }
 
 /// Scan an owner fork's directory against `head`, keeping [`KEEP`] of what it reads.
@@ -908,6 +914,22 @@ mod tests {
     use super::*;
     use cuenca_tree::{Entry, RepoPath, Tree};
 
+    /// A volume opened by a relative path keeps its absolute path, which is how a host
+    /// path in an error is told apart from a path inside a fork.
+    #[test]
+    fn a_volume_opened_by_a_relative_path_is_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let up = "../".repeat(cwd.components().count() - 1);
+        let target = dir.path().join("volume");
+        let relative = PathBuf::from(up).join(target.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+        let volume = Volume::open(&relative, store.object_dir()).unwrap();
+        assert!(volume.root().is_absolute(), "{}", volume.root().display());
+        assert!(volume.root().join("main").is_dir());
+    }
+
     /// Below `converge`, which never shows an owner fork that is there already: if it
     /// ever did, the folder Finder writes is refused, never exchanged out of place.
     #[test]
@@ -993,7 +1015,7 @@ mod tests {
         }
         let mut cache = cuenca_fs::StatCache::new();
         // The large file is uploaded by path; changed first, it fails the attempt.
-        let scanned = scan_fork(&store, &fork, &root, &mut cache).unwrap();
+        let scanned = scan_fork(&store, &fork, &root, &cache).unwrap();
         let mut changed = big.clone();
         changed[0] = b'c';
         fs::write(root.join("big.bin"), &changed).unwrap();
@@ -1006,7 +1028,7 @@ mod tests {
             .unwrap()
             .set_modified(old)
             .unwrap();
-        let scanned = scan_fork(&store, &fork, &root, &mut cache).unwrap();
+        let scanned = scan_fork(&store, &fork, &root, &cache).unwrap();
         let x = scanned
             .snap
             .new_blobs
@@ -1024,6 +1046,49 @@ mod tests {
             .tree(store.fork(&owner).unwrap().unwrap().head)
             .unwrap();
         assert_eq!(head.get("x.md"), Some(&Entry::file(b"first\n")));
+    }
+
+    /// `snapshot_one` advances the fork's stat cache only with a publish: a publish that
+    /// fails after the scan (the blob store's staging directory refuses writes) leaves
+    /// the cache empty, and the next, successful one fills it.
+    #[test]
+    fn a_snapshot_advances_the_cache_only_when_it_publishes() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return; // root writes through mode 0500
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let main = Tree::new();
+        let site = LocationName::new("site").unwrap();
+        store.add_location(&site, None, &main).unwrap();
+        let owner = ForkName::new("owner-mac").unwrap();
+        store.create_fork(&owner, &site, &Holder::volume()).unwrap();
+        let fork = store.fork(&owner).unwrap().unwrap();
+        let root = dir.path().join("fork");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("x.md"), b"first\n").unwrap();
+        // Old enough that a stat cache trusts it.
+        let old = std::time::SystemTime::now() - Duration::from_secs(60);
+        File::options()
+            .write(true)
+            .open(root.join("x.md"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let tmp = dir.path().join("store/blobs/tmp");
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o500)).unwrap();
+        let mut cache = cuenca_fs::StatCache::new();
+        let failed = snapshot_one(&store, &fork, &root, &mut cache);
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(failed.is_err(), "{failed:?}");
+        assert!(
+            cache.is_empty(),
+            "the cache names x.md, which the log does not hold"
+        );
+        let (published, _) = snapshot_one(&store, &fork, &root, &mut cache).unwrap();
+        assert!(published.is_some());
+        assert_eq!(cache.len(), 1);
     }
 
     /// A folder swapped for a link to a folder outside the fork, between the scan and

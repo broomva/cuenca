@@ -204,12 +204,15 @@ impl Authority {
             .store
             .fork(from)?
             .ok_or_else(|| CoreError::UnknownFork(from.to_string()))?;
-        let Some(volume) = self
-            .volume
-            .get()
-            .filter(|_| source.holder().is_some_and(Holder::is_volume))
-        else {
+        if !source.holder().is_some_and(Holder::is_volume) {
             return Ok(self.guarded(principal, || self.store.branch_fork(fork, from, holder))?);
+        }
+        // An owner fork is forked from a snapshot, and only the volume takes one.
+        let Some(volume) = self.volume.get() else {
+            return Err(BranchError::Snapshot {
+                fork: from.to_string(),
+                error: "the authority has no volume to snapshot it from".into(),
+            });
         };
         let started = std::time::Instant::now();
         let mut attempt = 0;
@@ -414,6 +417,8 @@ impl Authority {
 /// A failed owner-fork snapshot as the caller is told it: paths are the fork's own
 /// (the fork's folder itself is named by the fork), and where the volume is on the
 /// authority's host stays in its log.
+/// `root` is absolute ([`Volume::open`] makes it so), so it matches only where a path
+/// starts, never inside a fork's own path.
 fn without_host_paths(error: &str, root: &Path, fork: &ForkName) -> String {
     let dir = root.join("forks").join(fork.as_str());
     let dir = dir.display().to_string();
@@ -501,6 +506,11 @@ mod tests {
             "volume.md: Permission denied"
         );
         assert_eq!(fork_path("vol", "vol/forks: gone"), "<volume>/forks: gone");
+        // A fork path that repeats the volume's own path is left whole.
+        assert_eq!(
+            said("/srv/cuenca/volume/forks/owner-mac/srv/cuenca/volume/x.md: gone"),
+            "srv/cuenca/volume/x.md: gone"
+        );
     }
 
     struct Nobody;

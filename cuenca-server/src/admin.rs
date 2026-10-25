@@ -472,7 +472,7 @@ mod tests {
             assert!(err.contains(path), "{err}");
         }
         // Rules a scan would refuse are refused here too, never read loosely: text
-        // that is not UTF-8, and a symlink in the file's place.
+        // that is not UTF-8, a symlink in the file's place, and a folder.
         let latin = location(&a, "latin", &[(".forkignore", b"caf\xe9\n")]);
         let linked = {
             use cuenca_tree::{Entry, GitOid, RepoPath};
@@ -486,8 +486,10 @@ mod tests {
             a.store.add_location(&name, None, &tree).unwrap();
             name
         };
-        let len = len + 2;
-        for l in [&latin, &linked] {
+        // A folder in the file's place, which a scan finds on disk and refuses.
+        let folder = location(&a, "folder", &[(".forkignore/x", b"x")]);
+        let len = len + 3;
+        for l in [&latin, &linked, &folder] {
             let err = handle(&a, req(l)).unwrap_err();
             assert!(err.contains(".forkignore"), "{err}");
         }

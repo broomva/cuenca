@@ -100,6 +100,15 @@ impl ForkIgnore {
         read: impl FnOnce(GitOid) -> std::result::Result<Vec<u8>, String>,
     ) -> Result<Self> {
         match tree.get(FORKIGNORE) {
+            // A folder: on disk the scan finds `.forkignore` and refuses it.
+            None if tree.entries().any(|(path, _)| {
+                path.as_str()
+                    .strip_prefix(FORKIGNORE)
+                    .is_some_and(|r| r.starts_with('/'))
+            }) =>
+            {
+                Err(not_a_file())
+            }
             None => Ok(Self::defaults()),
             Some(Entry::File(oid) | Entry::Executable(oid)) => {
                 Self::from_bytes(&read(*oid).map_err(FsError::Ignore)?)
@@ -171,6 +180,23 @@ mod tests {
         assert!(ForkIgnore::for_tree(&at(Entry::Symlink(oid)), read(rules.clone())).is_err());
         assert!(ForkIgnore::for_tree(&at(Entry::File(oid)), read(vec![b's', 0xff])).is_err());
         assert!(ForkIgnore::for_tree(&at(Entry::File(oid)), |_| Err("gone".into())).is_err());
+        // A folder named `.forkignore` is refused, as a scan of it on disk is.
+        let folder = Tree::from_entries([(
+            RepoPath::new(format!("{FORKIGNORE}/x")).unwrap(),
+            Entry::File(oid),
+        )])
+        .unwrap();
+        assert!(ForkIgnore::for_tree(&folder, read(rules.clone())).is_err());
+        let sibling = Tree::from_entries([(
+            RepoPath::new(format!("{FORKIGNORE}.d/x")).unwrap(),
+            Entry::File(oid),
+        )])
+        .unwrap();
+        assert!(
+            ForkIgnore::for_tree(&sibling, read(vec![]))
+                .unwrap()
+                .excludes(".env")
+        );
     }
 
     #[test]
