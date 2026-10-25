@@ -1,5 +1,8 @@
 # BRO-3311 harness dogfood — 2026-10-25
 
+Original receipt for reviewed head `8964ea8`. See the
+[round 1 response receipt](dogfood-bro-3311-round1.md) for current fixes and checks.
+
 Local SSD exercise on macOS, using the built `cuenca` binary from this branch,
 Paseo 0.12.0 and T3 Code's live app-owned launch API. Both harnesses ran Codex.
 No app code was patched. The authority was a fresh local process bound to
