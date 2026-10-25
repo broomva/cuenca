@@ -20,7 +20,8 @@ One Ubuntu 24.04 host on the tailnet runs the Cuenca authority (`cuenca serve`) 
 |---|---|---|
 | `/usr/local/bin/cuenca` | root, 0755 | The binary (`cuenca serve` is the authority) |
 | `/var/lib/cuenca/state/` | cuenca, 0700 | The log, blobs, keys file and landing's git repositories |
-| `/var/lib/cuenca/` | cuenca, 0750 | The authority user's home (`gh`'s login lives under it) |
+| `/var/lib/cuenca/` | cuenca, 0750 | The authority user's home |
+| `/etc/cuenca/gh.env` | root:cuenca, 0640 | Landing's token, `GH_TOKEN=<token>` (step 5); written by the operator, never by `install.sh` |
 | `/srv/cuenca/volume/` | cuenca:cuenca, 2750 | The volume: `main/<location>/` and `forks/<fork>/` read-only, `forks/owner-*/` writable by `cuenca-owner` |
 | `/run/cuenca/admin.sock` | cuenca, dir 0700 | Owner acts (`cuenca admin`) |
 | `/etc/cuenca/cuenca.env` | root:cuenca, 0640 | `CUENCA_STATE`, `CUENCA_BIND` (tailnet address, port 7419), `CUENCA_VOLUME` |
@@ -42,10 +43,12 @@ There are two accounts, and neither has a shell. `cuenca` runs the authority. `c
    ```
    The script installs `samba`, `samba-vfs-modules` (which holds `fruit` and `streams_xattr`), `git`, `gh` and `curl` from Ubuntu's archive, holding their services until Cuenca's `smb.conf` is in place, creates the accounts and directories, renders the unit and `smb.conf` (it checks `smb.conf` with `testparm` first, and keeps Ubuntu's own file once as `smb.conf.pre-cuenca`), masks `nmbd`, and starts `smbd` and `cuenca`. The host's `smb.conf` becomes Cuenca's alone: any other share on it is dropped, so use a host that serves nothing else over SMB. Each `--allow` address must be written canonically (as `tailscale ip` prints it), and `--volume` must be a new directory outside `/var/lib/cuenca`. On a host that still runs spike C, add `--retire-spike` to remove the `cuenca-spike` container, which holds `:445`.
 4. Hand the owner the Samba password, out of band. The script generates it once and never prints it. It is in `/root/cuenca-owner.smbpass` (root only). Read it on the host, store it in the owner's password manager, then `sudo rm /root/cuenca-owner.smbpass`.
-5. Log the authority's `gh` in for landing (the shared login, for now; spec rev 2.2 §6):
+5. Give the authority its own copy of the token landing uses (the shared `gh` login, for now; spec rev 2.2 §6). It is one line, `GH_TOKEN=<token>`, in `/etc/cuenca/gh.env`, which only root writes and only the `cuenca` group reads; the unit loads it, and `gh` and git's credential helper read `GH_TOKEN`:
    ```bash
-   sudo -u cuenca -H gh auth login --with-token < token-file
+   { printf 'GH_TOKEN='; cat token-file; } | sudo install -o root -g cuenca -m 0640 /dev/stdin /etc/cuenca/gh.env
+   sudo systemctl restart cuenca
    ```
+   Re-running `install.sh` keeps the file. To replace the token, write the file again the same way and restart `cuenca`.
 6. Check it: `sudo bash deploy/check.sh` (all lines `ok`). Then, from outside the host:
    ```bash
    nc -z -w 3 <tailnet ip> 445 && echo open        # from an enrolled device: open
