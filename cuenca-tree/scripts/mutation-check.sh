@@ -2,14 +2,14 @@
 # Mutation check for cuenca-tree: each mutant breaks one guarantee, and the tests must
 # fail for every one. Run from the crate directory: scripts/mutation-check.sh
 # Prints one line per mutant and exits non-zero if any mutant survives. The source is
-# restored after each mutant, also on interrupt.
+# restored after each mutant, also on interrupt. Exit codes: ../scripts/mutation-guard.sh.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 . ../scripts/mutation-guard.sh
 backup=$guard_backup
 lock=$(git rev-parse --show-toplevel)/Cargo.lock
 # Checked byte for byte: a truncated copy (full scratch disk) would be copied back over the real lock.
-cp "$lock" "$backup/Cargo.lock" && cmp -s "$lock" "$backup/Cargo.lock" || { echo "cannot back up $lock"; exit 2; }
+cp "$lock" "$backup/Cargo.lock" && cmp -s "$lock" "$backup/Cargo.lock" || { echo "cannot back up $lock"; exit 6; }
 # A failed copy back keeps the run dir, and .backup/path or .backup/lock-failed makes the
 # next run refuse to start. .backup/path goes only after the lock is back too.
 restore() {
@@ -23,7 +23,8 @@ restore() {
   current=; rm -f "$backup/path"
 }
 trap 'guard_kill; restore; guard_cleanup' EXIT
-trap 'exit 130' INT TERM
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # A mutant only counts as killed against a suite that passes unmutated.
 if ! bounded cargo test -q -p cuenca-tree >"$backup/log" 2>&1; then
@@ -34,7 +35,7 @@ echo "baseline  green"
 survived=0
 mutate() { # file, old, new, then the cargo test arguments that should catch it
   local file=$1 old=$2 new=$3; shift 3
-  cp "$file" "$backup/file" && echo "$PWD/$file" >"$backup/path" || { echo "cannot back up $file"; exit 2; }
+  cp "$file" "$backup/file" && echo "$PWD/$file" >"$backup/path" || { echo "cannot back up $file"; exit 6; }
   current=$file
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib

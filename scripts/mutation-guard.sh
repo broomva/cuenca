@@ -21,6 +21,11 @@
 # whichever crate it is for and whatever CUENCA_MUT_TMPDIR it uses. The lock is a flock
 # on fd 9, held by this shell's open file and so released by the kernel when the sweep
 # exits, however it dies (BRO-3467 #7).
+#
+# Exit codes of a mutation-check.sh (BRO-3467 #8): 0 every mutant killed, 1 one survived
+# or proved nothing, 2 the baseline is red, 3 a mutant run was killed by a signal, 4 the
+# source or Cargo.lock could not be restored, 5 this guard refused to start, 6 a backup
+# failed, 130 / 143 interrupted by SIGINT / SIGTERM.
 guard_repo=$(git rev-parse --show-toplevel)
 guard_lock=$(git rev-parse --absolute-git-dir)/cuenca-mutation.lock
 exec 9>>"$guard_lock"
@@ -39,17 +44,17 @@ if ! python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>
       echo "  find it with: lsof $guard_lock" >&2
     fi
   fi
-  exit 2
+  exit 5
 fi
 echo $$ >"$guard_lock"
 guard_root=${CUENCA_MUT_TMPDIR:-/tmp/cuenca-mut}
 case $guard_root in
   /*) ;;
-  *) echo "mutation-guard: CUENCA_MUT_TMPDIR must be absolute, not $guard_root" >&2; exit 2 ;;
+  *) echo "mutation-guard: CUENCA_MUT_TMPDIR must be absolute, not $guard_root" >&2; exit 5 ;;
 esac
 mkdir -p "$guard_root"
 # Without ps and pgrep every old run would look dead.
-command -v ps >/dev/null && command -v pgrep >/dev/null || { echo "mutation-guard: needs ps and pgrep" >&2; exit 2; }
+command -v ps >/dev/null && command -v pgrep >/dev/null || { echo "mutation-guard: needs ps and pgrep" >&2; exit 5; }
 for stale in "$guard_root"/run-*; do
   pid=${stale##*/run-}
   case $pid in '' | *[!0-9]*) continue ;; esac
@@ -67,7 +72,7 @@ for stale in "$guard_root"/run-*; do
       echo "  its tests still run as process group $(cat "$stale/.backup/pgid"): kill -KILL -- -$(cat "$stale/.backup/pgid")" >&2
     fi
     echo "  then remove $stale" >&2
-    exit 2
+    exit 5
   fi
   rm -rf "$stale"
 done
@@ -75,7 +80,7 @@ guard_dir=$guard_root/run-$$
 guard_len=$(printf %s "$guard_dir" | wc -c | tr -d ' ')
 if [ "$guard_len" -gt 64 ]; then
   echo "mutation-guard: run dir $guard_dir is $guard_len bytes; the tests' sockets need it at most 64 (set CUENCA_MUT_TMPDIR shorter)" >&2
-  exit 2
+  exit 5
 fi
 # The script's own backups and logs sit in .backup, which bounded() keeps.
 guard_backup=$guard_dir/.backup
@@ -84,15 +89,33 @@ echo "$$ $guard_backup/pgid" >"$guard_lock"
 export TMPDIR=$guard_dir
 # A group left behind by a SIGKILLed bounded.py. Call before restoring the source, so an
 # orphaned cargo cannot rewrite it afterwards.
-guard_kill() { [ -s "$guard_backup/pgid" ] && kill -KILL -- "-$(cat "$guard_backup/pgid")" 2>/dev/null; return 0; }
+# A bounded.py still running (the sweep was interrupted while it waited) is TERMed first:
+# it kills its group itself, and reaping it here frees the sweep lock it inherited.
+guard_bounded=
+guard_kill() {
+  if [ -n "$guard_bounded" ]; then
+    kill -TERM "$guard_bounded" 2>/dev/null
+    wait "$guard_bounded" 2>/dev/null
+    guard_bounded=
+  fi
+  [ -s "$guard_backup/pgid" ] && kill -KILL -- "-$(cat "$guard_backup/pgid")" 2>/dev/null
+  return 0
+}
 guard_cleanup() { guard_kill; rm -rf "$guard_dir"; }
 
 # bounded COMMAND...: run COMMAND under the budget and the timeout. The run dir is
 # emptied first, so the budget applies to this command alone. Status 124 is a timeout
-# and 125 an exceeded budget; either one is reported on stderr.
+# and 125 an exceeded budget; either one is reported on stderr. It runs in the background
+# and is waited for: bash runs a trap only after a foreground command exits, but at once
+# during a wait, so a SIGTERM to the sweep does not wait out the test (BRO-3467 #8).
 bounded() {
   guard_kill
   find "$guard_dir" -mindepth 1 -maxdepth 1 ! -name .backup -exec rm -rf {} +
   python3 "$guard_repo/scripts/bounded.py" --dir "$guard_dir" --pgid-file "$guard_backup/pgid" \
-    --budget-mb "${CUENCA_MUT_BUDGET_MB:-4096}" --timeout "${CUENCA_MUT_TIMEOUT:-1800}" -- "$@"
+    --budget-mb "${CUENCA_MUT_BUDGET_MB:-4096}" --timeout "${CUENCA_MUT_TIMEOUT:-1800}" -- "$@" &
+  guard_bounded=$!
+  wait "$guard_bounded"
+  local status=$?
+  guard_bounded=
+  return "$status"
 }
