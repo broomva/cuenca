@@ -149,7 +149,7 @@ class Trial:
         (seed / ".cuenca").mkdir(parents=True)
         (seed / "README.md").write_text("# Public scratch for BRO-3259\n")
         (seed / ".cuenca/checks.toml").write_text(
-            '[[check]]\nname = "scratch-readme"\nargv = ["/usr/bin/test", "-s", "README.md"]\n')
+            '[[check]]\nname = "scratch-readme"\nargv = ["/bin/test", "-s", "README.md"]\n')
         self.admin("location", "add", "scratch", "--dir", str(seed))
         remote = ["--remote", "https://github.com/broomva/cuenca.git"] if self.args.github else []
         self.admin("location", "add", "cuenca", "--git", str(self.repo),
