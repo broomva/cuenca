@@ -88,6 +88,8 @@ mutate src/restore.rs 'envelope.format_version == FORMAT_VERSION' true --lib res
 mutate src/restore.rs 'manifest.signing_key_id == digest(trust.as_bytes())' true --lib restore::tests::journal_digest_size
 mutate src/restore.rs 'verified.sha256() == info.sha256' 'true' --lib restore::tests::backup_independently
 mutate src/restore.rs 'verified.size() == info.size' 'true' --lib restore::tests::backup_independently
+mutate src/restore.rs 'previous == manifest.journal_sha256' 'true' --lib restore::tests::opaque_commits
+mutate src/restore.rs 'rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK' 'rustix::fs::OFlags::NONBLOCK' --lib restore::tests::local_objects
 if [ "${1:-}" = --restore-only ]; then
   if ! bounded cargo test -q -p cuenca-server --lib restore::tests >"$backup/log" 2>&1; then
     echo "restored baseline is red"; cat "$backup/log"; exit 2

@@ -3,7 +3,7 @@
 //! Only an atomically published completion envelope is a restore point. Objects
 //! and the signed manifest are age-encrypted; the restore trust key is supplied
 //! independently. An invalid newest committed point fails closed, never falls back.
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
 use std::os::unix::fs::OpenOptionsExt;
@@ -329,6 +329,7 @@ pub fn restore(
         "restore destination already exists"
     );
     let mut latest: Option<Manifest> = None;
+    let mut digests = BTreeMap::new();
     for entry in fs::read_dir(root.join("manifests"))? {
         let entry = entry?;
         let name = entry
@@ -346,10 +347,9 @@ pub fn restore(
             "invalid committed manifest name"
         );
         let manifest = read_manifest(root, &name, identity, trust)?;
-        if let Some(previous) = &latest {
+        if let Some(previous) = digests.insert(manifest.records, manifest.journal_sha256.clone()) {
             anyhow::ensure!(
-                manifest.records != previous.records
-                    || manifest.journal_sha256 == previous.journal_sha256,
+                previous == manifest.journal_sha256,
                 "conflicting signed prefixes at one offset"
             );
         }
@@ -633,6 +633,36 @@ mod tests {
         );
         f.publish(&signed);
         f.refuses("invalid authority signature");
+    }
+    #[test]
+    fn opaque_commits_select_authenticated_offsets_and_refuse_conflicts() {
+        let f = Fixture::new();
+        let source = Store::open(f.dir.path().join("source")).unwrap();
+        backup(
+            &source,
+            &f.objects,
+            &f.identity.to_public(),
+            &f.signer,
+            |_| Ok(()),
+        )
+        .unwrap();
+        let target = f.dir.path().join("restored-good");
+        assert_eq!(
+            restore(&f.objects, &target, &f.identity, &f.signer.verifying_key())
+                .unwrap()
+                .records,
+            1
+        );
+        let old_path = f.newest();
+        let envelope = fs::read(&old_path).unwrap();
+        f.edit(|m| m.journal_sha256 = "00".repeat(32));
+        fs::write(&old_path, envelope).unwrap();
+        f.refuses("conflicting signed prefixes at one offset");
+        for entry in fs::read_dir(f.objects.join("manifests")).unwrap() {
+            let name = entry.unwrap().file_name().into_string().unwrap();
+            assert_eq!(name.len(), 69);
+            assert!(hex_digest(&name[..64]));
+        }
     }
     #[test]
     fn signed_offset_and_journal_offset_guards_refuse() {
