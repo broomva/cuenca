@@ -32,26 +32,28 @@ class Trial:
     def __init__(self, args):
         self.args = args
         self.root = args.scratch.resolve()
-        self.root.mkdir(parents=True, exist_ok=False)
+        self.root.mkdir(parents=True, exist_ok=args.resume_load)
         self.root.chmod(0o700)
         self.out = args.output.resolve()
         self.out.mkdir(parents=True, exist_ok=True)
         self.repo = Path.cwd().resolve()
         self.bin = str(args.binary.resolve())
         self.lock = threading.Lock()
-        self.commands = open(self.out / "commands.jsonl", "w")
-        self.rpc = open(self.out / "mcp.jsonl", "w")
+        self.commands = open(self.out / "commands.jsonl", "a" if args.resume_load else "w")
+        self.rpc = open(self.out / "mcp.jsonl", "a" if args.resume_load else "w")
         self.events = []
         self.child = None
         self.mcp = None
         self.metrics = {"start_utc": utc(), "source_sha": self.git("rev-parse", "origin/main"),
                         "identity": "loopback test fixture; no real tailnet authentication",
                         "github_enabled": args.github, "host": self.cmd(["uname", "-sm"])[1].strip()}
+        if args.resume_load:
+            self.metrics = json.loads((self.out / "workflow.json").read_text())
         self.env = os.environ.copy()
         self.env.update(CUENCA_CONFIG=str(self.root / "config.json"),
                         CUENCA_STATE_HOME=str(self.root / "client-state"),
                         TMPDIR=str(self.root / "tmp"))
-        (self.root / "tmp").mkdir()
+        (self.root / "tmp").mkdir(exist_ok=args.resume_load)
         self.fixture = self.root / "tailscale-fixture"
         self.fixture.write_text('#!/bin/sh\ncase "$1" in\n'
                                 'whois) echo \'{"Node":{"StableID":"dogfoodlocalnode"}}\' ;;\n'
@@ -62,6 +64,9 @@ class Trial:
             s.bind(("127.0.0.1", 0))
             self.port = s.getsockname()[1]
         self.url = f"http://127.0.0.1:{self.port}"
+        if args.resume_load:
+            self.url = json.loads((self.root / "config.json").read_text())["url"]
+            self.port = int(self.url.rsplit(":", 1)[1])
         self.socket = self.root / "admin.sock"
 
     def cmd(self, argv, env=None, private=False, timeout=120):
@@ -227,15 +232,18 @@ class Trial:
             name = f"load-{i:02d}"
             env = self.env.copy()
             state = self.root / name
+            config = state / "config.json"
+            co = state / "checkout"
+            if self.args.resume_load and config.is_file():
+                env.update(CUENCA_CONFIG=str(config), CUENCA_STATE_HOME=str(state / "client-state"))
+                return name, co, env
             state.mkdir()
             key = self.admin("key", "mint", name, "--kind", "agent", "--node",
                              "dogfoodlocalnode", "--location", "scratch", private=True)
-            config = state / "config.json"
             config.write_text(json.dumps({"url": self.url, "token": key["token"]}))
             config.chmod(0o600)
             env.update(CUENCA_CONFIG=str(config), CUENCA_STATE_HOME=str(state / "client-state"))
             self.cli("fork", "scratch", "--name", name, env=env)
-            co = state / "checkout"
             self.cli("checkout", name, str(co), env=env)
             return name, co, env
         started_utc = utc()
@@ -243,7 +251,7 @@ class Trial:
             agents = list(pool.map(setup, range(n)))
         acknowledged = []
         snapshots, visible, requests = [], [], []
-        before_bytes = (self.root / "authority/log.redb").stat().st_size
+        before_bytes = (self.root / "authority/store/log.redb").stat().st_size
         free_before = shutil.disk_usage(self.root).free
         start = time.monotonic()
         restarts = []
@@ -298,12 +306,13 @@ class Trial:
                           "duplicates": sum(max(0, counts[x] - 1) for x in expected_ids),
                           "unexpected": list((Counter(ids) - Counter(expected_ids)).elements())})
         save(self.out / "journal-audit.json", audit)
-        after_bytes = (self.root / "authority/log.redb").stat().st_size
+        after_bytes = (self.root / "authority/store/log.redb").stat().st_size
         # Logical event bytes are measured from the actual returned journal objects;
         # redb allocation is separately measured and must not be called logical growth.
         logical_bytes = sum(len(json.dumps(r, separators=(",", ":")).encode()) + 1
                             for name, _, _ in agents
-                            for r in json.loads((self.out / f"log-{name}.json").read_text())["records"])
+                            for r in json.loads((self.out / f"log-{name}.json").read_text())["records"]
+                            if r["event"]["event"] != "fork_created")
         def p95(values):
             return sorted(values)[max(0, (95 * len(values) + 99) // 100 - 1)]
         rate = max(0, after_bytes - before_bytes) * 3600 / duration
@@ -347,6 +356,7 @@ def main():
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--binary", type=Path, required=True)
     parser.add_argument("--github", action="store_true", help="create one real docs PR, never merge")
+    parser.add_argument("--resume-load", action="store_true", help="reuse an existing setup before the first load batch")
     parser.add_argument("--agents", type=int, default=30)
     parser.add_argument("--seconds", type=int, default=120)
     args = parser.parse_args()
@@ -354,7 +364,8 @@ def main():
     t = Trial(args)
     try:
         t.start()
-        t.workflow()
+        if not args.resume_load:
+            t.workflow()
         t.load()
     finally:
         t.close()
