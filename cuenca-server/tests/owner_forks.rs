@@ -671,8 +671,9 @@ fn forking_a_fork_needs_reading_it() {
 }
 
 /// A rule the owner adds to the fork's own `.forkignore` in Finder that names a tracked
-/// path fails the snapshot loudly, naming the file, and publishes nothing (leaving the
-/// path out would delete it); once the rule is gone, the edits are published.
+/// path fails the snapshot loudly, naming the file, in the log and in a status file in
+/// the volume, and publishes nothing (leaving the path out would delete it); once the
+/// rule is gone, the edits are published and the status file is removed.
 #[test]
 fn a_fork_rule_naming_a_tracked_path_fails_the_snapshot() {
     let dir = tempfile::tempdir().unwrap();
@@ -689,10 +690,31 @@ fn a_fork_rule_naming_a_tracked_path_fails_the_snapshot() {
     assert_eq!(snapped.failed.len(), 1, "{snapped:?}");
     assert!(snapped.failed[0].1.contains("README"), "{snapped:?}");
     assert_eq!(store.len().unwrap(), len, "nothing appended");
+    // The owner sees why in Finder: a read-only status file naming the path.
+    let status = root.join("status/owner-mac.txt");
+    let text = std::fs::read_to_string(&status).unwrap();
+    assert!(
+        text.contains("README") && text.contains("owner-mac"),
+        "{text}"
+    );
+    assert_eq!(mode(&status) & 0o7777, 0o640);
+    assert_eq!(mode(&root.join("status")) & 0o7777, 0o2750);
+    // A pass failing the same way leaves it as it was.
+    let before = std::fs::metadata(&status).unwrap().modified().unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    assert_eq!(volume.snapshot_owner_forks(&store).unwrap().failed.len(), 1);
+    assert_eq!(
+        std::fs::metadata(&status).unwrap().modified().unwrap(),
+        before
+    );
 
     std::fs::remove_file(shown.join(".forkignore")).unwrap();
     let snapped = volume.snapshot_owner_forks(&store).unwrap();
     assert_eq!(snapped.published.len(), 1, "{snapped:?}");
+    assert!(
+        !status.exists(),
+        "a snapshot that succeeds removes the status file"
+    );
     assert_eq!(
         last_ops(&store),
         vec![("notes.md".into(), Some(Mode::File))]
