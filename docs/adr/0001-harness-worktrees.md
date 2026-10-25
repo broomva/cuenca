@@ -57,6 +57,6 @@ No automatic Git push, merge, dependency install, harness patch or placement is 
 - The merged authority exposes takeover but no agent release endpoint. This slice
   does not invent a client-only ownership release or pretend that snapshot releases
   a fork. A final snapshot is supported; lease release needs its own core/server
-  contract and follow-up ticket. P20 should assess this explicit BRO-3311 gap.
+  contract, tracked in [BRO-3486](https://linear.app/broomva/issue/BRO-3486). P20 should assess this explicit BRO-3311 gap.
 - Local authority volume evidence does not prove Finder's WAN/SMB timing or deployment
   to the NUC. Record launch/volume evidence and unavailable checks in the receipt.

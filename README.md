@@ -12,6 +12,10 @@ The design is the spec, rev 2.2: [`docs/specs/2026-10-19-agent-native-change-pla
 | `cuenca-server` | The authority: the agent API on the tailnet, per-principal keys, node identity, the local admin socket, and the lander that opens pull requests |
 | `cuenca-cli` | The `cuenca` binary: agent verbs (`forks`, `fork`, `checkout`, `status`, `snapshot`, `diff`, `log`, `verify`, `land`) with `--json`, a per-checkout outbox, watch mode, `cuenca mcp` (the same verbs as MCP tools), `cuenca admin` owner verbs, and `cuenca serve` |
 
+For Claude Code, Codex, Grok, Gemini/Antigravity, T3 and Paseo, see
+[agent harness setup](docs/harnesses.md): `cuenca fork LOCATION --checkout DIR`
+creates a harness-compatible Git worktree.
+
 ## Agents over MCP
 
 `cuenca mcp` serves the agent verbs as MCP tools on standard input and output: one tool per verb, each with JSON input and output schemas. It acts as the principal whose key `cuenca login` stored (or `CUENCA_URL` and `CUENCA_TOKEN`). No owner verb is a tool, so an agent cannot mint a key, register a location or take a fork over through it. Paths given to tools are absolute.

@@ -123,11 +123,11 @@ base; land requests the authority's PR flow. Local Git hooks are not a replaceme
 for authority checks. Never work through the SMB mount as an agent.
 
 Stop the harness before final snapshot. There is currently no agent `release`
-verb/API; snapshot does **not** release ownership. Keep the checkout/backing store
+verb/API ([BRO-3486](https://linear.app/broomva/issue/BRO-3486)); snapshot does **not** release ownership. Keep the checkout/backing store
 until queued snapshots are acknowledged. Do not remove them while offline work is
 queued. Follow the authority's existing owner takeover procedure when custody must
 move. Removing a Git worktree does not release a Cuenca fork.
 
 First checkout cost is proportional to all fork files and Git object ingestion;
-package installation is separate. See the BRO-3311 dogfood receipt for measured
+package installation is separate. See the [BRO-3311 dogfood receipt](dogfood-bro-3311.md) for measured
 local timings, actual harness output, and launch/deployment limits.
