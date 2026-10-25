@@ -1,6 +1,7 @@
 # Cuenca 2026 dogfood receipts — Mac part (BRO-3259)
 
 Observed: 2026-10-25T07:31Z, from `date -u`. **Preparation only; node incomplete.**
+Delivery PR: https://github.com/broomva/cuenca/pull/31.
 R35, R41 and R43 remain pending. The required finish-line checker intentionally
 fails because there is no merged SHA. Nothing in this document substitutes a local
 projection, advisory verification, or open PR for live acceptance.
@@ -2099,14 +2100,14 @@ until the real owner/NUC receipts exist. Receipt paths below are relative to `do
     },
     "R41": {
       "status": "pending",
-      "pr": "https://github.com/broomva/cuenca/pull/30",
+      "pr": "https://github.com/broomva/cuenca/pull/31",
       "merged_sha": "",
       "receipt": "dogfood-2026/load.json",
       "reason": "30 forks, 510 acknowledged drafts, one kill/restart, zero lost/duplicate IDs in a scaled 121.3-second local trial; one-hour production load and bulk GitHub request-to-PR p95 remain unmeasured. Production waits on BRO-3461."
     },
     "R43": {
       "status": "pending",
-      "pr": "https://github.com/broomva/cuenca/pull/30",
+      "pr": "https://github.com/broomva/cuenca/pull/31",
       "merged_sha": "",
       "receipt": "dogfood-2026/benchmarks.json",
       "reason": "Local times measured. No disposable SMB endpoint reachable; actual Mac LAN SMB comparison waits on BRO-3461. VPS SSH timed out."
