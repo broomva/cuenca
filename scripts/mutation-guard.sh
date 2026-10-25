@@ -16,7 +16,19 @@
 # left a mutant in the source (.backup/path), failed to copy Cargo.lock back
 # (.backup/lock-failed) or left a test group still running (.backup/pgid): then the guard
 # names each and refuses to start, deleting nothing.
+#
+# One sweep at a time per checkout: every sweep mutates the same source and Cargo.lock,
+# whichever crate it is for and whatever CUENCA_MUT_TMPDIR it uses. The lock is a flock
+# on fd 9, held by this shell's open file and so released by the kernel when the sweep
+# exits, however it dies (BRO-3467 #7).
 guard_repo=$(git rev-parse --show-toplevel)
+guard_lock=$(git rev-parse --absolute-git-dir)/cuenca-mutation.lock
+exec 9>>"$guard_lock"
+if ! python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; then
+  echo "mutation-guard: another mutation sweep runs in $guard_repo (pid $(cat "$guard_lock" 2>/dev/null || echo unknown)); wait for it to finish" >&2
+  exit 2
+fi
+echo $$ >"$guard_lock"
 guard_root=${CUENCA_MUT_TMPDIR:-/tmp/cuenca-mut}
 case $guard_root in
   /*) ;;
