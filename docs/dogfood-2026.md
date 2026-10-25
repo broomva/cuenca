@@ -2181,3 +2181,18 @@ R35 still needs production Finder/Files/device/visibility receipts; R41 still ne
 the full one-hour production/conflict and bulk PR-open latency trial; R43 still
 needs paired Mac LAN SMB measurements. All wait on BRO-3461 (host) and BRO-3257
 (deploy). No missing PR, SHA, receipt path or MCP structure error remains.
+
+## Merged-receipt follow-up validation
+
+Observed 2026-10-25T12:51Z (`date -u`). Re-ran format, Clippy, workspace tests
+(370 passed, zero failed), MSRV 1.93 and security audit: all exit 0.
+[Follow-up summary](dogfood-2026/revision-ci-summary.json) and
+`revision-ci-{format,clippy,test,msrv,audit}.log` retain the actual output.
+The test run began from pushed checkpoint `8eb997d`; subsequent integration of
+already-published main and receipt edits changed documentation only, with Rust
+sources, Cargo manifests/lockfile and CI configuration unchanged. No load or
+production/SMB trial was repeated or promoted to pass.
+
+The canonical acceptance checker still exits 1 at R35; the complete diagnostic
+audit finds only the three pending statuses and no other failures. PR #31 remains
+a receipt update, not node completion.
