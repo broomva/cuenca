@@ -29,6 +29,7 @@ pub mod local;
 pub mod mcp;
 pub mod run;
 pub mod verbs;
+pub mod worktree;
 
 pub use client::{Client, ClientError};
 pub use config::Config;

@@ -52,6 +52,8 @@ enum Verb {
     },
     /// Materialise a fork's head in a directory (missing or empty) and make it a checkout.
     Checkout { fork: String, dir: PathBuf },
+    /// Materialise a fork as a detached git worktree for an agent harness.
+    Worktree { fork: String, dir: PathBuf },
     /// Show the checkout's fork, its changes since the last snapshot, and what is queued.
     Status {
         /// A path inside the checkout.
@@ -196,6 +198,7 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
             verbs::fork(&client()?, of, name.as_deref())?
         }
         Verb::Checkout { fork, dir } => verbs::checkout(&client()?, &fork, &dir)?,
+        Verb::Worktree { fork, dir } => cuenca_cli::worktree::checkout(&client()?, &fork, &dir)?,
         Verb::Status { dir } => verbs::status(client().ok().as_ref(), &dir)?,
         Verb::Snapshot {
             dir,
