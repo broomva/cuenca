@@ -3,7 +3,7 @@
 mod fixture;
 use cuenca_core::{LocationName, Store};
 use cuenca_server::materialise::Volume;
-use cuenca_tree::Tree;
+use cuenca_tree::{Entry, GitOid, RepoPath, Tree};
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::{Read, Write};
@@ -50,13 +50,8 @@ fn main() -> anyhow::Result<()> {
     let source = fixture::fixture(&source_path);
     let before = source.records(0, usize::MAX)?;
     let old_offset = before.last().map(|r| r.offset);
-    let count = source
-        .export_prefix()?
-        .trees
-        .values()
-        .flat_map(|t| t.entries().map(|(_, e)| e.oid()))
-        .collect::<std::collections::BTreeSet<_>>()
-        .len();
+    let old_blobs = source.export_prefix()?.reachable_blobs()?;
+    let old_count = old_blobs.len();
     drop(source);
     let baseline = root.join("baseline");
     let recipient = keys.join("recipient");
@@ -82,7 +77,22 @@ fn main() -> anyhow::Result<()> {
     };
     print!("{}", run_backup(&baseline)?);
     let source = Store::open(&source_path)?;
-    source.add_location(&LocationName::new("after-checkpoint")?, None, &Tree::new())?;
+    let fresh_bytes = b"NEW blob after baseline checkpoint\n";
+    let fresh_oid = GitOid::for_blob(fresh_bytes);
+    source.ingest_blob(fresh_oid, fresh_bytes.len() as u64, fresh_bytes.as_slice())?;
+    let fresh_tree = Tree::from_entries([(
+        RepoPath::new("new-after-baseline.txt")?,
+        Entry::File(fresh_oid),
+    )])?;
+    source.add_location(&LocationName::new("after-checkpoint")?, None, &fresh_tree)?;
+    let new_blobs = source.export_prefix()?.reachable_blobs()?;
+    let count = new_blobs.len();
+    assert!(!old_blobs.contains(&fresh_oid));
+    assert_eq!(count, old_count + 1);
+    let fresh_index = new_blobs.iter().position(|oid| *oid == fresh_oid).unwrap();
+    println!(
+        "post_baseline_new_blob={fresh_oid} upload_index={fresh_index} baseline_blobs={old_count} current_blobs={count}"
+    );
     let after = source.records(0, usize::MAX)?;
     let new_offset = after.last().map(|r| r.offset);
     let forks: Vec<_> = source.forks()?.iter().map(|f| f.name.to_string()).collect();
@@ -149,8 +159,17 @@ fn main() -> anyhow::Result<()> {
         };
         let restored = Store::open(&target)?;
         assert_eq!(&restored.records(0, usize::MAX)?, expected);
-        assert_eq!(receipt["verified_blobs"], count);
+        let expected_blobs = if phase == "after:commit" {
+            count
+        } else {
+            old_count
+        };
+        assert_eq!(receipt["verified_blobs"], expected_blobs);
         restored.replay_check()?;
+        assert_eq!(
+            restored.blob_info(fresh_oid)?.is_some(),
+            phase == "after:commit"
+        );
         let reference = Store::open(&source_path)?;
         assert_eq!(reference.forks()?, restored.forks()?);
         if phase == "after:commit" {
@@ -176,7 +195,7 @@ fn main() -> anyhow::Result<()> {
         assert_eq!(fs::read(&owner_file)?, b"owner draft\n");
         fs::write(&owner_file, b"owner can resume editing\n")?;
         println!(
-            "kill={phase} source_offset={new_offset:?} restored_offset={:?} verified_blobs={count} dangling=0 owner_open=ok intent_resume=once",
+            "kill={phase} source_offset={new_offset:?} restored_offset={:?} verified_blobs={expected_blobs} dangling=0 owner_open=ok intent_resume=once",
             expected.last().map(|r| r.offset)
         );
     }
@@ -202,6 +221,9 @@ fn main() -> anyhow::Result<()> {
     let mut plain = Vec::new();
     reader.read_to_end(&mut plain)?;
     let mut signed: serde_json::Value = serde_json::from_slice(&plain)?;
+    assert_eq!(new_offset, Some(11));
+    signed["manifest"]["offset"] = serde_json::Value::from(new_offset.unwrap());
+    signed["manifest"]["records"] = serde_json::Value::from(after.len());
     signed["signature"] = serde_json::Value::String("00".repeat(64));
     let mut cipher = Vec::new();
     let recipient = decrypt_key.to_public();
@@ -237,7 +259,9 @@ fn main() -> anyhow::Result<()> {
             && String::from_utf8_lossy(&out.stderr).contains("invalid authority signature"),
         "forged manifest was not refused by signature verification"
     );
-    println!("forged_manifest=refused reason=invalid_authority_signature fallback=refused");
+    println!(
+        "forged_manifest_offset=11 forged_manifest=refused reason=invalid_authority_signature fallback=refused"
+    );
     println!(
         "DOGFOOD source_offset={new_offset:?} previous_offset={old_offset:?} restored_offset={new_offset:?} verified_blobs={count} old_fork_ids={} new_fork_ids={} kill_boundaries={} wall_ms={}",
         forks.join(","),
@@ -246,7 +270,7 @@ fn main() -> anyhow::Result<()> {
         start.elapsed().as_millis()
     );
     println!(
-        "node stays incomplete: R2 restore pending the backup-custody owner grant; RPO timer waits on BRO-3461"
+        "node stays incomplete on R2/RPO by owner choice: local fixture only for now, R2 deferred; NUC RPO timer waits on BRO-3461"
     );
     Ok(())
 }

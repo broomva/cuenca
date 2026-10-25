@@ -103,4 +103,4 @@ resource limits and external custody. Mutation slice:
 `CUENCA_MUT_TMPDIR=/Volumes/Broomva/scratch/b3258m bash
 cuenca-server/scripts/mutation-check.sh --restore-only` (keep the run path ≤64 bytes).
 
-node stays incomplete: R2 restore pending the backup-custody owner grant; RPO timer waits on BRO-3461
+node stays incomplete on R2/RPO by owner choice: local fixture only for now, R2 deferred; NUC RPO timer waits on BRO-3461

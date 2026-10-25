@@ -106,7 +106,7 @@ fn import_checks_blob_presence_and_content_admission() {
     for symlink in [false, true] {
         let dir = tempfile::tempdir().unwrap();
         let target = Store::open(dir.path()).unwrap();
-        let bytes = b"../../outside";
+        let bytes = b"outside\0invalid";
         let oid = GitOid::for_blob(bytes);
         if symlink {
             target

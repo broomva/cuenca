@@ -612,6 +612,54 @@ mod tests {
         }
     }
     #[test]
+    fn signed_unreferenced_tree_and_blob_are_refused() {
+        let f = Fixture::new();
+        let mut signed = f.signed();
+        let journal = decrypt(
+            &f.identity,
+            &object_bytes(&f.objects, &signed.manifest.journal).unwrap(),
+            MAX_JOURNAL,
+        )
+        .unwrap();
+        let mut prefix: JournalPrefix = serde_json::from_slice(&journal).unwrap();
+        let bytes = b"unreferenced test bytes";
+        let oid = GitOid::for_blob(bytes);
+        let tree =
+            Tree::from_entries([(RepoPath::new("extra").unwrap(), Entry::File(oid))]).unwrap();
+        prefix.trees.insert(tree.git_tree_id(), tree);
+        let object = upload(
+            &f.objects,
+            encrypt(&f.identity.to_public(), bytes).unwrap(),
+            "test",
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        signed.manifest.blobs.push(BlobEntry {
+            oid,
+            sha256: digest(bytes),
+            size: bytes.len() as u64,
+            object,
+        });
+        signed.manifest.blobs.sort_by_key(|b| b.oid);
+        let journal = serde_json::to_vec(&prefix).unwrap();
+        signed.manifest.journal = upload(
+            &f.objects,
+            encrypt(&f.identity.to_public(), &journal).unwrap(),
+            "test",
+            &mut |_| Ok(()),
+        )
+        .unwrap();
+        signed.manifest.journal_sha256 = digest(&journal);
+        signed.manifest.journal_size = journal.len() as u64;
+        signed.signature = hex::encode(
+            f.signer
+                .sign(&signed_bytes(&signed.manifest).unwrap())
+                .to_bytes(),
+        );
+        f.publish(&signed);
+        f.refuses("restore tree roots mismatch");
+    }
+    #[test]
     fn local_objects_refuse_symlinks_and_fifos_without_blocking() {
         let dir = tempfile::tempdir().unwrap();
         let plain = dir.path().join("plain");

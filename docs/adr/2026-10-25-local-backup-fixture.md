@@ -7,7 +7,9 @@ Date: 2026-10-25
 
 The workspace's accepted backup-format ADR fixes stable journal prefixes, age,
 authority signatures, manifest-last publication and independently pinned trust.
-The backup-custody ADR remains proposed. R2 acceptance and the NUC timer are blocked.
+The owner answered at 12:41Z on 2026-10-25: local fixture only for now; R2 is
+deferred. The node stays incomplete on R2/RPO by owner choice; the NUC timer
+also waits on BRO-3461. The backup-custody ADR grants no production custody.
 
 ## Options
 
@@ -21,6 +23,11 @@ The backup-custody ADR remains proposed. R2 acceptance and the NUC timer are blo
 `Store::export_prefix` exports records and every historical tree referenced by
 those records. `Store::import_prefix` preserves original offsets/times and rebuilds
 projections through existing transition and admission rules in one transaction.
+Tree keys must equal the roots referenced by journal records; reachable blobs are
+enumerated from those roots. Tree ids, blob presence/content, remote syntax,
+changeset id/ops/target and VerifyRecorded base manifest identity and declared
+checks are checked before commit. Verify results remain advisory; restore never
+reruns checks or promotes them to trusted verdicts.
 
 Use age x25519 recipients and Ed25519 signatures. Sign the domain
 `cuenca-backup-manifest-v1` followed by a NUL and serde JSON of the typed manifest
@@ -46,7 +53,11 @@ is available. Equal offsets with different journal digests are refused. It verif
 independently pinned Ed25519 trust, version, offsets, journal integrity, exact
 blob reachability, each blob's git oid/SHA-256/size, and replay rules. Invalid
 newest committed data fails visibly; it never falls back to an older good point.
-Restore builds in a private sibling directory and publishes with no replacement.
+Restore creates staging with mode 0700 and preserves that mode on the published
+destination. Empty relative parents normalize to `.`. The parent is opened and
+synced before publication, staging is synced before rename, and the parent is
+synced again after no-replace publication. Validation refusals leave no destination;
+a post-publication I/O sync error may leave a complete destination to inspect.
 It never merges into an existing authority state.
 
 ## Consequences and limits
@@ -69,6 +80,7 @@ requires independent host provisioning and newly minted agent credentials; journ
 revocations survive. Signing trust and owner decryption custody remain external.
 
 The drill generates throwaway keys on the SSD; no owner keys or real credentials.
-It sends SIGKILL before/after every blob/journal/manifest upload and completion
+A fifth blob is added only after the baseline; the forged manifest claims the
+newer offset 11. It sends SIGKILL before/after every blob/journal/manifest upload and completion
 publication, verifies the prior/new prefix as appropriate, opens a restored owner
 fork through the real materialiser and resumes a pending intent without duplication.
