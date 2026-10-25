@@ -65,6 +65,13 @@ fn import_round_trips_records_and_refuses_nonempty_destinations() {
         source.replay_check().unwrap()
     );
     assert!(target.import_prefix(&prefix).is_err());
+    // Replaying duplicate events already refuses a nonempty prefix. An empty
+    // prefix must ALSO refuse a nonempty destination: this pins the entry guard.
+    let empty = JournalPrefix {
+        records: vec![],
+        trees: BTreeMap::new(),
+    };
+    assert!(target.import_prefix(&empty).is_err());
     assert_eq!(target.len().unwrap(), prefix.records.len() as u64);
 }
 #[test]
