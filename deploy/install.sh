@@ -181,8 +181,12 @@ for unit in nmbd samba-ad-dc; do
     fi
 done
 systemctl enable smbd cuenca >/dev/null 2>&1
-systemctl restart smbd
-systemctl restart cuenca
+# Both units wait for the tailnet before starting; with it down, a restart blocks for minutes
+# and then fails. Say so now instead.
+CUENCA_WAIT_SECS=10 /usr/local/lib/cuenca/wait-tailnet \
+    || die "the tailnet is not up on this host (see wait-tailnet above); run 'tailscale up' and re-run this script"
+systemctl restart smbd || die "smbd did not start; journalctl -u smbd"
+systemctl restart cuenca || die "cuenca did not start; journalctl -u cuenca"
 for unit in smbd cuenca; do
     for _ in $(seq 1 30); do systemctl is-active --quiet "$unit" && break; sleep 1; done
     systemctl is-active --quiet "$unit" || die "$unit did not start; journalctl -u $unit"

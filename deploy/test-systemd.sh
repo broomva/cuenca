@@ -60,8 +60,17 @@ on_host 'pid=$(systemctl show -p MainPID --value cuenca); kill -9 "$pid"; sleep 
     [ "$(systemctl show -p MainPID --value cuenca)" != "$pid" ]'
 echo "--- a second install keeps everything working"
 on_host "bash /deploy/install.sh $allow >/dev/null && bash /deploy/check.sh | tail -n1"
+echo "--- without tailscale0's IPv6 address, smbd does not start, and the journal says which address"
+on_host 'ip -6 addr del fd7a:115c:a1e0::1/128 dev tailscale0; systemctl set-environment CUENCA_WAIT_SECS=3
+    if systemctl restart smbd 2>/dev/null; then echo "smbd started without the IPv6 address"; exit 1; fi
+    journalctl -u smbd --no-pager | grep -m1 "missing its IPv6 address fd7a:115c:a1e0::1"
+    ip -6 addr add fd7a:115c:a1e0::1/128 dev tailscale0 nodad; systemctl unset-environment CUENCA_WAIT_SECS
+    systemctl restart smbd && bash /deploy/check.sh | tail -n1'
 echo "--- without tailscale0, smbd does not start (it waits, then fails)"
 on_host 'ip link del tailscale0; systemctl set-environment CUENCA_WAIT_SECS=3
     if systemctl restart smbd 2>/dev/null; then echo "smbd started without tailscale0"; exit 1; fi
-    journalctl -u smbd --no-pager | grep -m1 "wait-tailnet"'
+    journalctl -u smbd --no-pager | grep -m1 "wait-tailnet: tailscale0 is missing an IPv4 address"'
+echo "--- with the tailnet down, install.sh stops at once with its own message"
+on_host "t0=\$(date +%s); if bash /deploy/install.sh $allow >/tmp/err 2>&1; then echo 'install.sh passed with no tailnet'; exit 1; fi
+    grep -m1 'the tailnet is not up' /tmp/err; [ \$(( \$(date +%s) - t0 )) -lt 60 ] && echo \"stopped in \$(( \$(date +%s) - t0 ))s\""
 echo "test-systemd: all passed"

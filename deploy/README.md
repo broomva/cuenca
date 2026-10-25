@@ -10,7 +10,7 @@ One Ubuntu 24.04 host on the tailnet runs the Cuenca authority (`cuenca serve`) 
 | `smbd-cuenca.conf` | A drop-in for Ubuntu's `smbd.service`: start only once `tailscale0` has its address |
 | `smb.conf.in` | Samba's configuration: tailnet only, one account, server-side modes, `fruit` + `streams_xattr` |
 | `tailnet-addr.sh` | Sourced by both scripts: an `--allow` / `hosts allow` address must be one tailnet address, written canonically |
-| `wait-tailnet` | Waits for `tailscale0`'s IPv4 address (both units run it before starting) |
+| `wait-tailnet` | Waits for `tailscale0`'s IPv4 address and, when the node has one, its IPv6 address (both units run it before starting) |
 | `test-container.sh` | CI: install twice in `ubuntu:24.04`, check that nothing moved, and check that `check.sh` catches each planted fault |
 | `test-systemd.sh` | Before changing the units: the real binary under Ubuntu's systemd in a privileged container, with a dummy `tailscale0`. It runs the full `check.sh`, shows that Samba refuses the host's own address (with a control that logs in as `cuenca-owner` and finds `main/` read-only), restarts after a kill, and shows that `smbd` waits for `tailscale0` |
 
