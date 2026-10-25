@@ -63,3 +63,45 @@ fn export_is_one_snapshot_and_import_rejects_invalid_offsets_atomically() {
     fixture::assert_same(&source, &target);
     assert!(target.import_prefix(&prefix).is_err());
 }
+
+#[test]
+fn concurrent_writes_cannot_split_a_backup_read_snapshot() {
+    use cuenca_core::LocationName;
+    use cuenca_tree::{Entry, GitOid, RepoPath, Tree};
+    let dir = tempfile::tempdir().unwrap();
+    let source = std::sync::Arc::new(Store::open(dir.path().join("source")).unwrap());
+    let writer = source.clone();
+    let task = std::thread::spawn(move || {
+        for i in 0..20 {
+            let bytes = format!("blob-{i}");
+            let oid = GitOid::for_blob(bytes.as_bytes());
+            writer
+                .ingest_blob(oid, bytes.len() as u64, bytes.as_bytes())
+                .unwrap();
+            let tree =
+                Tree::from_entries([(RepoPath::new("data").unwrap(), Entry::File(oid))]).unwrap();
+            writer
+                .add_location(&LocationName::new(format!("loc-{i}")).unwrap(), None, &tree)
+                .unwrap();
+        }
+    });
+    for i in 0..5 {
+        let prefix = source.export_prefix().unwrap();
+        let target = Store::open(dir.path().join(format!("target-{i}"))).unwrap();
+        for tree in prefix.trees.values() {
+            for (_, e) in tree.entries() {
+                let bytes = source.read_blob(e.oid()).unwrap();
+                target
+                    .ingest_blob(e.oid(), bytes.len() as u64, bytes.as_slice())
+                    .unwrap();
+            }
+        }
+        target.import_prefix(&prefix).unwrap();
+        assert_eq!(target.records(0, usize::MAX).unwrap(), prefix.records);
+        assert_eq!(
+            target.replay_check().unwrap().records,
+            prefix.records.len() as u64
+        );
+    }
+    task.join().unwrap();
+}

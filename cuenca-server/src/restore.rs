@@ -450,6 +450,7 @@ mod tests {
     use super::*;
     use cuenca_core::LocationName;
     use cuenca_tree::{Entry, RepoPath, Tree};
+    use redb::ReadableTable;
 
     struct Fixture {
         dir: tempfile::TempDir,
