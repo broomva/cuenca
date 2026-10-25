@@ -79,7 +79,7 @@ enum Key {
         /// A location whose main it reads and which it may fork (repeatable).
         #[arg(long = "location")]
         locations: Vec<String>,
-        /// Another fork it may read (repeatable).
+        /// Another fork it may read, if it is a fork of a `--location` (repeatable).
         #[arg(long = "fork")]
         forks: Vec<String>,
     },

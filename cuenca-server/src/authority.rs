@@ -443,14 +443,17 @@ impl Caller {
         self.owner_device() || self.key.grant.locations.contains(&location.name)
     }
 
-    /// A fork: an owner device reads every one; an agent, the forks its grant names and
-    /// the fork it holds now (its principal on its key's node: a holder, as the core
-    /// defines one), and no other. A former holder
+    /// A fork: an owner device reads every one; an agent, the forks its grant names of
+    /// the locations it is granted, and the fork it holds now (its principal on its
+    /// key's node: a holder, as the core defines one), and no other. Fork names are
+    /// first-come, so a granted name someone else creates first, from a location the
+    /// agent is not granted, stays unread (BRO-3336). A former holder
     /// stops reading a fork when it is taken over; it keeps the sibling its stale
     /// drafts go to, which it holds.
     pub fn sees_fork(&self, fork: &Fork) -> bool {
         self.owner_device()
-            || self.key.grant.forks.contains(&fork.name)
+            || (self.key.grant.forks.contains(&fork.name)
+                && self.key.grant.locations.contains(&fork.location))
             || fork.holder() == Some(&self.holder)
     }
 
