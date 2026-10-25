@@ -30,6 +30,16 @@ for bad in "--allow 8.8.8.8" "--allow 100.128.0.1" "--allow 100.64.0.1/10" "--al
     "--allow fe80::1" "--allow FD7A:115C:A1E0:" "" "--allow 100.82.213.74 --volume rel"; do
     if bash /deploy/install.sh --no-start --bind 100.64.0.1:7419 $bad >/dev/null 2>&1; then fail "install accepted: $bad"; fi
 done
+# Each refused for its own reason: the message names the flag at fault.
+refused() { if bash /deploy/install.sh --no-start --bind 100.64.0.1:7419 $2 >/tmp/err 2>&1; then fail "install accepted: $2"; fi
+    grep -q -- "$1" /tmp/err || { cat /tmp/err; fail "refused for another reason: $2"; }; }
+for bad in 100.64.0.256 100.064.0.1 100.64.0.01 fd7a:115c:a1e0:0:0:0:0:1 fd7a:115c:a1e0:::::1 fd7a:115c:a1e0::1::2 \
+    fd7a:115c:a1e0::0001 FD7A:115C:A1E0::1 fd7a:115c:a1e0:0:0:1:0:0 fd7a:115c:a1e0:0:1:0:0:0:1 :fd7a:115c:a1e0::1; do
+    refused "--allow " "--allow 100.82.213.74 --allow $bad"
+done
+for bad in /srv/../etc /. /srv/./x //srv/x /srv/x/ /var/lib/cuenca /var/lib/cuenca/v /var/lib /etc /; do
+    refused "--volume " "--allow 100.82.213.74 --volume $bad"
+done
 echo "test-container: bad --allow / --volume refused"
 
 # check.sh catches a broken host, one break at a time.
@@ -46,6 +56,8 @@ sed -i "s/wide links = no/wide links = yes/" /etc/samba/smb.conf; expect_fail "w
 sed -i "s/hosts deny = ALL/hosts deny = 1.2.3.4/" /etc/samba/smb.conf; expect_fail "hosts deny not ALL"; cp /smb.ok /etc/samba/smb.conf
 sed -i "s/^   hosts allow = .*/   hosts allow = 100.0.0.0\/8/" /etc/samba/smb.conf; expect_fail "hosts allow a range"; cp /smb.ok /etc/samba/smb.conf
 sed -i "s/^   hosts allow = .*/   hosts allow = fd7a:115c:a1e0::\/48/" /etc/samba/smb.conf; expect_fail "hosts allow an IPv6 range"; cp /smb.ok /etc/samba/smb.conf
+sed -i "s/^   hosts allow = .*/   hosts allow = fd7a:115c:a1e0:0:0:0:0:2/" /etc/samba/smb.conf; expect_fail "hosts allow a non-canonical IPv6 address"; cp /smb.ok /etc/samba/smb.conf
+sed -i "s/^   hosts allow = .*/   hosts allow = 100.64.0.300/" /etc/samba/smb.conf; expect_fail "hosts allow an IPv4 octet over 255"; cp /smb.ok /etc/samba/smb.conf
 mv /usr/bin/gh /gh; expect_fail "no gh"; mv /gh /usr/bin/gh
 sed -i "s/^   vfs objects = .*/   vfs objects = fruit/" /etc/samba/smb.conf; expect_fail "no streams_xattr"; cp /smb.ok /etc/samba/smb.conf
 sed -i "s/^   map to guest = Never/   map to guest = Bad User/" /etc/samba/smb.conf; expect_fail "guest mapping"; cp /smb.ok /etc/samba/smb.conf

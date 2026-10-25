@@ -21,7 +21,9 @@ docker run -d --name "$name" --privileged --cgroupns=host -v /sys/fs/cgroup:/sys
     -v "$here":/deploy:ro -v "$binary":/cuenca-bin:ro "$img" >/dev/null
 on_host() { docker exec "$name" bash -euo pipefail -c "$1"; }
 for _ in $(seq 1 30); do on_host 'systemctl is-system-running 2>/dev/null | grep -qE "running|degraded"' && break; sleep 1; done
-on_host 'sysctl -qw net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0
+# The image ships a policy-rc.d; remove it so install.sh's own hold of the stock starts runs.
+on_host 'rm -f /usr/sbin/policy-rc.d
+    sysctl -qw net.ipv6.conf.all.disable_ipv6=0 net.ipv6.conf.default.disable_ipv6=0
     ip link add tailscale0 type dummy && ip addr add 100.64.0.1/32 dev tailscale0
     ip -6 addr add fd7a:115c:a1e0::1/128 dev tailscale0 nodad && ip link set tailscale0 up
     printf "#!/bin/sh\ncase \"\$1 \$2\" in \"ip -4\") echo 100.64.0.1;; \"ip -6\") echo fd7a:115c:a1e0::1;; *) echo stub >&2; exit 1;; esac\n" >/usr/local/bin/tailscale
@@ -30,6 +32,8 @@ allow="--allow 100.82.213.74 --allow fd7a:115c:a1e0::2 --allow 100.71.190.125"
 on_host "bash /deploy/install.sh --binary /cuenca-bin $allow" \
     | grep -v -E '^(Get|Selecting|Preparing|Unpacking|Setting up|Processing|Fetched|debconf|Created symlink|\(Reading)' || true
 on_host 'bash /deploy/check.sh'
+echo "--- install.sh removed the policy-rc.d it wrote to hold the stock starts"
+on_host '[ ! -e /usr/sbin/policy-rc.d ] && echo "no policy-rc.d left"'
 echo "--- the volume, as the authority made it"
 on_host 'sleep 3; stat -c "%a %U:%G %n" /srv/cuenca/volume /srv/cuenca/volume/main /srv/cuenca/volume/forks /srv/cuenca/volume/.cuenca'
 echo "--- the authority's own host is refused by Samba over both addresses (hosts allow names only enrolled devices)"
