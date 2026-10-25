@@ -3,7 +3,11 @@
 
 use std::collections::HashSet;
 use std::io::Write as _;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
+use std::sync::Mutex;
+
+use rustix::fs::{AtFlags, CWD, FileType, OFlags, openat, statat};
+use rustix::io::Errno;
 use std::process::{Command, Stdio};
 
 use anyhow::{Context as _, ensure};
@@ -19,14 +23,35 @@ use crate::{Client, Report};
 struct Remote<'a> {
     client: &'a Client,
     fork: &'a ForkName,
+    objects: PathBuf,
+    fetching: Mutex<()>,
 }
 
 impl BlobSource for Remote<'_> {
     fn fetch(&self, oid: GitOid) -> std::io::Result<Option<Fetched>> {
-        self.client
+        // Serialize cache fills: duplicate files may be materialised by different
+        // workers, but each distinct blob crosses HTTP only once.
+        let _fetching = self
+            .fetching
+            .lock()
+            .map_err(|_| std::io::Error::other("blob cache lock"))?;
+        let source = cuenca_fs::ObjectDir::new(&self.objects);
+        if let Some(found) = source.fetch(oid)? {
+            return Ok(Some(found));
+        }
+        let Some(bytes) = self
+            .client
             .fork_blob(self.fork, oid)
-            .map(|b| b.map(Fetched::Bytes))
-            .map_err(std::io::Error::other)
+            .map_err(std::io::Error::other)?
+        else {
+            return Ok(None);
+        };
+        let hex = oid.to_hex();
+        let dir = self.objects.join(&hex[..2]);
+        std::fs::create_dir_all(&dir)?;
+        std::fs::write(dir.join(&hex[2..]), bytes)?;
+        // cuenca-fs hashes the cached file before accepting it into the checkout.
+        source.fetch(oid)
     }
 }
 
@@ -74,23 +99,94 @@ fn git(dir: &Path, args: &[&std::ffi::OsStr], input: &[u8]) -> anyhow::Result<St
     Ok(String::from_utf8(out.stdout)?.trim().to_string())
 }
 
+/// Validate a host bootstrap destination before any remote fork creation.
+/// Walk the original components (including those before `..`) with no-follow
+/// descriptor operations. `components()` removes repeated/trailing slashes and `.`.
+/// The returned physical path is used unchanged for registration and materialisation.
+/// The caller exclusively owns the destination and its ancestors until return:
+/// Git itself uses pathname-based APIs, so concurrent ancestor renames are unsupported.
+pub fn prepare(dest: &Path) -> anyhow::Result<PathBuf> {
+    ensure!(
+        !dest.as_os_str().is_empty(),
+        "worktree destination is empty"
+    );
+    let input = if dest.is_absolute() {
+        dest.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(dest)
+    };
+    let components: Vec<_> = input.components().collect();
+    let flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::CLOEXEC | OFlags::NOFOLLOW;
+    let mut at = openat(CWD, "/", flags, rustix::fs::Mode::empty())?;
+    let mut root = PathBuf::from("/");
+    for (i, component) in components.iter().enumerate() {
+        let name = match component {
+            Component::RootDir | Component::CurDir => continue,
+            Component::Normal(name) => *name,
+            Component::ParentDir => std::ffi::OsStr::new(".."),
+            Component::Prefix(_) => anyhow::bail!("unsupported worktree path"),
+        };
+        match statat(&at, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(st) => {
+                ensure!(
+                    FileType::from_raw_mode(st.st_mode) != FileType::Symlink,
+                    "worktree destination has a symlink component: {}",
+                    dest.display()
+                );
+                ensure!(
+                    FileType::from_raw_mode(st.st_mode) == FileType::Directory,
+                    "worktree destination component is not a directory: {}",
+                    dest.display()
+                );
+                at = openat(&at, name, flags, rustix::fs::Mode::empty()).with_context(|| {
+                    format!(
+                        "opening worktree component without following symlinks: {}",
+                        dest.display()
+                    )
+                })?;
+            }
+            Err(Errno::NOENT) if i + 1 == components.len() => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("checking worktree component: {}", dest.display()));
+            }
+        }
+        if *component == Component::ParentDir {
+            root.pop();
+        } else {
+            root.push(name);
+        }
+    }
+    ensure!(
+        root.parent().is_some(),
+        "worktree destination must have a parent"
+    );
+    if root.exists() {
+        ensure!(
+            std::fs::read_dir(&root)?.next().is_none(),
+            "worktree destination must be missing or empty: {}",
+            root.display()
+        );
+        // Git removes an empty destination after a failed add. Fail before invoking
+        // it for a read-only directory, even when the process could override mode bits.
+        use std::os::unix::fs::PermissionsExt as _;
+        ensure!(
+            std::fs::metadata(&root)?.permissions().mode() & 0o222 != 0,
+            "worktree destination is not writable: {}",
+            root.display()
+        );
+        let _probe =
+            tempfile::tempfile_in(&root).context("worktree destination is not writable")?;
+    }
+    Local::prepare_root(root)
+}
+
 /// Materialise a fork as a detached git worktree, with exact Cuenca bytes and index.
-/// The destination must be missing or empty, its parent must exist, and it must be
-/// exclusively owned by this caller until return (as with `cuenca checkout`).
+/// Destination and ancestors must be exclusively owned until return; see [`prepare`].
 /// Failures preserve destination files; no force removal or reset is performed.
 pub fn checkout(client: &Client, fork: &str, dest: &Path) -> anyhow::Result<Report> {
-    ensure!(
-        !std::fs::symlink_metadata(dest).is_ok_and(|m| m.file_type().is_symlink()),
-        "worktree destination must not be a symlink: {}",
-        dest.display()
-    );
     let name = ForkName::new(fork)?;
-    let root = Local::prepare(dest)?;
-    ensure!(
-        !root.exists() || (root.is_dir() && std::fs::read_dir(&root)?.next().is_none()),
-        "worktree destination must be missing or empty: {}",
-        root.display()
-    );
+    let root = prepare(dest)?;
     let f = client.fork(&name)?;
     let (head, tree) = client.fork_tree(&name)?;
     let parent = root
@@ -101,12 +197,15 @@ pub fn checkout(client: &Client, fork: &str, dest: &Path) -> anyhow::Result<Repo
         .prefix(".cuenca-stage-")
         .tempdir_in(parent)?;
     let files = stage.path().join("files");
+    let objects = stage.path().join("objects");
     cuenca_fs::checkout(
         &tree,
         &files,
         &Remote {
             client,
             fork: &name,
+            objects: objects.clone(),
+            fetching: Mutex::new(()),
         },
     )?;
     let stores = crate::config::state_home()?.join("worktrees");
@@ -125,28 +224,29 @@ pub fn checkout(client: &Client, fork: &str, dest: &Path) -> anyhow::Result<Repo
         ],
         b"",
     )?;
-    // Feed one verified blob at a time, rather than retaining a whole fork in RAM.
+    // Reuse the object files verified by the materialiser; do not fetch them again.
     let mut seen = HashSet::new();
     for (_, entry) in tree.entries() {
         if !seen.insert(entry.oid()) {
             continue;
         }
-        let bytes = client
-            .fork_blob(&name, entry.oid())?
-            .context("fork blob missing")?;
+        let hex = entry.oid().to_hex();
+        let object = objects.join(&hex[..2]).join(&hex[2..]);
         let oid = git(
             repo,
             &[
                 "hash-object".as_ref(),
                 "-w".as_ref(),
-                "--stdin".as_ref(),
                 "--no-filters".as_ref(),
+                object.as_os_str(),
             ],
-            &bytes,
+            b"",
         )?;
         ensure!(oid == entry.oid().to_hex(), "fork blob hash mismatch");
     }
-    let oid = Repo::open(repo).write_tree(&tree, &Blobs::new())?;
+    let oid = Repo::open(repo)
+        .with_isolated_config()
+        .write_tree(&tree, &Blobs::new())?;
     ensure!(oid == head, "fork head/tree mismatch");
     let commit = git(
         repo,
@@ -177,7 +277,8 @@ pub fn checkout(client: &Client, fork: &str, dest: &Path) -> anyhow::Result<Repo
         let entry = entry?;
         std::fs::rename(entry.path(), root.join(entry.file_name()))?;
     }
-    let _local = Local::create(State {
+    git(&root, &["update-index".as_ref(), "--refresh".as_ref()], b"")?;
+    let local = Local::create(State {
         format: 1,
         root: root.clone(),
         root_id: crate::local::identity(&root)?,
@@ -187,10 +288,18 @@ pub fn checkout(client: &Client, fork: &str, dest: &Path) -> anyhow::Result<Repo
         epoch: f.epoch(),
         published: tree.clone(),
     })?;
+    let mut cache = local.load_cache()?;
+    let seen = crate::verbs::look(&root, &tree, &mut cache)?;
+    local.save_cache(&cache)?;
+    let ignored_note = crate::verbs::ignored_note(&seen.ignored);
     Ok(Report {
         json: json!({ "fork": name, "location": f.location, "epoch": f.epoch(), "head": head,
-            "root": root, "git_dir": repo, "commit": commit, "files": tree.len() }),
-        text: format!("worktree of {name} (head {head}) into {}\n", root.display()),
+            "root": root, "git_dir": repo, "commit": commit, "files": tree.len(),
+            "clean": seen.changes.is_empty(), "ignored": seen.ignored }),
+        text: format!(
+            "worktree of {name} (head {head}) into {}\n{ignored_note}",
+            root.display()
+        ),
         exit: 0,
     })
 }

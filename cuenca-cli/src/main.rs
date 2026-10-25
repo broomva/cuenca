@@ -199,6 +199,10 @@ fn run(cli: Cli) -> anyhow::Result<i32> {
                 (Some(l), None) => verbs::ForkOf::Location(l),
                 (None, None) => unreachable!("clap requires a location or --from"),
             };
+            // Local bootstrap failures must not leave a new fork on the authority.
+            if let Some(dir) = &checkout {
+                cuenca_cli::worktree::prepare(dir)?;
+            }
             let client = client()?;
             let created = verbs::fork(&client, of, name.as_deref())?;
             match checkout {

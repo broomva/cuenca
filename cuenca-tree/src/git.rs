@@ -119,6 +119,7 @@ pub struct Repo {
     path: PathBuf,
     max_blob_bytes: u64,
     max_total_bytes: u64,
+    isolated_config: bool,
 }
 
 impl Repo {
@@ -127,6 +128,7 @@ impl Repo {
             path: path.into(),
             max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
             max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
+            isolated_config: false,
         }
     }
 
@@ -138,9 +140,25 @@ impl Repo {
         self
     }
 
+    /// Ignore inherited Git overrides and global/system configuration for a private
+    /// repository created by the caller. Repository-local format/clone checks remain.
+    pub fn with_isolated_config(mut self) -> Self {
+        self.isolated_config = true;
+        self
+    }
+
     fn command(&self, args: &[&str]) -> Command {
         let mut cmd = Command::new("git");
         cmd.arg("-C").arg(&self.path).args(args);
+        if self.isolated_config {
+            for (key, _) in std::env::vars_os() {
+                if key.to_string_lossy().starts_with("GIT_") {
+                    cmd.env_remove(key);
+                }
+            }
+            cmd.env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1");
+        }
         for var in REDIRECTING_ENV.iter().chain(&["LANGUAGE"]) {
             cmd.env_remove(var);
         }
