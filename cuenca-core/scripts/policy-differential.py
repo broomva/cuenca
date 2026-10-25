@@ -103,18 +103,20 @@ SAMPLE_PATHS = (
 
 
 def non_string_key(node) -> str | None:
-    if isinstance(node, dict):
-        for k, v in node.items():
-            if not isinstance(k, str):
-                return f"a non-string mapping key {k!r}"
-            found = non_string_key(v)
-            if found is not None:
-                return found
-    elif isinstance(node, list):
-        for item in node:
-            found = non_string_key(item)
-            if found is not None:
-                return found
+    seen: set[int] = set()
+    stack = [node]
+    while stack:
+        cur = stack.pop()
+        if id(cur) in seen:
+            continue
+        seen.add(id(cur))
+        if isinstance(cur, dict):
+            for k, v in cur.items():
+                if not isinstance(k, str):
+                    return f"a non-string mapping key {k!r}"
+                stack.append(v)
+        elif isinstance(cur, list):
+            stack.extend(cur)
     return None
 
 
