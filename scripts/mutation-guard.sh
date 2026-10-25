@@ -17,7 +17,7 @@
 # A run dir is named run-<pid> and holds .backup. When the next run starts, one whose
 # process is gone (SIGKILLed, so its EXIT trap never ran) is removed, unless it may have
 # left a mutant in the source (.backup/path), failed to copy Cargo.lock back
-# (.backup/lock-failed) or left a test group still running (.backup/pgid): then the guard
+# (.backup/lock-failed) or left a test session still running (.backup/pgid): then the guard
 # names each and refuses to start, deleting nothing.
 #
 # One sweep at a time per checkout: every sweep mutates the same source and Cargo.lock,
@@ -31,6 +31,12 @@
 # failed, 130 / 143 interrupted by SIGINT / SIGTERM.
 guard_repo=$(git rev-parse --show-toplevel)
 guard_lock=$(git rev-parse --absolute-git-dir)/cuenca-mutation.lock
+# A test run is killed by session, not by process group: a grandchild that calls setpgid,
+# as cuenca-cli's check runner does, stays in the session (BRO-3467 #2). The pgid file
+# holds the session id, and macOS pgrep cannot match a session, so bounded.py does it.
+guard_session() { python3 "$guard_repo/scripts/bounded.py" "$@"; }
+# Alive unless proven gone: a failed ps (status 2) counts as alive, so nothing is deleted.
+guard_alive() { guard_session --session-alive "$1"; [ $? -ne 1 ]; }
 exec 9>>"$guard_lock"
 if ! python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; then
   # The file names the holder's shell pid and, once known, its pgid file. bounded.py
@@ -42,7 +48,7 @@ if ! python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>
   else
     echo "mutation-guard: the sweep that locked $guard_repo (pid ${guard_holder:-unknown}) is gone, but an orphaned test runner still holds $guard_lock" >&2
     if [ -n "$guard_holder_pgid" ] && [ -s "$guard_holder_pgid" ]; then
-      echo "  its tests run as process group $(cat "$guard_holder_pgid"): kill -KILL -- -$(cat "$guard_holder_pgid")" >&2
+      echo "  its tests run as session $(cat "$guard_holder_pgid"): python3 $guard_repo/scripts/bounded.py --kill-session $(cat "$guard_holder_pgid")" >&2
     else
       echo "  find it with: lsof $guard_lock" >&2
     fi
@@ -56,14 +62,14 @@ case $guard_root in
   *) echo "mutation-guard: CUENCA_MUT_TMPDIR must be absolute, not $guard_root" >&2; exit 5 ;;
 esac
 mkdir -p "$guard_root"
-# Without ps and pgrep every old run would look dead.
-command -v ps >/dev/null && command -v pgrep >/dev/null || { echo "mutation-guard: needs ps and pgrep" >&2; exit 5; }
+# Without ps every old run would look dead.
+command -v ps >/dev/null || { echo "mutation-guard: needs ps" >&2; exit 5; }
 for stale in "$guard_root"/run-*; do
   pid=${stale##*/run-}
   case $pid in '' | *[!0-9]*) continue ;; esac
   [ -d "$stale/.backup" ] || continue
   ps -p "$pid" >/dev/null 2>&1 && continue
-  if [ -s "$stale/.backup/path" ] || [ -e "$stale/.backup/lock-failed" ] || { [ -s "$stale/.backup/pgid" ] && pgrep -g "$(cat "$stale/.backup/pgid")" >/dev/null; }; then
+  if [ -s "$stale/.backup/path" ] || [ -e "$stale/.backup/lock-failed" ] || { [ -s "$stale/.backup/pgid" ] && guard_alive "$(cat "$stale/.backup/pgid")"; }; then
     echo "mutation-guard: run $pid died without cleaning up. Before running again:" >&2
     if [ -s "$stale/.backup/path" ]; then
       echo "  $(cat "$stale/.backup/path") may still be mutated: compare it with $stale/.backup/file and restore it (this overwrites edits made since)" >&2
@@ -71,8 +77,8 @@ for stale in "$guard_root"/run-*; do
     elif [ -e "$stale/.backup/lock-failed" ]; then
       echo "  Cargo.lock was not restored: copy $stale/.backup/Cargo.lock back over it, or take it from git" >&2
     fi
-    if [ -s "$stale/.backup/pgid" ] && pgrep -g "$(cat "$stale/.backup/pgid")" >/dev/null; then
-      echo "  its tests still run as process group $(cat "$stale/.backup/pgid"): kill -KILL -- -$(cat "$stale/.backup/pgid")" >&2
+    if [ -s "$stale/.backup/pgid" ] && guard_alive "$(cat "$stale/.backup/pgid")"; then
+      echo "  its tests still run as session $(cat "$stale/.backup/pgid"): python3 $guard_repo/scripts/bounded.py --kill-session $(cat "$stale/.backup/pgid")" >&2
     fi
     echo "  then remove $stale" >&2
     exit 5
@@ -90,10 +96,10 @@ guard_backup=$guard_dir/.backup
 mkdir -p "$guard_backup"
 echo "$$ $guard_backup/pgid" >"$guard_lock"
 export TMPDIR=$guard_dir
-# A group left behind by a SIGKILLed bounded.py. Call before restoring the source, so an
+# A session left behind by a SIGKILLed bounded.py. Call before restoring the source, so an
 # orphaned cargo cannot rewrite it afterwards.
 # A bounded.py still running (the sweep was interrupted while it waited) is TERMed first:
-# it kills its group itself, and reaping it here frees the sweep lock it inherited.
+# it kills its session itself, and reaping it here frees the sweep lock it inherited.
 guard_bounded=
 guard_kill() {
   if [ -n "$guard_bounded" ]; then
@@ -101,10 +107,15 @@ guard_kill() {
     wait "$guard_bounded" 2>/dev/null
     guard_bounded=
   fi
-  [ -s "$guard_backup/pgid" ] && kill -KILL -- "-$(cat "$guard_backup/pgid")" 2>/dev/null
+  # A session that could not be emptied keeps the run dir and its pgid file, so the next
+  # run refuses while the session lives.
+  if [ -s "$guard_backup/pgid" ] && ! guard_session --kill-session "$(cat "$guard_backup/pgid")"; then
+    echo "mutation-guard: session $(cat "$guard_backup/pgid") still runs; keeping $guard_dir" >&2
+    return 1
+  fi
   return 0
 }
-guard_cleanup() { guard_kill; rm -rf "$guard_dir"; }
+guard_cleanup() { guard_kill && rm -rf "$guard_dir"; }
 
 # bounded COMMAND...: run COMMAND under the budget and the timeout. The run dir is
 # emptied first, so the budget applies to this command alone. Status 124 is a timeout
