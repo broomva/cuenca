@@ -34,8 +34,9 @@ Materialise through cuenca-fs in a sibling staging directory, hash blobs into th
 private store, and use cuenca-tree's write/read-back checks. Create the linked
 worktree without checkout and move the staged files into it. This avoids Git
 attributes, filters, hooks, ignore rules and line-ending conversions changing the
-fork bytes. Git subprocesses discard inherited `GIT_*` overrides and use no global
-or system config, user templates, hooks or signing. No authority key is written
+fork bytes. The adapter’s Git command helper discards inherited `GIT_*` overrides and uses
+no global/system config, user templates, hooks or signing. The existing tree
+bridge retains its own redirection sanitisation and verified plumbing contract. No authority key is written
 into the worktree or Git config. Destination ownership is exclusive during creation,
 as for cuenca-fs checkout. Refuse occupied, symlink, live and nested checkout paths.
 

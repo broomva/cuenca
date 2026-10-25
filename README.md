@@ -10,7 +10,7 @@ The design is the spec, rev 2.2: [`docs/specs/2026-10-19-agent-native-change-pla
 | `cuenca-core` | The authority's durable log, locations, forks with fencing epochs, landing's recorded steps, and the blob store |
 | `cuenca-fs` | Snapshot any directory into a tree under its `.forkignore`, and check a tree out with copy-on-write clones |
 | `cuenca-server` | The authority: the agent API on the tailnet, per-principal keys, node identity, the local admin socket, and the lander that opens pull requests |
-| `cuenca-cli` | The `cuenca` binary: agent verbs (`forks`, `fork`, `checkout`, `status`, `snapshot`, `diff`, `log`, `verify`, `land`) with `--json`, a per-checkout outbox, watch mode, `cuenca mcp` (the same verbs as MCP tools), `cuenca admin` owner verbs, and `cuenca serve` |
+| `cuenca-cli` | The `cuenca` binary: agent verbs (`forks`, `fork`, `checkout`, `status`, `snapshot`, `diff`, `log`, `verify`, `land`) with `--json`, the CLI-only `worktree` adapter, a per-checkout outbox, watch mode, `cuenca mcp` (the same verbs as MCP tools), `cuenca admin` owner verbs, and `cuenca serve` |
 
 For Claude Code, Codex, Grok, Gemini/Antigravity, T3 and Paseo, see
 [agent harness setup](docs/harnesses.md): `cuenca fork LOCATION --checkout DIR`

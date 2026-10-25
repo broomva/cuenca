@@ -3,7 +3,8 @@
 //!
 //! [`verbs`] holds the agent verbs of spec rev 2.2 section 0, one function each:
 //! `forks`, `fork`, `checkout`, `status`, `snapshot`, `diff`, `log`, `verify` and `land`.
-//! The binary and the MCP server (BRO-3253) both call them, and nothing else: the owner
+//! The binary and the MCP server (BRO-3253) both call them. The local [`worktree`]
+//! adapter is CLI-only. The owner
 //! verbs (`cuenca admin`) live in the binary only, speak to the authority's local socket,
 //! and are not reachable from this library, so no MCP tool can reach them either.
 //!
