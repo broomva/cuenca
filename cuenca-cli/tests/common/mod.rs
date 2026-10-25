@@ -401,7 +401,7 @@ case "$cmd" in
     if [ -f "$DIR/prs/$key" ]; then
       n=$(cat "$DIR/prs/$key")
       oid=$(git --git-dir="$REMOTE" rev-parse "refs/heads/$head")
-      printf '[{{"number":%s,"url":"https://github.com/%s/pull/%s","headRefOid":"%s","headRefName":"%s"}}]\n' "$n" "$repo" "$n" "$oid" "$head"
+      printf '[{{"number":%s,"url":"https://github.com/%s/pull/%s","headRefOid":"%s","headRefName":"%s","isCrossRepository":false}}]\n' "$n" "$repo" "$n" "$oid" "$head"
     else
       echo '[]'
     fi ;;
