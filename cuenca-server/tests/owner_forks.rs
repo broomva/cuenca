@@ -419,6 +419,32 @@ fn no_key_creates_an_owner_fork_over_http() {
     s.stop();
 }
 
+/// An authority without a volume refuses to fork an owner fork, since a fork of one
+/// starts from its snapshot and only the volume takes one; nothing is appended.
+#[test]
+fn an_owner_fork_is_not_forked_without_a_volume() {
+    let s = Server::start();
+    s.add_location("l1");
+    let v = s.admin(AdminRequest::OwnerFork {
+        location: loc("l1"),
+        fork: fork("owner-mac"),
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let mac = s.mint("mac", OwnerDevice, "nMacCNTRL", grant(&[], &[]));
+    s.whois.node("nMacCNTRL");
+    let len = s.authority.store().len().unwrap();
+    let r = fork_from(&s, &mac, "mac-1", "owner-mac");
+    assert_eq!(r.status(), 409);
+    let body: serde_json::Value = r.json().unwrap();
+    assert_eq!(body["error"], "snapshot_failed", "{body}");
+    assert!(
+        body["message"].as_str().unwrap().contains("no volume"),
+        "{body}"
+    );
+    assert_eq!(s.authority.store().len().unwrap(), len, "nothing appended");
+    s.stop();
+}
+
 /// An authority with location `l1`, the owner fork `owner-mac` shown in a volume by a
 /// materialiser whose own snapshots run once at start and then not for an hour (so
 /// only a fork's snapshot-first takes the edits), and an owner device `mac`.
@@ -591,6 +617,9 @@ fn forking_an_owner_fork_while_it_is_written_loses_nothing_10_of_10() {
 /// nothing is appended; once the file is readable, the fork is made.
 #[test]
 fn an_owner_fork_that_cannot_be_snapshotted_is_not_forked() {
+    if rustix::process::geteuid().is_root() {
+        return; // root reads a mode 000 file
+    }
     let (s, mac, shown, _dir, materialiser) = forking_setup();
     std::fs::write(shown.join("secret.md"), b"locked\n").unwrap();
     std::fs::set_permissions(
@@ -653,12 +682,16 @@ fn forking_a_fork_needs_reading_it() {
     let a3 = s.mint("a3", Agent, "nA3CNTRL", grant(&[], &["owner-mac"]));
     s.whois.node("nA3CNTRL");
     assert_eq!(fork_from(&s, &a3, "a3-copy", "owner-mac").status(), 404);
-    // An agent granted the owner fork reads it, so it forks it.
+    // An agent granted the owner fork reads it, so its request reaches the snapshot
+    // (which needs a volume, and there is none here).
     let a2 = s.mint("a2", Agent, "nA2CNTRL", grant(&["l1"], &["owner-mac"]));
     s.whois.node("nA2CNTRL");
-    assert_eq!(fork_from(&s, &a2, "a2-copy", "owner-mac").status(), 200);
+    let r = fork_from(&s, &a2, "a2-copy", "owner-mac");
+    assert_eq!(r.status(), 409);
+    let body: serde_json::Value = r.json().unwrap();
+    assert_eq!(body["error"], "snapshot_failed", "{body}");
     s.whois.node("nA1CNTRL");
-    // Its own fork it reads, so it forks it (no volume here: the log's head is all).
+    // Its own fork it reads, so it forks it.
     let r = s.post(
         &a1,
         "/v1/forks",
