@@ -258,7 +258,7 @@ pub fn backup(
         "manifest",
         &mut transition,
     )?;
-    let name = format!("{:020}-{}.json", manifest.records, encrypted.sha256);
+    let name = format!("{}.json", encrypted.sha256);
     let envelope = serde_json::to_vec(&Envelope {
         format_version: FORMAT_VERSION,
         manifest: encrypted,
@@ -269,44 +269,12 @@ pub fn backup(
     Ok(manifest)
 }
 
-/// Restore the newest committed point into a NEW destination. Validation occurs
-/// in private staging; refusal never creates or modifies the destination.
-/// Pin `trust` outside the object store. A substituted key in a manifest is useless.
-pub fn restore(
+fn read_manifest(
     root: &Path,
-    destination: &Path,
+    name: &str,
     identity: &age::x25519::Identity,
     trust: &VerifyingKey,
-) -> Result<Receipt> {
-    anyhow::ensure!(
-        !destination.try_exists()?,
-        "restore destination already exists"
-    );
-    let mut commits = Vec::new();
-    for entry in fs::read_dir(root.join("manifests"))? {
-        let entry = entry?;
-        let name = entry
-            .file_name()
-            .into_string()
-            .map_err(|_| anyhow::anyhow!("non-UTF8 commit name"))?;
-        if name.starts_with('.') {
-            continue;
-        } // uncommitted temporary writes
-        anyhow::ensure!(
-            name.is_ascii()
-                && name.len() == 90
-                && name.ends_with(".json")
-                && name.as_bytes()[20] == b'-'
-                && name[..20].bytes().all(|b| b.is_ascii_digit())
-                && hex_digest(&name[21..85]),
-            "invalid committed manifest name"
-        );
-        commits.push(name);
-    }
-    commits.sort();
-    let name = commits
-        .last()
-        .ok_or_else(|| anyhow::anyhow!("no complete restore point"))?;
+) -> Result<Manifest> {
     let envelope: Envelope = serde_json::from_slice(&read_bounded(
         &root.join("manifests").join(name),
         MAX_MANIFEST,
@@ -316,7 +284,7 @@ pub fn restore(
         "unknown envelope format"
     );
     anyhow::ensure!(
-        envelope.manifest.sha256 == name[21..85],
+        envelope.manifest.sha256 == name[..64],
         "envelope name mismatch"
     );
     let signed: Signed = serde_json::from_slice(&decrypt(
@@ -344,10 +312,52 @@ pub fn restore(
         manifest.offset == manifest.records.checked_sub(1),
         "manifest offset mismatch"
     );
+    Ok(manifest)
+}
+
+/// Restore the newest committed point into a NEW destination. Validation occurs
+/// in private staging; refusal never creates or modifies the destination.
+/// Pin `trust` outside the object store. A substituted key in a manifest is useless.
+pub fn restore(
+    root: &Path,
+    destination: &Path,
+    identity: &age::x25519::Identity,
+    trust: &VerifyingKey,
+) -> Result<Receipt> {
     anyhow::ensure!(
-        format!("{:020}", manifest.records) == name[..20],
-        "commit offset mismatch"
+        !destination.try_exists()?,
+        "restore destination already exists"
     );
+    let mut latest: Option<Manifest> = None;
+    for entry in fs::read_dir(root.join("manifests"))? {
+        let entry = entry?;
+        let name = entry
+            .file_name()
+            .into_string()
+            .map_err(|_| anyhow::anyhow!("non-UTF8 commit name"))?;
+        if name.starts_with('.') {
+            continue;
+        } // uncommitted temporary writes
+        anyhow::ensure!(
+            name.is_ascii()
+                && name.len() == 69
+                && name.ends_with(".json")
+                && hex_digest(&name[..64]),
+            "invalid committed manifest name"
+        );
+        let manifest = read_manifest(root, &name, identity, trust)?;
+        if let Some(previous) = &latest {
+            anyhow::ensure!(
+                manifest.records != previous.records
+                    || manifest.journal_sha256 == previous.journal_sha256,
+                "conflicting signed prefixes at one offset"
+            );
+        }
+        if latest.as_ref().is_none_or(|m| manifest.records > m.records) {
+            latest = Some(manifest);
+        }
+    }
+    let manifest = latest.ok_or_else(|| anyhow::anyhow!("no complete restore point"))?;
     let journal = decrypt(
         identity,
         &object_bytes(root, &manifest.journal)?,
@@ -457,6 +467,7 @@ mod tests {
         objects: std::path::PathBuf,
         identity: age::x25519::Identity,
         signer: SigningKey,
+        current: std::cell::RefCell<std::path::PathBuf>,
     }
     impl Fixture {
         fn new() -> Self {
@@ -492,20 +503,30 @@ mod tests {
                 |_| Ok(()),
             )
             .unwrap();
+            let current = fs::read_dir(objects.join("manifests"))
+                .unwrap()
+                .map(|p| p.unwrap().path())
+                .max_by_key(|p| {
+                    read_manifest(
+                        &objects,
+                        p.file_name().unwrap().to_str().unwrap(),
+                        &identity,
+                        &signer.verifying_key(),
+                    )
+                    .unwrap()
+                    .records
+                })
+                .unwrap();
             Self {
                 dir,
                 objects,
                 identity,
                 signer,
+                current: std::cell::RefCell::new(current),
             }
         }
         fn newest(&self) -> std::path::PathBuf {
-            let mut paths: Vec<_> = fs::read_dir(self.objects.join("manifests"))
-                .unwrap()
-                .map(|p| p.unwrap().path())
-                .collect();
-            paths.sort();
-            paths.pop().unwrap()
+            self.current.borrow().clone()
         }
         fn signed(&self) -> Signed {
             let envelope: Envelope =
@@ -528,7 +549,7 @@ mod tests {
             )
             .unwrap();
             let object = upload(&self.objects, cipher, "test", &mut |_| Ok(())).unwrap();
-            let name = format!("{:020}-{}.json", signed.manifest.records, object.sha256);
+            let name = format!("{}.json", object.sha256);
             let envelope = Envelope {
                 format_version: FORMAT_VERSION,
                 manifest: object,
@@ -540,6 +561,7 @@ mod tests {
                 &serde_json::to_vec(&envelope).unwrap(),
             )
             .unwrap();
+            *self.current.borrow_mut() = self.objects.join("manifests").join(name);
         }
         fn edit(&self, edit: impl FnOnce(&mut Manifest)) {
             let mut signed = self.signed();

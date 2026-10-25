@@ -34,13 +34,15 @@ at `objects/<ciphertext-sha256>.age`. Each is written privately, fsynced, atomic
 published, directory-synced and re-read/verified. Blobs precede the journal, which
 precedes the signed encrypted manifest. A private temporary completion envelope
 is fsynced and published last at
-`manifests/<20-digit-record-count>-<manifest-ciphertext-sha256>.json`; its only fields
-are format version and the encrypted manifest's SHA-256/size. The record count in
-the filename reveals prefix length, but no source paths or plaintext digests.
+`manifests/<manifest-ciphertext-sha256>.json`; its only fields
+are format version and the encrypted manifest's SHA-256/size. Filenames reveal no
+source offsets, paths or plaintext digests.
 Dot-prefixed temporary envelopes are never restore points. A directory flock
 serializes fixture writers. Immutable object ids prevent partial overwrites.
 
-Restore chooses the highest committed prefix, verifies ciphertext/decryption,
+Restore authenticates every completion envelope and selects the highest signed
+record count; invalid committed metadata fails visibly even when an older prefix
+is available. Equal offsets with different journal digests are refused. It verifies ciphertext/decryption,
 independently pinned Ed25519 trust, version, offsets, journal integrity, exact
 blob reachability, each blob's git oid/SHA-256/size, and replay rules. Invalid
 newest committed data fails visibly; it never falls back to an older good point.

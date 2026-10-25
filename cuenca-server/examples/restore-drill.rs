@@ -215,9 +215,7 @@ fn main() -> anyhow::Result<()> {
     envelope["manifest"]["sha256"] = serde_json::Value::String(hash.clone());
     envelope["manifest"]["size"] = serde_json::Value::from(cipher.len());
     fs::write(
-        forged
-            .join("manifests")
-            .join(format!("{:020}-{hash}.json", after.len() + 1)),
+        forged.join("manifests").join(format!("{hash}.json")),
         serde_json::to_vec(&envelope)?,
     )?;
     let out = Command::new(&bin)
