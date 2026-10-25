@@ -31,7 +31,12 @@ on_host 'rm -f /usr/sbin/policy-rc.d
 allow="--allow 100.82.213.74 --allow fd7a:115c:a1e0::2 --allow 100.71.190.125"
 on_host "bash /deploy/install.sh --binary /cuenca-bin $allow" \
     | grep -v -E '^(Get|Selecting|Preparing|Unpacking|Setting up|Processing|Fetched|debconf|Created symlink|\(Reading)' || true
+on_host 'printf "ghp_TESTONLY0123456789\n" >/token-file
+    { printf "GH_TOKEN="; cat /token-file; } | install -o root -g cuenca -m 0640 /dev/stdin /etc/cuenca/gh.env
+    systemctl restart cuenca; sleep 2'
 on_host 'bash /deploy/check.sh'
+echo "--- the authority reads landing's token from /etc/cuenca/gh.env (README step 5)"
+on_host 'tr "\0" "\n" </proc/$(systemctl show -p MainPID --value cuenca)/environ | grep -qx GH_TOKEN=ghp_TESTONLY0123456789 && echo "GH_TOKEN is in the authority environment"'
 echo "--- install.sh removed the policy-rc.d it wrote to hold the stock starts"
 on_host '[ ! -e /usr/sbin/policy-rc.d ] && echo "no policy-rc.d left"'
 echo "--- the volume, as the authority made it"

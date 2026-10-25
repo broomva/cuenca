@@ -159,6 +159,8 @@ if ! pdbedit -L -u cuenca-owner >/dev/null 2>&1; then
     say "cuenca-owner's Samba password is in /root/cuenca-owner.smbpass (root only)"
 fi
 
+[ -f /etc/cuenca/gh.env ] || say "landing has no token yet: write /etc/cuenca/gh.env (README step 5)"
+
 if [ "$start" = 0 ]; then
     say "installed; --no-start, so nothing was started"
     exit 0

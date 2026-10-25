@@ -34,6 +34,12 @@ expect_mode "$CUENCA_VOLUME" "2750 cuenca:cuenca"
 expect_mode /etc/cuenca/cuenca.env "640 root:cuenca"
 expect_mode /usr/local/bin/cuenca "755 root:root"
 [ -x /usr/bin/gh ] && ok "gh is installed (landing)" || bad "/usr/bin/gh is missing (landing opens pull requests with it)"
+# Landing's token: one GH_TOKEN line, read by the unit, never printed here.
+expect_mode /etc/cuenca/gh.env "640 root:cuenca"
+[ "$(grep -c '' /etc/cuenca/gh.env 2>/dev/null)" = 1 ] && grep -Eqx 'GH_TOKEN=[A-Za-z0-9_]+' /etc/cuenca/gh.env \
+    && ok "/etc/cuenca/gh.env holds one GH_TOKEN line" || bad "/etc/cuenca/gh.env must be one line GH_TOKEN=<token> (README step 5)"
+grep -qx 'EnvironmentFile=-/etc/cuenca/gh.env' /etc/systemd/system/cuenca.service \
+    && ok "the unit reads /etc/cuenca/gh.env" || bad "the unit does not read /etc/cuenca/gh.env"
 [ "$(cat /proc/sys/fs/protected_hardlinks)" = 1 ] && ok "fs.protected_hardlinks = 1" || bad "fs.protected_hardlinks != 1"
 if [ -f /root/cuenca-owner.smbpass ]; then
     echo "note /root/cuenca-owner.smbpass still exists: hand the password over, then delete it"

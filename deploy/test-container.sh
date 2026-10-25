@@ -9,14 +9,23 @@ fail() { echo "test-container: FAIL $*" >&2; exit 1; }
 printf "#!/bin/sh\necho cuenca stub\n" >/stub && chmod 755 /stub
 args="--no-start --bind 100.64.0.1:7419 --allow 100.82.213.74 --allow fd7a:115c:a1e0::2 --allow 100.71.190.125"
 
-bash /deploy/install.sh --binary /stub $args
-bash /deploy/check.sh --no-services
+bash /deploy/install.sh --binary /stub $args | tee /tmp/i1
+grep -q "landing has no token yet" /tmp/i1 || fail "install did not say landing has no token"
+if bash /deploy/check.sh --no-services >/tmp/out 2>&1; then fail "check passed with no gh.env"; fi
+grep -q "^FAIL /etc/cuenca/gh.env" /tmp/out || { cat /tmp/out; fail "check did not name the missing gh.env"; }
+# README step 5, as written there.
+printf "ghp_TESTONLY0123456789\n" >/token-file
+{ printf "GH_TOKEN="; cat /token-file; } | install -o root -g cuenca -m 0640 /dev/stdin /etc/cuenca/gh.env
+[ "$(cat /etc/cuenca/gh.env)" = GH_TOKEN=ghp_TESTONLY0123456789 ] || fail "README step 5 wrote $(cat /etc/cuenca/gh.env)"
+bash /deploy/check.sh --no-services | tee /tmp/out
+grep -q TESTONLY /tmp/out && fail "check.sh printed the token"
 snap() { (stat -c "%n %a %U:%G" /etc/samba/smb.conf /etc/cuenca/cuenca.env /etc/systemd/system/cuenca.service \
-    /usr/local/bin/cuenca /var/lib/cuenca/state /srv/cuenca/volume /root/cuenca-owner.smbpass;
-    sha256sum /etc/samba/smb.conf /etc/cuenca/cuenca.env /etc/systemd/system/cuenca.service /root/cuenca-owner.smbpass;
+    /usr/local/bin/cuenca /var/lib/cuenca/state /srv/cuenca/volume /root/cuenca-owner.smbpass /etc/cuenca/gh.env;
+    sha256sum /etc/samba/smb.conf /etc/cuenca/cuenca.env /etc/systemd/system/cuenca.service /root/cuenca-owner.smbpass /etc/cuenca/gh.env;
     getent group cuenca; getent passwd cuenca cuenca-owner; pdbedit -L) ; }
 first=$(snap)
-bash /deploy/install.sh $args            # a re-run without --binary keeps the installed one
+bash /deploy/install.sh $args >/tmp/i2   # a re-run without --binary keeps the installed one
+grep -q "no token" /tmp/i2 && fail "install said no token with gh.env in place"
 [ "$first" = "$(snap)" ] || { diff <(echo "$first") <(snap); fail "a second install changed the host"; }
 echo "test-container: a second install changed nothing"
 [ -f /etc/samba/smb.conf.pre-cuenca ] || fail "Ubuntu smb.conf was not kept"
@@ -59,6 +68,14 @@ sed -i "s/^   hosts allow = .*/   hosts allow = fd7a:115c:a1e0::\/48/" /etc/samb
 sed -i "s/^   hosts allow = .*/   hosts allow = fd7a:115c:a1e0:0:0:0:0:2/" /etc/samba/smb.conf; expect_fail "hosts allow a non-canonical IPv6 address"; cp /smb.ok /etc/samba/smb.conf
 sed -i "s/^   hosts allow = .*/   hosts allow = 100.64.0.300/" /etc/samba/smb.conf; expect_fail "hosts allow an IPv4 octet over 255"; cp /smb.ok /etc/samba/smb.conf
 mv /usr/bin/gh /gh; expect_fail "no gh"; mv /gh /usr/bin/gh
+cp -p /etc/cuenca/gh.env /gh.ok
+chmod 0644 /etc/cuenca/gh.env; expect_fail "gh.env readable by others"; cp -p /gh.ok /etc/cuenca/gh.env
+chown cuenca /etc/cuenca/gh.env; expect_fail "gh.env writable by the authority"; cp -p /gh.ok /etc/cuenca/gh.env
+echo "GH_TOKEN=" >/etc/cuenca/gh.env; expect_fail "an empty token"; cp -p /gh.ok /etc/cuenca/gh.env
+echo "EXTRA=1" >>/etc/cuenca/gh.env; expect_fail "a second line in gh.env"; cp -p /gh.ok /etc/cuenca/gh.env
+echo "GITHUB_TOKEN=ghp_x" >/etc/cuenca/gh.env; expect_fail "another variable name"; cp -p /gh.ok /etc/cuenca/gh.env
+sed -i "/^EnvironmentFile=-\/etc\/cuenca\/gh.env$/d" /etc/systemd/system/cuenca.service; expect_fail "a unit that does not read gh.env"
+bash /deploy/install.sh $args >/dev/null
 sed -i "s/^   vfs objects = .*/   vfs objects = fruit/" /etc/samba/smb.conf; expect_fail "no streams_xattr"; cp /smb.ok /etc/samba/smb.conf
 sed -i "s/^   map to guest = Never/   map to guest = Bad User/" /etc/samba/smb.conf; expect_fail "guest mapping"; cp /smb.ok /etc/samba/smb.conf
 bash /deploy/check.sh --no-services >/dev/null || fail "restored host does not pass"
