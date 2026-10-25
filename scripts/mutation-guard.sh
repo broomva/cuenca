@@ -15,7 +15,8 @@
 #                          killed, whoever wrote the bytes (default 2048; BRO-3467 #1, #3)
 #
 # A run dir is named run-<pid> and holds .backup. When the next run starts, one whose
-# process is gone (SIGKILLed, so its EXIT trap never ran) is removed, unless it may have
+# process is gone (SIGKILLed, so its EXIT trap never ran), or that belongs to this checkout
+# (.backup/checkout names its lock, which this run holds), is removed, unless it may have
 # left a mutant in the source (.backup/path), failed to copy Cargo.lock back
 # (.backup/lock-failed) or left a test session still running (.backup/pgid): then the guard
 # names each and refuses to start, deleting nothing.
@@ -68,7 +69,11 @@ for stale in "$guard_root"/run-*; do
   pid=${stale##*/run-}
   case $pid in '' | *[!0-9]*) continue ;; esac
   [ -d "$stale/.backup" ] || continue
-  ps -p "$pid" >/dev/null 2>&1 && continue
+  # A live pid is another sweep's run, unless the dir is this checkout's: this sweep holds
+  # the checkout's lock, so its own runs are dead even when the pid is reused (BRO-3467 #4).
+  if ! { [ -f "$stale/.backup/checkout" ] && [ "$(cat "$stale/.backup/checkout")" = "$guard_lock" ]; }; then
+    ps -p "$pid" >/dev/null 2>&1 && continue
+  fi
   if [ -s "$stale/.backup/path" ] || [ -e "$stale/.backup/lock-failed" ] || { [ -s "$stale/.backup/pgid" ] && guard_alive "$(cat "$stale/.backup/pgid")"; }; then
     echo "mutation-guard: run $pid died without cleaning up. Before running again:" >&2
     if [ -s "$stale/.backup/path" ]; then
@@ -94,6 +99,7 @@ fi
 # The script's own backups and logs sit in .backup, which bounded() keeps.
 guard_backup=$guard_dir/.backup
 mkdir -p "$guard_backup"
+echo "$guard_lock" >"$guard_backup/checkout"
 echo "$$ $guard_backup/pgid" >"$guard_lock"
 export TMPDIR=$guard_dir
 # A session left behind by a SIGKILLed bounded.py. Call before restoring the source, so an
