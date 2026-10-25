@@ -293,7 +293,8 @@ pub fn restore(
             continue;
         } // uncommitted temporary writes
         anyhow::ensure!(
-            name.len() == 90
+            name.is_ascii()
+                && name.len() == 90
                 && name.ends_with(".json")
                 && name.as_bytes()[20] == b'-'
                 && name[..20].bytes().all(|b| b.is_ascii_digit())
