@@ -18,7 +18,17 @@
   "duplicates": 0,
   "fresh_pr_request_to_open_seconds": 10.261288042005617,
   "export_tree_equal": true,
-  "merge_evidence": "pending",
+  "merge_evidence": {
+    "status": "recorded",
+    "merged_sha": "3063874e903d3ca7388b811a5846de0323a9b8b8",
+    "receipt": "tree-equality.json",
+    "whole_tree_equality_scope": "unmoved main",
+    "head_content_contained": true,
+    "head_git_ancestry": false,
+    "method": "squash",
+    "main_ci_run": 40173296675
+  },
   "local_cargo_tests_passed": 370,
-  "local_cargo_tests_failed": 0
+  "local_cargo_tests_failed": 0,
+  "merge_evidence_observed_utc": "2026-10-25T12:47Z"
 }

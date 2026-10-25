@@ -1,0 +1,22 @@
+{
+  "observed_utc": "2026-10-25T12:47Z",
+  "checker": "/Users/broomva/broomva/scripts/cuenca_finish_line_check.py",
+  "checker_sha256": "1aed0bfa89188673ed7db39d2926c47f888d6c49a5bdea9289b8b1a7bd5fc47f",
+  "checker_file_unchanged": true,
+  "normal_checker_exit": 1,
+  "normal_checker_stderr": "dogfood: R35: missing passing result\n",
+  "diagnostic_method": "same canonical dogfood function with in-memory accumulating require; stdout suppressed because a diagnostic traversal is not acceptance; no receipt statuses changed",
+  "remaining_failures": [
+    "R35: missing passing result",
+    "R41: missing passing result",
+    "R43: missing passing result"
+  ],
+  "other_failures": [],
+  "receipt_statuses": {
+    "R35": "pending",
+    "R41": "pending",
+    "R43": "pending"
+  },
+  "scope_note": "row PR/SHA bind the merged workflow demonstration; pending statuses retain missing live acceptance",
+  "readme_route_resolves": true
+}

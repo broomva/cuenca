@@ -1,8 +1,8 @@
 {
-  "observed_utc": "2026-10-25T07:33Z",
+  "observed_utc": "2026-10-25T12:47Z",
   "command": "test -s docs/dogfood-2026.md && BROOMVA_WORKSPACE=~/broomva python3 ~/broomva/scripts/cuenca_finish_line_check.py dogfood docs/dogfood-2026.md",
   "exit": 1,
   "stdout": "",
-  "stderr": "dogfood: dogfood: missing merged SHA\n",
+  "stderr": "dogfood: R35: missing passing result\n",
   "graph_done_test_s_exit": 0
 }

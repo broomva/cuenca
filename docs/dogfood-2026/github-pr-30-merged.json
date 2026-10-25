@@ -1,0 +1,12 @@
+{
+  "observed_utc": "2026-10-25T12:45:42Z",
+  "baseRefOid": "d2f3b92ae3c5af53ece908aa7cf1c668f5b0cda3",
+  "headRefName": "cp/81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+  "headRefOid": "f340cb61cf44db2442202a1a0254de9f03bcbc26",
+  "mergeCommit": {
+    "oid": "3063874e903d3ca7388b811a5846de0323a9b8b8"
+  },
+  "mergedAt": "2026-10-25T07:34:42Z",
+  "state": "MERGED",
+  "url": "https://github.com/broomva/cuenca/pull/30"
+}

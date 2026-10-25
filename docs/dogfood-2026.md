@@ -1,9 +1,11 @@
 # Cuenca 2026 dogfood receipts — Mac part (BRO-3259)
 
-Observed: 2026-10-25T07:31Z, from `date -u`. **Preparation only; node incomplete.**
+Updated: 2026-10-25T12:47Z, from `date -u`; local trial observed 2026-10-25T07:31Z.
+**Preparation only; node incomplete.**
 Delivery PR: https://github.com/broomva/cuenca/pull/31.
 R35, R41 and R43 remain pending. The required finish-line checker intentionally
-fails because there is no merged SHA. Nothing in this document substitutes a local
+fails only on the pending R35/R41/R43 result statuses. The real merge is recorded
+below. Nothing in this document substitutes a local
 projection, advisory verification, or open PR for live acceptance.
 
 ## Contract and dependency trace
@@ -11,7 +13,8 @@ projection, advisory verification, or open PR for live acceptance.
 Contract: workspace `docs/specs/2026-10-25-cuenca-finish-line.md`, section dogfood;
 accepted `docs/adrs/2026-10-25-cuenca-deployment-evidence.md`; graph node dogfood.
 The node depends on mcp, land and deploy. Production Finder/Files, the full production
-load run and LAN SMB endpoint **wait on BRO-3461**. The builder does not merge.
+load run and LAN SMB endpoint **wait on BRO-3461 (NUC host readiness) and BRO-3257
+(live deployment)**. The builder does not merge PRs; the coordinator merged #30.
 
 Upstream implementation: `cuenca-cli/src/{mcp,verbs,config}.rs`,
 `cuenca-server/src/{authority,land,materialise}.rs`,
@@ -19,7 +22,8 @@ Upstream implementation: `cuenca-cli/src/{mcp,verbs,config}.rs`,
 Source SHA: `d2f3b92ae3c5af53ece908aa7cf1c668f5b0cda3`. Downstream: BRO-3259 review,
 workspace finish-line checker and eventual evidence index. This PR changes only
 documents and a reproducible receipt driver; no runtime or deployment configuration.
-The owner/coordinator supplies authorized merge/review; BRO-3461 supplies live host.
+The owner/coordinator supplies review; #30 is already merged. BRO-3461 supplies
+the live host and BRO-3257 supplies live deployment.
 No new App grant is requested: this trial uses the existing shared gh landing path.
 
 Snapshot: isolated `.worktrees/bro-3259`, branch `feature/bro-3259-dogfood`,
@@ -77,6 +81,19 @@ trial used `trial-5`; earlier fixture/setup attempts are described below. A repe
 of the same primary candidate adopted the existing export/PR, not another PR.
 The first creation latency is reported separately from later adoption latency.
 
+## Disposable authority exports and cleanup
+
+A disposable authority leaves `cp/<changeset-id>` branches and GitHub PRs behind.
+A later authority can adopt the same remote export/PR after identity validation,
+as the repeat trials did for #30. Removing local state does not reset that remote
+namespace. After stopping the trial, archive receipts and the exact remote IDs,
+check for live authority requests, close only a discarded trial PR if still open,
+and remove only its retired branch with an expected-SHA lease. Preserve merged
+PR history and verify the archive before removing that trial's scratch state.
+The [workflow guide](dogfood-local-workflow.md#disposable-authority-cleanup) contains
+the exact #30 inventory and conditional cleanup commands. This update performs no
+remote cleanup.
+
 ## R35 — real MCP workflow and useful GitHub change (pending)
 
 The agent edited only `docs/dogfood-local-workflow.md` inside the **returned checkout**
@@ -103,7 +120,7 @@ land -> in_review, pr=30, URL below
 log -> landing_intent, export_intent, exported, review_intent, in_review
 ```
 
-- PR created by Cuenca: https://github.com/broomva/cuenca/pull/30 (open; shared gh identity `broomva`, not an App).
+- PR created by Cuenca: https://github.com/broomva/cuenca/pull/30 (**merged by the coordinator**; shared gh identity `broomva`, not an App).
 - Changeset: `81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b`.
 - Base tree: `c17ac6b0e26453f28936f18cd636f9e73282f198`.
 - Candidate tree: `ccdf02aa132117edd64fd9346837efef120dc422`.
@@ -111,7 +128,23 @@ log -> landing_intent, export_intent, exported, review_intent, in_review
 - GitHub export tree: `ccdf02aa132117edd64fd9346837efef120dc422` — **equal to candidate**.
 - First fresh request → PR-open: 10.261 s, one sample,
   [original workflow](dogfood-2026/workflow-first-pr.json). This is not a p95.
-- Merged SHA and candidate-versus-merged equality: **pending**; no merge performed.
+- Merged SHA: `3063874e903d3ca7388b811a5846de0323a9b8b8`; merged tree
+  `ccdf02aa132117edd64fd9346837efef120dc422` — **equal to candidate and PR head**.
+- Main CI [run 40173296675](https://github.com/broomva/cuenca/actions/runs/40173296675)
+  completed successfully at that merged SHA; all seven CI jobs passed.
+  [Raw merge metadata](dogfood-2026/github-pr-30-merged.json),
+  [raw main CI result](dogfood-2026/github-main-ci-40173296675.json), and
+  [tree/containment receipt](dogfood-2026/tree-equality.json) bind the observations.
+
+This whole-tree equality is scoped to **unmoved main**: the export and squash merge
+both have parent `d2f3b92ae3c5af53ece908aa7cf1c668f5b0cda3`. The exact PR head tree
+was checked against the candidate, and `git diff --exit-code <head> <merge>`
+returned 0, establishing that the merge contains the complete head content.
+GitHub records that exact head as the merged PR. Because #30 was squashed,
+`git merge-base --is-ancestor <head> <merge>` returns 1; no ancestry is claimed.
+If main moves, record the rebased candidate and merged result and verify the head
+change is contained; never infer equality with the original candidate from PR
+status alone. For an ordinary merge also verify head ancestry.
 
 [GitHub checks at the exported head](dogfood-2026/github-pr-30.json) report SUCCESS
 for Format, Lint, Test (Linux), Test (macOS), MSRV Check, Security Audit,
@@ -129,7 +162,8 @@ land -> status=requested, waiting_for=owner, pr=null
 Manifest SHA-256: `3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c`;
 [raw result](dogfood-2026/workflow.json). No owner admin land was called.
 Finder/Files marker hash, timed screenshot, device comparison and ≤15 s production
-visibility remain pending on BRO-3461. Local materializer timing below is not that receipt.
+visibility remain pending on BRO-3461 (host) and BRO-3257 (deploy). Local materializer
+timing below is not that receipt.
 
 ## R41 — scaled concurrent trial (pending)
 
@@ -242,13 +276,16 @@ No new ADR was needed; the accepted deployment-evidence ADR governs this split.
 
 ## Structured finish-line receipt (intentionally incomplete)
 
-Empty merged SHA means missing evidence. Pending rows must not be changed to pass
-until the real owner/NUC receipts exist. Receipt paths below are relative to `docs/`.
+The PR/SHA fields now identify the real merged MCP workflow demonstration (#30).
+For each pending row they bind the shared landed workflow baseline, not completion
+of that row; the load/benchmark receipts still describe local preparation only.
+Pending rows must not be changed to pass until the NUC/live-deployment receipts
+exist (BRO-3461 host; BRO-3257 deploy). Receipt paths are relative to `docs/`.
 
 ```cuenca-dogfood
 {
   "pr": "https://github.com/broomva/cuenca/pull/30",
-  "merged_sha": "",
+  "merged_sha": "3063874e903d3ca7388b811a5846de0323a9b8b8",
   "receipt": "dogfood-2026/tree-equality.json",
   "mcp_transcript": [
     {
@@ -2094,23 +2131,23 @@ until the real owner/NUC receipts exist. Receipt paths below are relative to `do
     "R35": {
       "status": "pending",
       "pr": "https://github.com/broomva/cuenca/pull/30",
-      "merged_sha": "",
-      "receipt": "dogfood-2026/workflow-first-pr.json",
-      "reason": "Real MCP-to-GitHub PR opened; no merge is authorized for this builder. Merged-tree comparison and production Finder/Files marker screenshot wait on owner/coordinator and BRO-3461."
+      "merged_sha": "3063874e903d3ca7388b811a5846de0323a9b8b8",
+      "receipt": "dogfood-2026/tree-equality.json",
+      "reason": "Real MCP-to-GitHub PR #30 merged; exact PR head, candidate and merged trees match on the unmoved base; main CI green. Production Finder/Files marker, screenshot, device agreement and timed visibility remain pending on BRO-3461 (host) and BRO-3257 (deploy)."
     },
     "R41": {
       "status": "pending",
-      "pr": "https://github.com/broomva/cuenca/pull/31",
-      "merged_sha": "",
+      "pr": "https://github.com/broomva/cuenca/pull/30",
+      "merged_sha": "3063874e903d3ca7388b811a5846de0323a9b8b8",
       "receipt": "dogfood-2026/load.json",
-      "reason": "30 forks, 510 acknowledged drafts, one kill/restart, zero lost/duplicate IDs in a scaled 121.3-second local trial; one-hour production load and bulk GitHub request-to-PR p95 remain unmeasured. Production waits on BRO-3461."
+      "reason": "30 forks, 510 acknowledged drafts, one kill/restart, zero lost/duplicate IDs in a scaled 121.3-second local trial; one-hour production load and bulk GitHub request-to-PR p95 remain unmeasured. Production waits on BRO-3461 (host) and BRO-3257 (deploy)."
     },
     "R43": {
       "status": "pending",
-      "pr": "https://github.com/broomva/cuenca/pull/31",
-      "merged_sha": "",
+      "pr": "https://github.com/broomva/cuenca/pull/30",
+      "merged_sha": "3063874e903d3ca7388b811a5846de0323a9b8b8",
       "receipt": "dogfood-2026/benchmarks.json",
-      "reason": "Local times measured. No disposable SMB endpoint reachable; actual Mac LAN SMB comparison waits on BRO-3461. VPS SSH timed out."
+      "reason": "Local times measured. No disposable SMB endpoint reachable; actual Mac LAN SMB comparison waits on BRO-3461 (host) and BRO-3257 (deploy). VPS SSH timed out."
     }
   }
 }
@@ -2120,9 +2157,24 @@ until the real owner/NUC receipts exist. Receipt paths below are relative to `do
 
 ```text
 test -s docs/dogfood-2026.md && BROOMVA_WORKSPACE=~/broomva python3 ~/broomva/scripts/cuenca_finish_line_check.py dogfood docs/dogfood-2026.md
-dogfood: dogfood: missing merged SHA
+dogfood: R35: missing passing result
 exit 1
 ```
 
 The graph-only nonempty-file check exits 0. The stronger required check exits 1,
-as intended; merge evidence and all three passing live rows are absent.
+as intended; the only remaining failures are the pending R35/R41/R43 statuses.
+The checker is fail-fast and prints R35 first; the complete status audit below
+also exercises all evidence fields and transcript checks without changing statuses.
+
+[Complete checker audit](dogfood-2026/acceptance-remaining.json) lists exactly:
+
+```text
+R35: missing passing result
+R41: missing passing result
+R43: missing passing result
+```
+
+R35 still needs production Finder/Files/device/visibility receipts; R41 still needs
+the full one-hour production/conflict and bulk PR-open latency trial; R43 still
+needs paired Mac LAN SMB measurements. All wait on BRO-3461 (host) and BRO-3257
+(deploy). No missing PR, SHA, receipt path or MCP structure error remains.

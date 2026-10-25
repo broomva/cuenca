@@ -1,0 +1,479 @@
+{
+  "observed_utc": "2026-10-25T12:45:42Z",
+  "conclusion": "success",
+  "databaseId": 40173296675,
+  "headSha": "3063874e903d3ca7388b811a5846de0323a9b8b8",
+  "jobs": [
+    {
+      "completedAt": "2026-10-25T07:39:25Z",
+      "conclusion": "success",
+      "databaseId": 121108540119,
+      "name": "Test (macOS)",
+      "startedAt": "2026-10-25T07:34:47Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-25T07:34:49Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-25T07:34:47Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:51Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v7",
+          "number": 2,
+          "startedAt": "2026-10-25T07:34:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:59Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@master",
+          "number": 3,
+          "startedAt": "2026-10-25T07:34:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:06Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-10-25T07:34:59Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:39:19Z",
+          "conclusion": "success",
+          "name": "Run cargo test --workspace --locked",
+          "number": 5,
+          "startedAt": "2026-10-25T07:35:06Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:39:20Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 9,
+          "startedAt": "2026-10-25T07:39:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:39:20Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v7",
+          "number": 10,
+          "startedAt": "2026-10-25T07:39:20Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:39:23Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 11,
+          "startedAt": "2026-10-25T07:39:20Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/broomva/cuenca/actions/runs/40173296675/job/121108540119"
+    },
+    {
+      "completedAt": "2026-10-25T07:35:31Z",
+      "conclusion": "success",
+      "databaseId": 121108540187,
+      "name": "Deploy (container)",
+      "startedAt": "2026-10-25T07:34:47Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-25T07:34:48Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-25T07:34:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:49Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v7",
+          "number": 2,
+          "startedAt": "2026-10-25T07:34:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:49Z",
+          "conclusion": "success",
+          "name": "Run bash -n deploy/install.sh deploy/check.sh deploy/test-container.sh deploy/test-systemd.sh deploy/wait-tailnet deploy/tailnet-addr.sh",
+          "number": 3,
+          "startedAt": "2026-10-25T07:34:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:29Z",
+          "conclusion": "success",
+          "name": "Run bash deploy/test-container.sh",
+          "number": 4,
+          "startedAt": "2026-10-25T07:34:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:30Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v7",
+          "number": 8,
+          "startedAt": "2026-10-25T07:35:29Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:30Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 9,
+          "startedAt": "2026-10-25T07:35:30Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/broomva/cuenca/actions/runs/40173296675/job/121108540187"
+    },
+    {
+      "completedAt": "2026-10-25T07:35:21Z",
+      "conclusion": "success",
+      "databaseId": 121108540223,
+      "name": "MSRV Check",
+      "startedAt": "2026-10-25T07:34:47Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-25T07:34:50Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-25T07:34:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:51Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v7",
+          "number": 2,
+          "startedAt": "2026-10-25T07:34:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:59Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@master",
+          "number": 3,
+          "startedAt": "2026-10-25T07:34:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:15Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-10-25T07:34:59Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:18Z",
+          "conclusion": "success",
+          "name": "Run cargo check --workspace --locked",
+          "number": 5,
+          "startedAt": "2026-10-25T07:35:15Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:19Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 9,
+          "startedAt": "2026-10-25T07:35:18Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:19Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v7",
+          "number": 10,
+          "startedAt": "2026-10-25T07:35:19Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:19Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 11,
+          "startedAt": "2026-10-25T07:35:19Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/broomva/cuenca/actions/runs/40173296675/job/121108540223"
+    },
+    {
+      "completedAt": "2026-10-25T07:35:02Z",
+      "conclusion": "success",
+      "databaseId": 121108540254,
+      "name": "Format",
+      "startedAt": "2026-10-25T07:34:47Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-25T07:34:49Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-25T07:34:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:50Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v7",
+          "number": 2,
+          "startedAt": "2026-10-25T07:34:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:00Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@master",
+          "number": 3,
+          "startedAt": "2026-10-25T07:34:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:01Z",
+          "conclusion": "success",
+          "name": "Run cargo fmt --all -- --check",
+          "number": 4,
+          "startedAt": "2026-10-25T07:35:00Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:01Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v7",
+          "number": 8,
+          "startedAt": "2026-10-25T07:35:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:01Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 9,
+          "startedAt": "2026-10-25T07:35:01Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/broomva/cuenca/actions/runs/40173296675/job/121108540254"
+    },
+    {
+      "completedAt": "2026-10-25T07:37:51Z",
+      "conclusion": "success",
+      "databaseId": 121108540281,
+      "name": "Security Audit",
+      "startedAt": "2026-10-25T07:34:48Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-25T07:34:50Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-25T07:34:49Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:51Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v7",
+          "number": 2,
+          "startedAt": "2026-10-25T07:34:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:37:48Z",
+          "conclusion": "success",
+          "name": "Run rustsec/audit-check@v2",
+          "number": 3,
+          "startedAt": "2026-10-25T07:34:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:37:48Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v7",
+          "number": 6,
+          "startedAt": "2026-10-25T07:37:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:37:48Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 7,
+          "startedAt": "2026-10-25T07:37:48Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/broomva/cuenca/actions/runs/40173296675/job/121108540281"
+    },
+    {
+      "completedAt": "2026-10-25T07:35:14Z",
+      "conclusion": "success",
+      "databaseId": 121108540294,
+      "name": "Lint",
+      "startedAt": "2026-10-25T07:34:47Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-25T07:34:50Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-25T07:34:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:50Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v7",
+          "number": 2,
+          "startedAt": "2026-10-25T07:34:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:01Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@master",
+          "number": 3,
+          "startedAt": "2026-10-25T07:34:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:07Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-10-25T07:35:01Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:12Z",
+          "conclusion": "success",
+          "name": "Run cargo clippy --workspace --all-targets --locked -- -D warnings",
+          "number": 5,
+          "startedAt": "2026-10-25T07:35:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:12Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 9,
+          "startedAt": "2026-10-25T07:35:12Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:12Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v7",
+          "number": 10,
+          "startedAt": "2026-10-25T07:35:12Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:12Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 11,
+          "startedAt": "2026-10-25T07:35:12Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/broomva/cuenca/actions/runs/40173296675/job/121108540294"
+    },
+    {
+      "completedAt": "2026-10-25T07:37:50Z",
+      "conclusion": "success",
+      "databaseId": 121108540358,
+      "name": "Test (Linux)",
+      "startedAt": "2026-10-25T07:34:48Z",
+      "status": "completed",
+      "steps": [
+        {
+          "completedAt": "2026-10-25T07:34:50Z",
+          "conclusion": "success",
+          "name": "Set up job",
+          "number": 1,
+          "startedAt": "2026-10-25T07:34:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:34:51Z",
+          "conclusion": "success",
+          "name": "Run actions/checkout@v7",
+          "number": 2,
+          "startedAt": "2026-10-25T07:34:50Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:00Z",
+          "conclusion": "success",
+          "name": "Run dtolnay/rust-toolchain@master",
+          "number": 3,
+          "startedAt": "2026-10-25T07:34:51Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:35:07Z",
+          "conclusion": "success",
+          "name": "Run Swatinem/rust-cache@v2",
+          "number": 4,
+          "startedAt": "2026-10-25T07:35:00Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:37:48Z",
+          "conclusion": "success",
+          "name": "Run cargo test --workspace --locked",
+          "number": 5,
+          "startedAt": "2026-10-25T07:35:07Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:37:48Z",
+          "conclusion": "success",
+          "name": "Post Run Swatinem/rust-cache@v2",
+          "number": 9,
+          "startedAt": "2026-10-25T07:37:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:37:48Z",
+          "conclusion": "success",
+          "name": "Post Run actions/checkout@v7",
+          "number": 10,
+          "startedAt": "2026-10-25T07:37:48Z",
+          "status": "completed"
+        },
+        {
+          "completedAt": "2026-10-25T07:37:48Z",
+          "conclusion": "success",
+          "name": "Complete job",
+          "number": 11,
+          "startedAt": "2026-10-25T07:37:48Z",
+          "status": "completed"
+        }
+      ],
+      "url": "https://github.com/broomva/cuenca/actions/runs/40173296675/job/121108540358"
+    }
+  ],
+  "status": "completed",
+  "url": "https://github.com/broomva/cuenca/actions/runs/40173296675"
+}
