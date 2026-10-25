@@ -114,7 +114,7 @@ fn decrypt(identity: &age::x25519::Identity, bytes: &[u8], limit: u64) -> Result
 fn read_bounded(path: &Path, limit: u64) -> Result<Vec<u8>> {
     let file = OpenOptions::new()
         .read(true)
-        .custom_flags(rustix::fs::OFlags::NOFOLLOW.bits() as i32)
+        .custom_flags((rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK).bits() as i32)
         .open(path)?;
     anyhow::ensure!(file.metadata()?.is_file(), "object is not a regular file");
     anyhow::ensure!(file.metadata()?.len() <= limit, "object exceeds limit");
@@ -571,6 +571,24 @@ mod tests {
                 .join("objects")
                 .join(format!("{}.age", object.sha256))
         }
+    }
+    #[test]
+    fn local_objects_refuse_symlinks_and_fifos_without_blocking() {
+        let dir = tempfile::tempdir().unwrap();
+        let plain = dir.path().join("plain");
+        fs::write(&plain, b"test-only bytes").unwrap();
+        let link = dir.path().join("link");
+        std::os::unix::fs::symlink(&plain, &link).unwrap();
+        assert!(read_bounded(&link, 100).is_err());
+        let fifo = dir.path().join("fifo");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .unwrap()
+                .success()
+        );
+        assert!(read_bounded(&fifo, 100).is_err());
     }
     #[test]
     fn forged_manifest_is_refused_without_falling_back() {
