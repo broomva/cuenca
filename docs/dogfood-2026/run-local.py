@@ -139,8 +139,8 @@ class Trial:
         assert reply.get("id") == ident and "result" in reply, reply
         return reply["result"]
 
-    def call(self, name, **args):
-        r = self.request("tools/call", {"name": name, "arguments": args})
+    def call(self, verb, **args):
+        r = self.request("tools/call", {"name": verb, "arguments": args})
         assert not r.get("isError"), r
         return r["structuredContent"]
 
