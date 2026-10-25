@@ -10,6 +10,9 @@
 #   CUENCA_MUT_BUDGET_MB   bytes one running cargo test may have under the run dir before
 #                          it is killed (default 4096; leaving more on exit only warns)
 #   CUENCA_MUT_TIMEOUT     seconds one cargo test may run, build included (default 1800)
+#   CUENCA_MUT_MIN_FREE_MB free space a cargo test must leave on the run dir's and the
+#                          checkout's filesystems, read every 0.2 s; below it the test is
+#                          killed, whoever wrote the bytes (default 2048; BRO-3467 #1, #3)
 #
 # A run dir is named run-<pid> and holds .backup. When the next run starts, one whose
 # process is gone (SIGKILLed, so its EXIT trap never ran) is removed, unless it may have
@@ -112,7 +115,8 @@ bounded() {
   guard_kill
   find "$guard_dir" -mindepth 1 -maxdepth 1 ! -name .backup -exec rm -rf {} +
   python3 "$guard_repo/scripts/bounded.py" --dir "$guard_dir" --pgid-file "$guard_backup/pgid" \
-    --budget-mb "${CUENCA_MUT_BUDGET_MB:-4096}" --timeout "${CUENCA_MUT_TIMEOUT:-1800}" -- "$@" &
+    --budget-mb "${CUENCA_MUT_BUDGET_MB:-4096}" --timeout "${CUENCA_MUT_TIMEOUT:-1800}" \
+    --min-free-mb "${CUENCA_MUT_MIN_FREE_MB:-2048}" -- "$@" &
   guard_bounded=$!
   wait "$guard_bounded"
   local status=$?
