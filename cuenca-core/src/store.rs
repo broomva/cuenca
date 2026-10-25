@@ -188,27 +188,14 @@ impl Store {
     /// Export a stable journal prefix and all historical trees it references from
     /// one redb read transaction. Blobs are immutable and never pruned.
     pub fn export_prefix(&self) -> Result<JournalPrefix> {
-        let txn = self.db.begin_read()?;
-        let records = txn
-            .open_table(LOG)?
-            .iter()?
-            .map(|row| {
-                let (k, v) = row?;
-                decode_record(k.value(), v.value())
-            })
-            .collect::<Result<Vec<_>>>()?;
-        let table = txn.open_table(TREES)?;
-        let mut trees = BTreeMap::new();
-        for oid in prefix_roots(&records) {
-            trees.insert(oid, load_tree(&table, oid)?);
-        }
-        Ok(JournalPrefix { records, trees })
+        self.snapshot()?.export_prefix()
     }
 
     /// Rebuild projections from a verified backup, preserving offsets and times.
     /// Refuses a nonempty store. Admission and transition rules still apply; all
     /// journal/projection/tree writes commit together, or none do.
     pub fn import_prefix(&self, prefix: &JournalPrefix) -> Result<()> {
+        prefix.reachable_blobs()?;
         for (oid, tree) in &prefix.trees {
             if tree.git_tree_id() != *oid {
                 return Err(CoreError::CorruptTree(*oid));
@@ -251,9 +238,27 @@ impl Store {
                     if ChangesetId::of(changeset) != *id {
                         return Err(CoreError::Inconsistent("restore changeset id".into()));
                     }
-                    let target = changeset.apply(&load_tree(&trees, changeset.base)?)?;
-                    if target != load_tree(&trees, changeset.target)? {
-                        return Err(CoreError::CorruptTree(changeset.target));
+                    changeset.apply(&load_tree(&trees, changeset.base)?)?;
+                }
+                Event::VerifyRecorded {
+                    base,
+                    manifest,
+                    checks,
+                    ..
+                } => {
+                    let (expected_id, declared) =
+                        self.manifest_for_tree(&load_tree(&trees, *base)?)?;
+                    if *manifest != expected_id {
+                        return Err(CoreError::ManifestMismatch(
+                            "restore verify manifest id".into(),
+                        ));
+                    }
+                    let reported: Vec<_> = checks.iter().map(|run| &run.check).collect();
+                    let expected: Vec<_> = declared.checks.iter().collect();
+                    if reported != expected {
+                        return Err(CoreError::ManifestMismatch(
+                            "restore verify declared checks".into(),
+                        ));
                     }
                 }
                 _ => {}
@@ -265,9 +270,6 @@ impl Store {
                 return Err(CoreError::Inconsistent("restore duplicated event".into()));
             }
             log.insert(record.offset, to_json(record).as_slice())?;
-        }
-        for oid in prefix_roots(&prefix.records) {
-            load_tree(&trees, oid)?;
         }
         drop(view);
         drop(trees);
@@ -677,7 +679,10 @@ impl Store {
 
     /// The manifest tree `base` declares, with its id; an absent one declares nothing.
     fn manifest(&self, base: GitOid) -> Result<(Option<ManifestId>, Manifest)> {
-        let tree = self.tree(base)?;
+        self.manifest_for_tree(&self.tree(base)?)
+    }
+
+    fn manifest_for_tree(&self, tree: &Tree) -> Result<(Option<ManifestId>, Manifest)> {
         let Some(entry) = tree.get(MANIFEST_PATH) else {
             return Ok((None, Manifest::default()));
         };
@@ -1122,6 +1127,29 @@ pub struct JournalPrefix {
     pub trees: BTreeMap<GitOid, Tree>,
 }
 
+impl JournalPrefix {
+    /// Exactly the blobs reachable from journal-referenced historical roots.
+    /// Extra and missing trees are refused before any import writes occur.
+    pub fn reachable_blobs(&self) -> Result<std::collections::BTreeSet<GitOid>> {
+        let roots = prefix_roots(&self.records);
+        if self
+            .trees
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            != roots
+        {
+            return Err(CoreError::Inconsistent(
+                "restore tree roots mismatch".into(),
+            ));
+        }
+        Ok(roots
+            .iter()
+            .flat_map(|oid| self.trees[oid].entries().map(|(_, entry)| entry.oid()))
+            .collect())
+    }
+}
+
 fn prefix_roots(records: &[Record]) -> std::collections::BTreeSet<GitOid> {
     records
         .iter()
@@ -1145,6 +1173,25 @@ pub struct Snapshot {
 }
 
 impl Snapshot {
+    /// Export this held read snapshot, even if later writes have committed.
+    pub fn export_prefix(&self) -> Result<JournalPrefix> {
+        let records = self
+            .txn
+            .open_table(LOG)?
+            .iter()?
+            .map(|row| {
+                let (k, v) = row?;
+                decode_record(k.value(), v.value())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let table = self.txn.open_table(TREES)?;
+        let mut trees = BTreeMap::new();
+        for oid in prefix_roots(&records) {
+            trees.insert(oid, load_tree(&table, oid)?);
+        }
+        Ok(JournalPrefix { records, trees })
+    }
+
     pub fn fork(&self, name: &ForkName) -> Result<Option<Fork>> {
         get_json(&self.txn.open_table(FORKS)?, name.as_str())
     }

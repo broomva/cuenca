@@ -3,10 +3,11 @@
 //! Only an atomically published completion envelope is a restore point. Objects
 //! and the signed manifest are age-encrypted; the restore trust key is supplied
 //! independently. An invalid newest committed point fails closed, never falls back.
+use anyhow::Context;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, File, OpenOptions};
 use std::io::{Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 use std::path::Path;
 
 use age::secrecy::ExposeSecret;
@@ -196,11 +197,7 @@ pub fn backup(
     let prefix = store.export_prefix()?;
     let journal = serde_json::to_vec(&prefix)?;
     anyhow::ensure!(journal.len() as u64 <= MAX_JOURNAL, "journal exceeds limit");
-    let reachable: BTreeSet<_> = prefix
-        .trees
-        .values()
-        .flat_map(|t| t.entries().map(|(_, e)| e.oid()))
-        .collect();
+    let reachable = prefix.reachable_blobs()?;
     let mut blobs = Vec::new();
     for (index, oid) in reachable.into_iter().enumerate() {
         let plain = store.read_blob(oid)?;
@@ -312,11 +309,26 @@ fn read_manifest(
         manifest.offset == manifest.records.checked_sub(1),
         "manifest offset mismatch"
     );
+    anyhow::ensure!(
+        manifest
+            .blobs
+            .windows(2)
+            .all(|pair| pair[0].oid < pair[1].oid),
+        "blob order mismatch"
+    );
     Ok(manifest)
 }
 
+fn restore_staging(parent: &Path) -> Result<tempfile::TempDir> {
+    Ok(tempfile::Builder::new()
+        .prefix(".cuenca-restore-")
+        .permissions(fs::Permissions::from_mode(0o700))
+        .tempdir_in(parent)?)
+}
+
 /// Restore the newest committed point into a NEW destination. Validation occurs
-/// in private staging; refusal never creates or modifies the destination.
+/// in mode-0700 staging; validation refusals leave the destination absent.
+/// A post-publication sync error can leave a complete destination; inspect it.
 /// Pin `trust` outside the object store. A substituted key in a manifest is useless.
 pub fn restore(
     root: &Path,
@@ -378,22 +390,16 @@ pub fn restore(
                 .all(|(i, r)| r.offset == i as u64),
         "journal offset mismatch"
     );
-    let reachable: BTreeSet<_> = prefix
-        .trees
-        .values()
-        .flat_map(|t| t.entries().map(|(_, e)| e.oid()))
-        .collect();
+    let reachable = prefix.reachable_blobs()?;
     let listed: BTreeSet<_> = manifest.blobs.iter().map(|b| b.oid).collect();
-    anyhow::ensure!(
-        reachable == listed && listed.len() == manifest.blobs.len(),
-        "blob reachability mismatch"
-    );
+    anyhow::ensure!(reachable == listed, "blob reachability mismatch");
     let parent = destination
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("destination needs a parent"))?;
-    let staged = tempfile::Builder::new()
-        .prefix(".cuenca-restore-")
-        .tempdir_in(parent)?;
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let parent_dir = File::open(parent)?;
+    parent_dir.sync_all()?;
+    let staged = restore_staging(parent)?;
     let store = Store::open(staged.path())?;
     for blob in &manifest.blobs {
         let plain = decrypt(identity, &object_bytes(root, &blob.object)?, MAX_OBJECT)?;
@@ -419,6 +425,8 @@ pub fn restore(
         fork_ids: store.forks()?.iter().map(|f| f.name.to_string()).collect(),
     };
     drop(store);
+    File::open(staged.path())?.sync_all()?;
+    parent_dir.sync_all()?;
     // No replace: concurrent restores must never overwrite an existing state.
     rustix::fs::renameat_with(
         rustix::fs::CWD,
@@ -427,7 +435,9 @@ pub fn restore(
         destination,
         rustix::fs::RenameFlags::NOREPLACE,
     )?;
-    File::open(parent)?.sync_all()?;
+    parent_dir
+        .sync_all()
+        .context("restore published; destination parent sync failed")?;
     Ok(receipt)
 }
 
@@ -489,9 +499,16 @@ mod tests {
             source
                 .ingest_blob(oid, bytes.len() as u64, bytes.as_slice())
                 .unwrap();
-            let tree =
-                Tree::from_entries([(RepoPath::new("private-name").unwrap(), Entry::File(oid))])
-                    .unwrap();
+            let second = b"second test content";
+            let other = GitOid::for_blob(second);
+            source
+                .ingest_blob(other, second.len() as u64, second.as_slice())
+                .unwrap();
+            let tree = Tree::from_entries([
+                (RepoPath::new("private-name").unwrap(), Entry::File(oid)),
+                (RepoPath::new("second-name").unwrap(), Entry::File(other)),
+            ])
+            .unwrap();
             source
                 .add_location(&LocationName::new("fixture").unwrap(), None, &tree)
                 .unwrap();
@@ -611,6 +628,18 @@ mod tests {
                 .success()
         );
         assert!(read_bounded(&fifo, 100).is_err());
+    }
+    #[test]
+    fn staging_is_private_at_creation_and_manifest_order_is_enforced() {
+        let parent = tempfile::tempdir().unwrap();
+        let staged = restore_staging(parent.path()).unwrap();
+        assert_eq!(
+            fs::metadata(staged.path()).unwrap().permissions().mode() & 0o777,
+            0o700
+        );
+        let f = Fixture::new();
+        f.edit(|m| m.blobs.swap(0, 1));
+        f.refuses("blob order mismatch");
     }
     #[test]
     fn forged_manifest_is_refused_without_falling_back() {
@@ -763,8 +792,8 @@ mod tests {
         f.edit(|m| m.blobs.clear());
         f.refuses("blob reachability mismatch");
         let f = Fixture::new();
-        f.edit(|m| m.blobs.push(m.blobs[0].clone()));
-        f.refuses("blob reachability mismatch");
+        f.edit(|m| m.blobs.push(m.blobs.last().unwrap().clone()));
+        f.refuses("blob order mismatch");
     }
     #[test]
     fn journal_digest_size_and_unknown_formats_refuse() {

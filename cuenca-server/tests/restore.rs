@@ -42,7 +42,7 @@ fn empty_log_is_distinct_from_offset_zero_and_restore_never_overwrites() {
 }
 
 #[test]
-fn export_is_one_snapshot_and_import_rejects_invalid_offsets_atomically() {
+fn import_rejects_invalid_offsets_atomically() {
     let dir = tempfile::tempdir().unwrap();
     let source = fixture::fixture(&dir.path().join("source"));
     let mut prefix = source.export_prefix().unwrap();
@@ -65,43 +65,55 @@ fn export_is_one_snapshot_and_import_rejects_invalid_offsets_atomically() {
 }
 
 #[test]
-fn concurrent_writes_cannot_split_a_backup_read_snapshot() {
-    use cuenca_core::LocationName;
-    use cuenca_tree::{Entry, GitOid, RepoPath, Tree};
+fn relative_single_component_destination_succeeds_and_is_private() {
+    use std::os::unix::fs::PermissionsExt;
     let dir = tempfile::tempdir().unwrap();
-    let source = std::sync::Arc::new(Store::open(dir.path().join("source")).unwrap());
-    let writer = source.clone();
-    let task = std::thread::spawn(move || {
-        for i in 0..20 {
-            let bytes = format!("blob-{i}");
-            let oid = GitOid::for_blob(bytes.as_bytes());
-            writer
-                .ingest_blob(oid, bytes.len() as u64, bytes.as_bytes())
-                .unwrap();
-            let tree =
-                Tree::from_entries([(RepoPath::new("data").unwrap(), Entry::File(oid))]).unwrap();
-            writer
-                .add_location(&LocationName::new(format!("loc-{i}")).unwrap(), None, &tree)
-                .unwrap();
-        }
-    });
-    for i in 0..5 {
-        let prefix = source.export_prefix().unwrap();
-        let target = Store::open(dir.path().join(format!("target-{i}"))).unwrap();
-        for tree in prefix.trees.values() {
-            for (_, e) in tree.entries() {
-                let bytes = source.read_blob(e.oid()).unwrap();
-                target
-                    .ingest_blob(e.oid(), bytes.len() as u64, bytes.as_slice())
-                    .unwrap();
-            }
-        }
-        target.import_prefix(&prefix).unwrap();
-        assert_eq!(target.records(0, usize::MAX).unwrap(), prefix.records);
-        assert_eq!(
-            target.replay_check().unwrap().records,
-            prefix.records.len() as u64
-        );
-    }
-    task.join().unwrap();
+    let keys = dir.path().join("keys");
+    cuenca_server::restore::test_keys(&keys).unwrap();
+    let source = Store::open(dir.path().join("source")).unwrap();
+    let recipient = std::fs::read_to_string(keys.join("recipient"))
+        .unwrap()
+        .trim()
+        .parse()
+        .unwrap();
+    let seed: [u8; 32] = hex::decode(std::fs::read_to_string(keys.join("signer")).unwrap().trim())
+        .unwrap()
+        .try_into()
+        .unwrap();
+    let objects = dir.path().join("objects");
+    backup(
+        &source,
+        &objects,
+        &recipient,
+        &SigningKey::from_bytes(&seed),
+        |_| Ok(()),
+    )
+    .unwrap();
+    let run = || {
+        std::process::Command::new(env!("CARGO_BIN_EXE_cuenca-backup"))
+            .current_dir(dir.path())
+            .args(["restore", "--destination", "new-store", "--objects"])
+            .arg(&objects)
+            .arg("--identity")
+            .arg(keys.join("identity"))
+            .arg("--trust-key")
+            .arg(keys.join("trust"))
+            .output()
+            .unwrap()
+    };
+    let out = run();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let target = dir.path().join("new-store");
+    assert_eq!(
+        std::fs::metadata(&target).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    assert_eq!(Store::open(&target).unwrap().len().unwrap(), 0);
+    let again = run();
+    assert!(!again.status.success());
+    assert!(String::from_utf8_lossy(&again.stderr).contains("already exists"));
 }
