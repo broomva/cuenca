@@ -599,6 +599,12 @@ mod tests {
         f.edit(|m| m.offset = Some(9));
         f.refuses("manifest offset mismatch");
         let f = Fixture::new();
+        f.edit(|m| {
+            m.records += 1;
+            m.offset = m.records.checked_sub(1);
+        });
+        f.refuses("journal offset mismatch");
+        let f = Fixture::new();
         let mut signed = f.signed();
         let journal = decrypt(
             &f.identity,
@@ -744,6 +750,40 @@ mod tests {
             "signing_key_id",
         ] {
             assert!(!public.contains(secret));
+        }
+    }
+    #[test]
+    fn backup_independently_verifies_source_sha256_and_size() {
+        for index in [0, 32] {
+            let f = Fixture::new();
+            let oid = f.signed().manifest.blobs[0].oid;
+            let db = redb::Database::open(f.dir.path().join("source/log.redb")).unwrap();
+            let txn = db.begin_write().unwrap();
+            {
+                let mut blobs = txn
+                    .open_table(redb::TableDefinition::<&[u8], &[u8]>::new("blobs"))
+                    .unwrap();
+                let mut info = blobs
+                    .get(oid.as_bytes().as_slice())
+                    .unwrap()
+                    .unwrap()
+                    .value()
+                    .to_vec();
+                info[index] ^= 1;
+                blobs
+                    .insert(oid.as_bytes().as_slice(), info.as_slice())
+                    .unwrap();
+            }
+            txn.commit().unwrap();
+            drop(db);
+            let source = Store::open(f.dir.path().join("source")).unwrap();
+            let output = f.dir.path().join("bad");
+            let error = backup(&source, &output, &f.identity.to_public(), &f.signer, |_| {
+                Ok(())
+            })
+            .unwrap_err();
+            assert!(error.to_string().contains("source blob integrity mismatch"));
+            assert_eq!(fs::read_dir(output.join("manifests")).unwrap().count(), 0);
         }
     }
     #[test]

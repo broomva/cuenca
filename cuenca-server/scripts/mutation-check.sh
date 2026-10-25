@@ -27,7 +27,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # A mutant only counts as killed against a suite that passes unmutated.
-if ! bounded cargo test -q -p cuenca-server >"$backup/log" 2>&1; then
+baseline_args=()
+if [ "${1:-}" = --restore-only ]; then baseline_args=(--lib restore::tests); fi
+if ! bounded cargo test -q -p cuenca-server "${baseline_args[@]}" >"$backup/log" 2>&1; then
   echo "baseline is red: fix the suite before reading any mutant verdict"; cat "$backup/log"; exit 2
 fi
 echo "baseline  green"
@@ -84,7 +86,15 @@ mutate src/restore.rs 'digest(&bytes) == object.sha256' true --lib restore::test
 mutate src/restore.rs 'manifest.format_version == FORMAT_VERSION' true --lib restore::tests::journal_digest_size
 mutate src/restore.rs 'envelope.format_version == FORMAT_VERSION' true --lib restore::tests::envelope_tampering
 mutate src/restore.rs 'manifest.signing_key_id == digest(trust.as_bytes())' true --lib restore::tests::journal_digest_size
-if [ "${1:-}" = --restore-only ]; then exit "$survived"; fi
+mutate src/restore.rs 'verified.sha256() == info.sha256' 'true' --lib restore::tests::backup_independently
+mutate src/restore.rs 'verified.size() == info.size' 'true' --lib restore::tests::backup_independently
+if [ "${1:-}" = --restore-only ]; then
+  if ! bounded cargo test -q -p cuenca-server --lib restore::tests >"$backup/log" 2>&1; then
+    echo "restored baseline is red"; cat "$backup/log"; exit 2
+  fi
+  echo "restored baseline green"
+  exit "$survived"
+fi
 
 # Keys: only the right secret, with the right prefix, verifies; one key per principal;
 # removal ends a key; the file is private.
