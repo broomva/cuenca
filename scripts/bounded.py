@@ -26,8 +26,10 @@ it: SIGINT, SIGTERM and SIGHUP to this process kill the command's session first,
 128 + signal. --pgid-file records the session id (the command's pid, which is also its
 group) while it runs, so the calling shell can still kill it if this process is SIGKILLed:
 
-    bounded.py --kill-session SID     SIGKILL every process of session SID
-    bounded.py --session-alive SID    exit 0 if session SID has a live process, else 1
+    bounded.py --kill-session SID     SIGKILL every process of session SID; exit 0 once
+                                      none is left, 1 if some is or ps failed
+    bounded.py --session-alive SID    exit 0 if session SID has a live process, 1 if it
+                                      has none, 2 if ps failed (callers read 2 as alive)
 
 Why: a mutant that turns a bounded write loop into an unbounded one filled the Mac's
 disk twice on 2026-10-24 (BRO-3455). A guard has to stop it, not the disk.
@@ -73,10 +75,13 @@ def low_space(paths, floor):
 def main():
     if len(sys.argv) == 3 and sys.argv[1] in ("--kill-session", "--session-alive"):
         sid = int(sys.argv[2])
+        if sid <= 1:  # killpg(0) is the caller's own group, and 1 is init's session
+            print(f"bounded: refusing session {sid}", file=sys.stderr)
+            return 2
         if sys.argv[1] == "--kill-session":
-            kill_session(sid)
-            return 0
-        return 0 if session_members(sid) else 1
+            return 0 if kill_session(sid) else 1
+        members = session_members(sid)
+        return 2 if members is None else 0 if members else 1
     ap = argparse.ArgumentParser()
     ap.add_argument("--dir", required=True)
     ap.add_argument("--budget-mb", type=int, required=True)
@@ -150,8 +155,12 @@ def signal_group(pgid):
 
 def session_members(sid):
     """Live pids whose session is sid. macOS pgrep has no -s, so ps lists every pid and
-    getsid sorts them; zombies are skipped, their parent or init reaps them."""
+    getsid sorts them; zombies are skipped, their parent or init reaps them. None when ps
+    fails: that is not an empty session."""
     ps = subprocess.run(["ps", "-A", "-o", "pid=,stat="], capture_output=True, text=True)
+    if ps.returncode != 0:
+        print(f"bounded: ps failed ({ps.returncode}), cannot list session {sid}", file=sys.stderr)
+        return None
     members = []
     for line in ps.stdout.splitlines():
         fields = line.split()
@@ -167,18 +176,22 @@ def session_members(sid):
 
 def kill_session(sid):
     """SIGKILL the group sid, then every process left in session sid. A member may fork
-    between ps and kill, so this repeats until a pass finds none (at most 20 passes)."""
+    between ps and kill, so this repeats until a pass finds none (at most 20 passes).
+    True once a pass finds none."""
     signal_group(sid)
     for _ in range(20):
         members = session_members(sid)
+        if members is None:
+            return False
         if not members:
-            return
+            return True
         for pid in members:
             try:
                 os.kill(pid, signal.SIGKILL)
             except (ProcessLookupError, PermissionError):
                 pass
         time.sleep(0.05)
+    return False
 
 
 def unlink(path):

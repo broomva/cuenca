@@ -35,6 +35,8 @@ guard_lock=$(git rev-parse --absolute-git-dir)/cuenca-mutation.lock
 # as cuenca-cli's check runner does, stays in the session (BRO-3467 #2). The pgid file
 # holds the session id, and macOS pgrep cannot match a session, so bounded.py does it.
 guard_session() { python3 "$guard_repo/scripts/bounded.py" "$@"; }
+# Alive unless proven gone: a failed ps (status 2) counts as alive, so nothing is deleted.
+guard_alive() { guard_session --session-alive "$1"; [ $? -ne 1 ]; }
 exec 9>>"$guard_lock"
 if ! python3 -c 'import fcntl; fcntl.flock(9, fcntl.LOCK_EX | fcntl.LOCK_NB)' 2>/dev/null; then
   # The file names the holder's shell pid and, once known, its pgid file. bounded.py
@@ -67,7 +69,7 @@ for stale in "$guard_root"/run-*; do
   case $pid in '' | *[!0-9]*) continue ;; esac
   [ -d "$stale/.backup" ] || continue
   ps -p "$pid" >/dev/null 2>&1 && continue
-  if [ -s "$stale/.backup/path" ] || [ -e "$stale/.backup/lock-failed" ] || { [ -s "$stale/.backup/pgid" ] && guard_session --session-alive "$(cat "$stale/.backup/pgid")"; }; then
+  if [ -s "$stale/.backup/path" ] || [ -e "$stale/.backup/lock-failed" ] || { [ -s "$stale/.backup/pgid" ] && guard_alive "$(cat "$stale/.backup/pgid")"; }; then
     echo "mutation-guard: run $pid died without cleaning up. Before running again:" >&2
     if [ -s "$stale/.backup/path" ]; then
       echo "  $(cat "$stale/.backup/path") may still be mutated: compare it with $stale/.backup/file and restore it (this overwrites edits made since)" >&2
@@ -75,7 +77,7 @@ for stale in "$guard_root"/run-*; do
     elif [ -e "$stale/.backup/lock-failed" ]; then
       echo "  Cargo.lock was not restored: copy $stale/.backup/Cargo.lock back over it, or take it from git" >&2
     fi
-    if [ -s "$stale/.backup/pgid" ] && guard_session --session-alive "$(cat "$stale/.backup/pgid")"; then
+    if [ -s "$stale/.backup/pgid" ] && guard_alive "$(cat "$stale/.backup/pgid")"; then
       echo "  its tests still run as session $(cat "$stale/.backup/pgid"): python3 $guard_repo/scripts/bounded.py --kill-session $(cat "$stale/.backup/pgid")" >&2
     fi
     echo "  then remove $stale" >&2
@@ -105,10 +107,15 @@ guard_kill() {
     wait "$guard_bounded" 2>/dev/null
     guard_bounded=
   fi
-  [ -s "$guard_backup/pgid" ] && guard_session --kill-session "$(cat "$guard_backup/pgid")"
+  # A session that could not be emptied keeps the run dir and its pgid file, so the next
+  # run refuses while the session lives.
+  if [ -s "$guard_backup/pgid" ] && ! guard_session --kill-session "$(cat "$guard_backup/pgid")"; then
+    echo "mutation-guard: session $(cat "$guard_backup/pgid") still runs; keeping $guard_dir" >&2
+    return 1
+  fi
   return 0
 }
-guard_cleanup() { guard_kill; rm -rf "$guard_dir"; }
+guard_cleanup() { guard_kill && rm -rf "$guard_dir"; }
 
 # bounded COMMAND...: run COMMAND under the budget and the timeout. The run dir is
 # emptied first, so the budget applies to this command alone. Status 124 is a timeout
