@@ -4,6 +4,10 @@ Cuenca is an agent-native change plane. Agents fork any storage location, work i
 
 The design is the spec, rev 2.2: [`docs/specs/2026-10-19-agent-native-change-plane.html`](https://github.com/broomva/workspace/blob/main/docs/specs/2026-10-19-agent-native-change-plane.html) in broomva/workspace. The build plan, one graph node per crate or feature, is [`docs/plans/2026-10-21-cuenca-build-plan.html`](https://github.com/broomva/workspace/blob/main/docs/plans/2026-10-21-cuenca-build-plan.html).
 
+See the [local dogfood workflow and cleanup guide](docs/dogfood-local-workflow.md)
+and [Mac dogfood receipts](docs/dogfood-2026.md). Production acceptance waits on
+BRO-3461 (NUC host readiness) and BRO-3257 (live deployment).
+
 | Crate | What it is |
 |---|---|
 | `cuenca-tree` | Git-isomorphic trees and changesets, and a bridge that reads and writes them through git with every object checked |

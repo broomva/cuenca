@@ -1,0 +1,18 @@
+{
+  "start_utc": "2026-10-25T07:27:14Z",
+  "argv": [
+    "ssh",
+    "-o",
+    "BatchMode=yes",
+    "-o",
+    "ConnectionAttempts=1",
+    "-o",
+    "ConnectTimeout=5",
+    "srv1692698",
+    "cuenca --json forks"
+  ],
+  "exit": 255,
+  "seconds": 10.04198679199908,
+  "stdout": "",
+  "stderr": "ssh: connect to host srv1692698 port 22: Operation timed out\n"
+}

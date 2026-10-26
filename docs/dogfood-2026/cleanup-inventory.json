@@ -1,0 +1,18 @@
+{
+  "observed_utc": "2026-10-25T12:48Z",
+  "argv": [
+    "git",
+    "ls-remote",
+    "--heads",
+    "origin",
+    "refs/heads/cp/81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b"
+  ],
+  "exit": 0,
+  "stdout": "f340cb61cf44db2442202a1a0254de9f03bcbc26\trefs/heads/cp/81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b\n",
+  "expected_export_sha": "f340cb61cf44db2442202a1a0254de9f03bcbc26",
+  "branch_still_present": true,
+  "pr": "https://github.com/broomva/cuenca/pull/30",
+  "pr_state": "MERGED",
+  "cleanup_performed": false,
+  "reason": "documented conditional retirement/expected-SHA cleanup only; active authority ownership must be checked before deleting remote export or local state"
+}

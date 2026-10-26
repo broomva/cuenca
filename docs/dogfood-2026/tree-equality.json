@@ -1,0 +1,28 @@
+{
+  "observed_utc": "2026-10-25T12:45:42Z",
+  "pr": "https://github.com/broomva/cuenca/pull/30",
+  "candidate_tree": "ccdf02aa132117edd64fd9346837efef120dc422",
+  "export_commit": "f340cb61cf44db2442202a1a0254de9f03bcbc26",
+  "export_tree": "ccdf02aa132117edd64fd9346837efef120dc422",
+  "candidate_equals_export_tree": true,
+  "merged_sha": "3063874e903d3ca7388b811a5846de0323a9b8b8",
+  "merged_tree": "ccdf02aa132117edd64fd9346837efef120dc422",
+  "candidate_equals_merged_tree": true,
+  "merge_parent": "d2f3b92ae3c5af53ece908aa7cf1c668f5b0cda3",
+  "export_parent": "d2f3b92ae3c5af53ece908aa7cf1c668f5b0cda3",
+  "base_unmoved": true,
+  "merge_contains_head_content": true,
+  "merge_contains_head_content_check": "git diff --exit-code <export_commit> <merged_sha> (exit 0); GitHub MERGED PR binds this exact head to mergeCommit",
+  "head_is_git_ancestor_of_merge": false,
+  "ancestry_check_exit": 1,
+  "merge_method": "squash (same tree and parent; exported commit is not a merge ancestor)",
+  "main_ci": {
+    "run_id": 40173296675,
+    "url": "https://github.com/broomva/cuenca/actions/runs/40173296675",
+    "head_sha": "3063874e903d3ca7388b811a5846de0323a9b8b8",
+    "conclusion": "success"
+  },
+  "raw_merge_receipt": "github-pr-30-merged.json",
+  "raw_ci_receipt": "github-main-ci-40173296675.json",
+  "equality_scope": "whole-tree equality observed only for this unmoved-main run; if main moves, retain the new base, rebased candidate and exact merged result rather than claiming equality to the original candidate"
+}

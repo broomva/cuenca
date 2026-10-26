@@ -1,0 +1,55 @@
+[
+  {
+    "jsonrpc": "2.0",
+    "id": 34,
+    "method": "tools/call",
+    "params": {
+      "name": "verify",
+      "arguments": {
+        "dir": "/Volumes/Broomva/scratch/bro-3259/trial-3/owner-wait-checkout"
+      }
+    }
+  },
+  {
+    "jsonrpc": "2.0",
+    "id": 34,
+    "result": {
+      "content": [
+        {
+          "type": "text",
+          "text": "verify of 381d89ad66830b2f83f8d1c5450c55e543171e73d1513782f35bf43a62d2396a on bro-3259-owner-wait: 0 of 1 check(s) passed, judged by .cuenca/checks.toml a212ff7318d17bc0f89efcdf68db5025e1878dc8 of base aaf35774ad2ff643b506e069f3d4f4c6b5f98f8b\n  FAIL (not run)  scratch-readme  0 ms\n      could not start: No such file or directory (os error 2)\nrecorded at log offset 12; advisory, it blocks nothing\n"
+        }
+      ],
+      "structuredContent": {
+        "base": "aaf35774ad2ff643b506e069f3d4f4c6b5f98f8b",
+        "candidate": "5a4cdd286a89742da5f84a3d71043a7319e67540",
+        "changeset": "381d89ad66830b2f83f8d1c5450c55e543171e73d1513782f35bf43a62d2396a",
+        "checks": [
+          {
+            "argv": [
+              "/usr/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 0,
+            "exit_code": null,
+            "name": "scratch-readme",
+            "output": "could not start: No such file or directory (os error 2)",
+            "status": "not_run",
+            "timeout_secs": 1800
+          }
+        ],
+        "fork": "bro-3259-owner-wait",
+        "manifest": {
+          "oid": "a212ff7318d17bc0f89efcdf68db5025e1878dc8",
+          "sha256": "22624bac076914c9214948d81d6f535ef4fd945136be2b60c1be21557605027d"
+        },
+        "offset": 12,
+        "passed": false,
+        "record_error": null,
+        "recorded": true
+      },
+      "isError": true
+    }
+  }
+]

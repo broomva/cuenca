@@ -1,0 +1,35 @@
+{
+  "start_utc": "2026-10-25T07:26:35Z",
+  "end_utc": "2026-10-25T07:28:38Z",
+  "agents": 30,
+  "rounds": 17,
+  "requested_seconds": 120,
+  "measured_seconds": 121.26109808401088,
+  "scaled": "short local trial, not the required 1h production run",
+  "acknowledged_changesets": 510,
+  "lost": 0,
+  "duplicates": 0,
+  "restarts": [
+    {
+      "utc": "2026-10-25T07:27:38Z",
+      "signal": "SIGKILL",
+      "old_pid": 75644,
+      "new_pid": 14981,
+      "seconds": 0.11026166599185672,
+      "boundary": "between completed/acknowledged batches"
+    }
+  ],
+  "p95_snapshot_seconds": 1.4483370000089053,
+  "p95_snapshot_to_local_volume_seconds": 8.615606833001948,
+  "p95_request_to_owner_wait_seconds": 0.09381500000017695,
+  "p95_request_to_pr_open_seconds": null,
+  "pr_open_latency_reason": "load location has no remote; no GitHub PR flood",
+  "log_redb_bytes_before": 1589248,
+  "log_redb_bytes_after": 2641920,
+  "redb_allocated_growth_bytes_per_hour_projection": 31251730.850849748,
+  "logical_journal_json_bytes": 637522,
+  "logical_journal_json_bytes_per_hour_projection": 18926755.87029524,
+  "free_bytes_before": 116200325120,
+  "free_bytes_after": 116044050432,
+  "projected_days_at_redb_growth": 154.71683123971772
+}

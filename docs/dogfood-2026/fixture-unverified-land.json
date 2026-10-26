@@ -1,0 +1,482 @@
+[
+  {
+    "utc": "2026-10-25T07:25:26Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-00/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.02671862499846611,
+    "stdout": "{\"error\":\"asking to land eb9382dde31aea0d97ee40dbf7eafcc74cd0d63f35c537c5ca0468af99184da2: changeset eb9382dde31aea0d97ee40dbf7eafcc74cd0d63f35c537c5ca0468af99184da2 of fork \\\"load-00\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:26Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-01/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.027840291993925348,
+    "stdout": "{\"error\":\"asking to land 0e47722617a059e3807d269ff6996911f362f4bcba87ab87be325a8024e12d63: changeset 0e47722617a059e3807d269ff6996911f362f4bcba87ab87be325a8024e12d63 of fork \\\"load-01\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:26Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-02/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026537458004895598,
+    "stdout": "{\"error\":\"asking to land 0f2f3791f51450290fb605f5bcfe9199dc1848955377cdb3a69b360597654195: changeset 0f2f3791f51450290fb605f5bcfe9199dc1848955377cdb3a69b360597654195 of fork \\\"load-02\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:27Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-03/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.027758417010772973,
+    "stdout": "{\"error\":\"asking to land cad3d1e01dda480c2019faca8d955ca13f62ba48648f5b02229c80625ffcf115: changeset cad3d1e01dda480c2019faca8d955ca13f62ba48648f5b02229c80625ffcf115 of fork \\\"load-03\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:27Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-04/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.025522958996589296,
+    "stdout": "{\"error\":\"asking to land eaa14b86be718dc1c6d1b429ed2514be6e56f2e91cb6b4f68e1e69a92b8f2efb: changeset eaa14b86be718dc1c6d1b429ed2514be6e56f2e91cb6b4f68e1e69a92b8f2efb of fork \\\"load-04\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:27Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-05/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.028161249996628612,
+    "stdout": "{\"error\":\"asking to land 4d4d8a2ecd7e36b8404fd87882e1574c43aa450656c7e4d719e2fc4fa1627935: changeset 4d4d8a2ecd7e36b8404fd87882e1574c43aa450656c7e4d719e2fc4fa1627935 of fork \\\"load-05\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:27Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-06/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026828166999621317,
+    "stdout": "{\"error\":\"asking to land a44ff1e8675bd83f1c0d5db04374734d1ab3bb5c1c98f4688419b3625793ddb0: changeset a44ff1e8675bd83f1c0d5db04374734d1ab3bb5c1c98f4688419b3625793ddb0 of fork \\\"load-06\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:27Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-07/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.027113958989502862,
+    "stdout": "{\"error\":\"asking to land 8edca5644bd30914b0c5944563be71911baa52dfd409c4fe79baef6dc58c676b: changeset 8edca5644bd30914b0c5944563be71911baa52dfd409c4fe79baef6dc58c676b of fork \\\"load-07\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:27Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-08/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026608125001075678,
+    "stdout": "{\"error\":\"asking to land ae919955bde3f96e04cdac2f86c037f455f5a3a3287d5b42393c9b36b913239d: changeset ae919955bde3f96e04cdac2f86c037f455f5a3a3287d5b42393c9b36b913239d of fork \\\"load-08\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:27Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-09/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.027350750009645708,
+    "stdout": "{\"error\":\"asking to land 23a281e9713f6c937dd2485b9dfdf511d59941d7cb1ad89cbd6e8cf9d33caad6: changeset 23a281e9713f6c937dd2485b9dfdf511d59941d7cb1ad89cbd6e8cf9d33caad6 of fork \\\"load-09\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:28Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-10/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.028048708001733758,
+    "stdout": "{\"error\":\"asking to land d652aac85ef14e0d671acc94a9c413baf7e72e205cd4501dba3dc7db44365fcf: changeset d652aac85ef14e0d671acc94a9c413baf7e72e205cd4501dba3dc7db44365fcf of fork \\\"load-10\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:28Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-11/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.027210042011574842,
+    "stdout": "{\"error\":\"asking to land b922d696f9b4cd88b31f29a79a5fe4e28bac9a2727282c4ad3614bfd2518c7d3: changeset b922d696f9b4cd88b31f29a79a5fe4e28bac9a2727282c4ad3614bfd2518c7d3 of fork \\\"load-11\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:28Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-12/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026204042005701922,
+    "stdout": "{\"error\":\"asking to land 3c2ff6362e33751f23ce1b6284f2c91a6c37ac9bdb34dbdd1310358725f89428: changeset 3c2ff6362e33751f23ce1b6284f2c91a6c37ac9bdb34dbdd1310358725f89428 of fork \\\"load-12\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:28Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-13/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.027248500002315268,
+    "stdout": "{\"error\":\"asking to land 024e8159dcd875402e96c4312883dc2f00e148bc54b627926c411f664e178941: changeset 024e8159dcd875402e96c4312883dc2f00e148bc54b627926c411f664e178941 of fork \\\"load-13\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-14/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.027606208008364774,
+    "stdout": "{\"error\":\"asking to land 0beb40c24326986d80650ce8991c32543c5dcdf849e5b2ffffa2beb3b07a9e76: changeset 0beb40c24326986d80650ce8991c32543c5dcdf849e5b2ffffa2beb3b07a9e76 of fork \\\"load-14\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-15/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.02650191700377036,
+    "stdout": "{\"error\":\"asking to land e025a9cd2aff587087c66413ab77b141701fbaa7ba8ebe49e3a8e168aecb2dd1: changeset e025a9cd2aff587087c66413ab77b141701fbaa7ba8ebe49e3a8e168aecb2dd1 of fork \\\"load-15\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-16/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.03858983299869578,
+    "stdout": "{\"error\":\"asking to land 829306187329614173a1b6b7a2692ef7051fd607cce17f3c0168510f0e89c31f: changeset 829306187329614173a1b6b7a2692ef7051fd607cce17f3c0168510f0e89c31f of fork \\\"load-16\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-17/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.028603250000742264,
+    "stdout": "{\"error\":\"asking to land 94ff41b3c89cf68ef15618e34e5592a7a5fd88f80fe6bcb40ca1c5e1fd1eb528: changeset 94ff41b3c89cf68ef15618e34e5592a7a5fd88f80fe6bcb40ca1c5e1fd1eb528 of fork \\\"load-17\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-18/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.02665433300717268,
+    "stdout": "{\"error\":\"asking to land e0e11aad993fb8cdb5adfecf5239ae5dd7fb1ab171113a8e0582eedcb88590ab: changeset e0e11aad993fb8cdb5adfecf5239ae5dd7fb1ab171113a8e0582eedcb88590ab of fork \\\"load-18\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-19/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026618042000336573,
+    "stdout": "{\"error\":\"asking to land 7f4ccb33e79e8b0e83561f748ea4c9afd26b04cbb011ab2e99c3fb597e38dc92: changeset 7f4ccb33e79e8b0e83561f748ea4c9afd26b04cbb011ab2e99c3fb597e38dc92 of fork \\\"load-19\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-20/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.02800091700919438,
+    "stdout": "{\"error\":\"asking to land 753c796fe10b7e189634b48eeb3ea586d6552aa38c19ebd2c4ded167bc5d5ac4: changeset 753c796fe10b7e189634b48eeb3ea586d6552aa38c19ebd2c4ded167bc5d5ac4 of fork \\\"load-20\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-21/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.02576075000979472,
+    "stdout": "{\"error\":\"asking to land cf07ad83a9c7f5ca2f1e630a179df4ca8c1f7fffa8942e5856c5f9cc5e62882c: changeset cf07ad83a9c7f5ca2f1e630a179df4ca8c1f7fffa8942e5856c5f9cc5e62882c of fork \\\"load-21\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-22/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.0274691249942407,
+    "stdout": "{\"error\":\"asking to land d914f192af88af39e13977ace014fbe58b8b26e74dc63a040d335eba8691a2ed: changeset d914f192af88af39e13977ace014fbe58b8b26e74dc63a040d335eba8691a2ed of fork \\\"load-22\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-23/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026549958012765273,
+    "stdout": "{\"error\":\"asking to land 98f7a18c98d7ee1403f2b64c0ef5b8bb9d8240ad081fb1223a4a3f632a2aa7d7: changeset 98f7a18c98d7ee1403f2b64c0ef5b8bb9d8240ad081fb1223a4a3f632a2aa7d7 of fork \\\"load-23\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-24/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.02738791699812282,
+    "stdout": "{\"error\":\"asking to land f7d72e108f3dcb3e7fd2e7b8aa4064934111e529f18a686e016886dea653fcd2: changeset f7d72e108f3dcb3e7fd2e7b8aa4064934111e529f18a686e016886dea653fcd2 of fork \\\"load-24\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-25/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026850666996324435,
+    "stdout": "{\"error\":\"asking to land 36f318ce01c032b87321ea096b6edbe18c39e7ff6871b8b08062a0ca501d6295: changeset 36f318ce01c032b87321ea096b6edbe18c39e7ff6871b8b08062a0ca501d6295 of fork \\\"load-25\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:29Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-26/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026576583011774346,
+    "stdout": "{\"error\":\"asking to land de5b1e2a2d00e8cd1c7723b94ab9783e8fb8144d48c5162b624b3fa9928ce153: changeset de5b1e2a2d00e8cd1c7723b94ab9783e8fb8144d48c5162b624b3fa9928ce153 of fork \\\"load-26\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:30Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-27/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026245000000926666,
+    "stdout": "{\"error\":\"asking to land 32ae97ef2641d9eec506245c208ac37a5369e9ad70f46593ff60c29c747b7e55: changeset 32ae97ef2641d9eec506245c208ac37a5369e9ad70f46593ff60c29c747b7e55 of fork \\\"load-27\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:30Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-28/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.02601899999717716,
+    "stdout": "{\"error\":\"asking to land f06aa396398eae043ec45353793d61a1c54da3983d71430947393a6da8b3eac8: changeset f06aa396398eae043ec45353793d61a1c54da3983d71430947393a6da8b3eac8 of fork \\\"load-28\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  },
+  {
+    "utc": "2026-10-25T07:25:30Z",
+    "argv": [
+      "/Volumes/Broomva/scratch/bro-3259/target/debug/cuenca",
+      "--json",
+      "land",
+      "--dir",
+      "/Volumes/Broomva/scratch/bro-3259/trial-4/load-29/checkout",
+      "--wait",
+      "0"
+    ],
+    "exit": 1,
+    "seconds": 0.026458332999027334,
+    "stdout": "{\"error\":\"asking to land 54505fb9f6cde7437b326d22f5e4488c9e4b3359cb9d31f491817aa35b6d0394: changeset 54505fb9f6cde7437b326d22f5e4488c9e4b3359cb9d31f491817aa35b6d0394 of fork \\\"load-29\\\" has no verify against its location's main; run `cuenca verify` first (not_verified, HTTP 409)\"}\n",
+    "stderr": ""
+  }
+]
