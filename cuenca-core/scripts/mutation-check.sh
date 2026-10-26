@@ -27,7 +27,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # A mutant only counts as killed against a suite that passes unmutated.
-if ! bounded cargo test -q -p cuenca-core >"$backup/log" 2>&1; then
+baseline_args=()
+if [ "${1:-}" = --import-only ]; then baseline_args=(--test restore); fi
+if ! bounded cargo test -q -p cuenca-core "${baseline_args[@]}" >"$backup/log" 2>&1; then
   echo "baseline is red: fix the suite before reading any mutant verdict"; cat "$backup/log"; exit 2
 fi
 echo "baseline  green"
@@ -64,6 +66,34 @@ PY
   fi
   restore
 }
+
+# Backup import admission and held-snapshot cut (BRO-3258 P20 r1).
+mutate src/store.rs 'prefix.reachable_blobs()?;' '' --test restore import_rejects_missing_and_unreferenced_roots
+mutate src/store.rs 'if tree.git_tree_id() != *oid {' 'if false {' --test restore import_rejects_a_tree_under_the_wrong_git_id
+mutate src/store.rs 'self.check_entries(tree.entries())?;' '' --test restore import_checks_blob_presence_and_content_admission
+mutate src/store.rs '                    check_remote(remote)?;' '' --test restore import_rejects_invalid_remotes
+mutate src/store.rs '                    changeset.apply(&load_tree(&trees, changeset.base)?)?;' '' --test restore import_reapplies_changesets_to_check_their_target
+mutate src/store.rs '                    if ChangesetId::of(changeset) != *id {' '                    if false {' --test restore import_rejects_changeset_ids_offsets_and_duplicate_events_atomically
+mutate src/store.rs '            if record.offset != expected as u64 {' '            if false {' --test restore import_rejects_changeset_ids_offsets_and_duplicate_events_atomically
+mutate src/store.rs '                    if *manifest != expected_id {' '                    if false {' --test restore import_rechecks_verify_manifest_identity_and_declared_checks
+mutate src/store.rs '                    if reported != expected {' '                    if false {' --test restore import_rechecks_verify_manifest_identity_and_declared_checks
+mutate src/store.rs '                Applied::Fresh
+            ) {' '                Applied::Fresh | Applied::Repeat(_)
+            ) {' --test restore import_rejects_changeset_ids_offsets_and_duplicate_events_atomically
+mutate src/store.rs '        if !log.is_empty()? {' '        if false {' --test restore import_round_trips_records_and_refuses_nonempty_destinations
+mutate src/store.rs '            .open_table(LOG)?
+            .iter()?
+            .map(|row|' '            .open_table(LOG)?
+            .iter()?
+            .take(1)
+            .map(|row|' --test restore held_snapshot_exports_the_original_cut_after_later_writes_commit
+if [ "${1:-}" = --import-only ]; then
+  if ! bounded cargo test -q -p cuenca-core --test restore >"$backup/log" 2>&1; then
+    echo "restored baseline is red"; cat "$backup/log"; exit 2
+  fi
+  echo "restored baseline green"
+  exit "$survived"
+fi
 
 # Blob ingest: only bytes that hash to the claim, of exactly the announced size, and
 # the same path whether or not the store holds the blob.

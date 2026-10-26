@@ -47,6 +47,7 @@ mod identity;
 mod keys;
 pub mod land;
 pub mod materialise;
+pub mod restore;
 
 use std::net::{IpAddr, SocketAddr};
 use std::path::PathBuf;

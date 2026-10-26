@@ -185,6 +185,99 @@ impl Store {
         Ok(txn)
     }
 
+    /// Export a stable journal prefix and all historical trees it references from
+    /// one redb read transaction. Blobs are immutable and never pruned.
+    pub fn export_prefix(&self) -> Result<JournalPrefix> {
+        self.snapshot()?.export_prefix()
+    }
+
+    /// Rebuild projections from a verified backup, preserving offsets and times.
+    /// Refuses a nonempty store. Admission and transition rules still apply; all
+    /// journal/projection/tree writes commit together, or none do.
+    pub fn import_prefix(&self, prefix: &JournalPrefix) -> Result<()> {
+        prefix.reachable_blobs()?;
+        for (oid, tree) in &prefix.trees {
+            if tree.git_tree_id() != *oid {
+                return Err(CoreError::CorruptTree(*oid));
+            }
+            self.check_entries(tree.entries())?;
+        }
+        let txn = self.begin()?;
+        let mut log = txn.open_table(LOG)?;
+        if !log.is_empty()? {
+            return Err(CoreError::Inconsistent(
+                "restore needs an empty store".into(),
+            ));
+        }
+        let mut trees = txn.open_table(TREES)?;
+        for tree in prefix.trees.values() {
+            store_tree(&mut trees, tree)?;
+        }
+        let mut view = Tables {
+            locations: txn.open_table(LOCATIONS)?,
+            forks: txn.open_table(FORKS)?,
+            changesets: txn.open_table(CHANGESETS)?,
+            revoked: txn.open_table(REVOKED)?,
+        };
+        for (expected, record) in prefix.records.iter().enumerate() {
+            if record.offset != expected as u64 {
+                return Err(CoreError::CorruptLog {
+                    offset: record.offset,
+                    reason: "restore offset gap".into(),
+                });
+            }
+            match &record.event {
+                Event::LocationAdded {
+                    remote: Some(remote),
+                    ..
+                } => {
+                    check_remote(remote)?;
+                }
+                Event::DraftPublished { changeset, id, .. }
+                | Event::DraftFenced { changeset, id, .. } => {
+                    if ChangesetId::of(changeset) != *id {
+                        return Err(CoreError::Inconsistent("restore changeset id".into()));
+                    }
+                    changeset.apply(&load_tree(&trees, changeset.base)?)?;
+                }
+                Event::VerifyRecorded {
+                    base,
+                    manifest,
+                    checks,
+                    ..
+                } => {
+                    let (expected_id, declared) =
+                        self.manifest_for_tree(&load_tree(&trees, *base)?)?;
+                    if *manifest != expected_id {
+                        return Err(CoreError::ManifestMismatch(
+                            "restore verify manifest id".into(),
+                        ));
+                    }
+                    let reported: Vec<_> = checks.iter().map(|run| &run.check).collect();
+                    let expected: Vec<_> = declared.checks.iter().collect();
+                    if reported != expected {
+                        return Err(CoreError::ManifestMismatch(
+                            "restore verify declared checks".into(),
+                        ));
+                    }
+                }
+                _ => {}
+            }
+            if !matches!(
+                apply(&mut view, record.offset, &record.event)?,
+                Applied::Fresh
+            ) {
+                return Err(CoreError::Inconsistent("restore duplicated event".into()));
+            }
+            log.insert(record.offset, to_json(record).as_slice())?;
+        }
+        drop(view);
+        drop(trees);
+        drop(log);
+        txn.commit()?;
+        Ok(())
+    }
+
     // ---- blobs ------------------------------------------------------------------
 
     /// Ingest a blob that claims to be `claimed`, streaming `size` bytes from
@@ -586,7 +679,10 @@ impl Store {
 
     /// The manifest tree `base` declares, with its id; an absent one declares nothing.
     fn manifest(&self, base: GitOid) -> Result<(Option<ManifestId>, Manifest)> {
-        let tree = self.tree(base)?;
+        self.manifest_for_tree(&self.tree(base)?)
+    }
+
+    fn manifest_for_tree(&self, tree: &Tree) -> Result<(Option<ManifestId>, Manifest)> {
         let Some(entry) = tree.get(MANIFEST_PATH) else {
             return Ok((None, Manifest::default()));
         };
@@ -1023,12 +1119,79 @@ fn decode_record(offset: u64, bytes: &[u8]) -> Result<Record> {
     Ok(record)
 }
 
+/// Version-independent journal export. The backup envelope owns format versioning.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct JournalPrefix {
+    pub records: Vec<Record>,
+    pub trees: BTreeMap<GitOid, Tree>,
+}
+
+impl JournalPrefix {
+    /// Exactly the blobs reachable from journal-referenced historical roots.
+    /// Extra and missing trees are refused before any import writes occur.
+    pub fn reachable_blobs(&self) -> Result<std::collections::BTreeSet<GitOid>> {
+        let roots = prefix_roots(&self.records);
+        if self
+            .trees
+            .keys()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>()
+            != roots
+        {
+            return Err(CoreError::Inconsistent(
+                "restore tree roots mismatch".into(),
+            ));
+        }
+        Ok(roots
+            .iter()
+            .flat_map(|oid| self.trees[oid].entries().map(|(_, entry)| entry.oid()))
+            .collect())
+    }
+}
+
+fn prefix_roots(records: &[Record]) -> std::collections::BTreeSet<GitOid> {
+    records
+        .iter()
+        .flat_map(|r| match &r.event {
+            Event::LocationAdded { main, .. } => vec![*main],
+            Event::ForkCreated { base, .. } | Event::ForkBranched { base, .. } => vec![*base],
+            Event::DraftPublished { changeset, .. } | Event::DraftFenced { changeset, .. } => {
+                vec![changeset.base, changeset.target]
+            }
+            Event::VerifyRecorded {
+                base, candidate, ..
+            } => vec![*base, *candidate],
+            _ => vec![],
+        })
+        .collect()
+}
+
 /// The store at one moment ([`Store::snapshot`]).
 pub struct Snapshot {
     txn: redb::ReadTransaction,
 }
 
 impl Snapshot {
+    /// Export this held read snapshot, even if later writes have committed.
+    pub fn export_prefix(&self) -> Result<JournalPrefix> {
+        let records = self
+            .txn
+            .open_table(LOG)?
+            .iter()?
+            .map(|row| {
+                let (k, v) = row?;
+                decode_record(k.value(), v.value())
+            })
+            .collect::<Result<Vec<_>>>()?;
+        let table = self.txn.open_table(TREES)?;
+        let mut trees = BTreeMap::new();
+        for oid in prefix_roots(&records) {
+            trees.insert(oid, load_tree(&table, oid)?);
+        }
+        Ok(JournalPrefix { records, trees })
+    }
+
     pub fn fork(&self, name: &ForkName) -> Result<Option<Fork>> {
         get_json(&self.txn.open_table(FORKS)?, name.as_str())
     }

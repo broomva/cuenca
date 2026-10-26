@@ -27,7 +27,9 @@ trap 'exit 130' INT
 trap 'exit 143' TERM
 
 # A mutant only counts as killed against a suite that passes unmutated.
-if ! bounded cargo test -q -p cuenca-server >"$backup/log" 2>&1; then
+baseline_args=()
+if [ "${1:-}" = --restore-only ]; then baseline_args=(--lib restore::tests); fi
+if ! bounded cargo test -q -p cuenca-server "${baseline_args[@]}" >"$backup/log" 2>&1; then
   echo "baseline is red: fix the suite before reading any mutant verdict"; cat "$backup/log"; exit 2
 fi
 echo "baseline  green"
@@ -64,6 +66,41 @@ PY
   fi
   restore
 }
+
+# Backup restore refusals (BRO-3258). --restore-only runs this bounded slice.
+mutate src/restore.rs 'trust
+            .verify_strict(&signed_bytes(&manifest)?, &signature)
+            .is_ok()' true --lib restore::tests::forged_manifest
+mutate src/restore.rs 'manifest.offset == manifest.records.checked_sub(1)' true --lib restore::tests::signed_offset_and_journal
+mutate src/restore.rs 'digest(&journal) == manifest.journal_sha256' true --lib restore::tests::journal_digest_size
+mutate src/restore.rs 'journal.len() as u64 == manifest.journal_size' true --lib restore::tests::journal_digest_size
+mutate src/restore.rs 'prefix.records.len() as u64 == manifest.records' true --lib restore::tests::signed_offset_and_journal
+mutate src/restore.rs '.all(|(i, r)| r.offset == i as u64)' '.all(|(i, r)| r.offset == i as u64 || true)' --lib restore::tests::signed_offset_and_journal
+mutate src/restore.rs 'reachable == listed' true --lib restore::tests::incomplete_and_duplicate
+mutate src/restore.rs 'digest(&plain) == blob.sha256' true --lib restore::tests::signed_plaintext_hash
+mutate src/restore.rs 'plain.len() as u64 == blob.size' true --lib restore::tests::signed_plaintext_hash
+mutate src/restore.rs 'verified.oid() == blob.oid' true --lib restore::tests::signed_plaintext_hash
+mutate src/restore.rs 'bytes.len() as u64 == object.size' true --lib restore::tests::missing_truncated
+mutate src/restore.rs 'digest(&bytes) == object.sha256' true --lib restore::tests::missing_truncated
+mutate src/restore.rs 'manifest.format_version == FORMAT_VERSION' true --lib restore::tests::journal_digest_size
+mutate src/restore.rs 'envelope.format_version == FORMAT_VERSION' true --lib restore::tests::envelope_tampering
+mutate src/restore.rs 'manifest.signing_key_id == digest(trust.as_bytes())' true --lib restore::tests::journal_digest_size
+mutate src/restore.rs 'verified.sha256() == info.sha256' 'true' --lib restore::tests::backup_independently
+mutate src/restore.rs 'verified.size() == info.size' 'true' --lib restore::tests::backup_independently
+mutate src/restore.rs 'previous == manifest.journal_sha256' 'true' --lib restore::tests::opaque_commits
+mutate src/restore.rs 'rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK' 'rustix::fs::OFlags::NONBLOCK' --lib restore::tests::local_objects
+# P20 r1: relative publication, private creation and canonical order.
+mutate src/restore.rs '        .filter(|parent| !parent.as_os_str().is_empty())' '' --test restore relative_single_component_destination_succeeds_and_is_private
+mutate src/restore.rs '.permissions(fs::Permissions::from_mode(0o700))' '.permissions(fs::Permissions::from_mode(0o755))' --lib restore::tests::staging_is_private_at_creation_and_manifest_order_is_enforced
+mutate src/restore.rs '.all(|pair| pair[0].oid < pair[1].oid)' '.all(|_| true)' --lib restore::tests::staging_is_private_at_creation_and_manifest_order_is_enforced
+mutate src/restore.rs 'pair[0].oid < pair[1].oid' 'pair[0].oid <= pair[1].oid' --lib restore::tests::incomplete_and_duplicate_blob_lists_refuse
+if [ "${1:-}" = --restore-only ]; then
+  if ! bounded cargo test -q -p cuenca-server --lib restore::tests >"$backup/log" 2>&1; then
+    echo "restored baseline is red"; cat "$backup/log"; exit 2
+  fi
+  echo "restored baseline green"
+  exit "$survived"
+fi
 
 # Keys: only the right secret, with the right prefix, verifies; one key per principal;
 # removal ends a key; the file is private.
