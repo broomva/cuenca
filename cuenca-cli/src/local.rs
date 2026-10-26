@@ -232,7 +232,12 @@ impl Local {
     /// registration whose directory was removed or replaced is dropped if nothing is
     /// queued in it, and refused otherwise, naming where its queued snapshots are.
     pub fn prepare(dest: &Path) -> anyhow::Result<PathBuf> {
-        let root = canonical(dest)?;
+        Self::prepare_root(canonical(dest)?)
+    }
+
+    /// Registration checks for an already normalized, no-follow-validated root.
+    /// Worktree bootstrap must not canonicalize its user input through symlinks.
+    pub(crate) fn prepare_root(root: PathBuf) -> anyhow::Result<PathBuf> {
         for outer in root.ancestors().skip(1) {
             let dir = dir_for(outer)?;
             if let Ok(state) = read_state(&dir)

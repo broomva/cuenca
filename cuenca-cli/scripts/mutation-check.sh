@@ -1,9 +1,15 @@
 #!/usr/bin/env bash
 # Mutation check for cuenca-cli: each mutant breaks one guarantee, and the tests must
 # fail for every one. Run from the crate directory: scripts/mutation-check.sh
+# Use --worktree to prove just the harness adapter guards (full CLI baseline still runs).
 # Prints one line per mutant and exits non-zero if any mutant survives. The source is
 # restored after each mutant, also on interrupt. Exit codes: ../scripts/mutation-guard.sh.
 set -uo pipefail
+worktree_only=${1:-}
+case $worktree_only in
+  '' | --worktree) ;;
+  *) echo 'usage: mutation-check.sh [--worktree]' >&2; exit 2 ;;
+esac
 cd "$(dirname "$0")/.."
 . ../scripts/mutation-guard.sh
 backup=$guard_backup
@@ -35,6 +41,7 @@ echo "baseline  green"
 survived=0
 mutate() { # file, old, new, then the cargo test arguments that should catch it
   local file=$1 old=$2 new=$3; shift 3
+  if [ "$worktree_only" = --worktree ] && [ "$file" != src/worktree.rs ] && [ "$file" != src/main.rs ]; then return; fi
   cp "$file" "$backup/file" && echo "$PWD/$file" >"$backup/path" || { echo "cannot back up $file"; exit 6; }
   current=$file
   if ! python3 - "$file" "$old" "$new" <<'PY'
@@ -172,5 +179,20 @@ mutate src/verbs.rs '        exit: if matches!(status.as_str(), "failed" | "drop
 # Forking a fork: --from forks the fork, and MCP takes exactly one of location and from.
 mutate src/verbs.rs '        Some(from) => client.branch_fork(&name, from)?,' '        Some(_) => client.create_fork(&name, &location)?,' --test cli every_agent_verb
 mutate src/mcp.rs '            Self::Fork(f) if f.location.is_some() == f.from.is_some() => {' '            Self::Fork(f) if false && f.location.is_some() == f.from.is_some() => {' --test mcp owner_acts_are_no_tools
+
+# Harness worktrees: current round-1 contracts, including no-follow component walks.
+mutate src/worktree.rs 'let root = prepare(dest)?;' 'let root = Local::prepare(dest)?;' --test worktree_review worktree_refuses_every
+mutate src/worktree.rs 'std::fs::read_dir(&root)?.next().is_none()' 'true' --test worktree worktree_refuses
+mutate src/worktree.rs 'Local::prepare_root(root)' 'Ok(root)' --test worktree worktree_refuses
+mutate src/worktree.rs 'if key.to_string_lossy().starts_with("GIT_") {' 'if false {' --test worktree worktree_ignores
+mutate src/worktree.rs '            "--no-checkout".as_ref(),' '' --test worktree worktree_fork
+mutate src/worktree.rs '    git(&root, &["read-tree".as_ref(), commit.as_ref()], b"")?;' '' --test worktree worktree_fork
+mutate src/worktree.rs 'if let Some(found) = source.fetch(oid)? {' 'if let Some(found) = None::<Fetched> {' --test worktree_review worktree_fetches
+mutate src/worktree.rs 'let object = objects.join(&hex[..2]).join(&hex[2..]);' 'let _ = client.fork_blob(&name, entry.oid())?; let object = objects.join(&hex[..2]).join(&hex[2..]);' --test worktree_review worktree_fetches
+mutate src/worktree.rs '        .with_isolated_config()' '' --test worktree_review worktree_private_repo
+mutate src/worktree.rs '    git(&root, &["update-index".as_ref(), "--refresh".as_ref()], b"")?;' '' --test worktree_review worktree_initial
+mutate src/worktree.rs '    local.save_cache(&cache)?;' '    let _ = &cache;' --test worktree_review worktree_initial
+mutate src/worktree.rs '"clean": seen.changes.is_empty(), "ignored": seen.ignored' '"clean": false, "ignored": Vec::<String>::new()' --test worktree_review worktree_initial
+mutate src/main.rs '                cuenca_cli::worktree::prepare(dir)?;' '                let _ = dir;' --test worktree_review worktree_invalid
 
 exit $survived
