@@ -88,6 +88,11 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check reports warnings (e.g. unmaintained crates) as a check
+    # run; on push the default token is read-only and the call 403s.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
