@@ -38,6 +38,40 @@ command = "cuenca"
 args = ["mcp"]
 ```
 
+## What a snapshot leaves out: `.forkignore`
+
+A snapshot publishes the checkout's files except the paths that the `.forkignore` at
+the location's root names. The rules use gitignore syntax. A snapshot does **not** read
+`.gitignore`, so a path that git ignores is still published unless the `.forkignore`
+also names it.
+
+Without a `.forkignore`, the defaults in `cuenca-fs/src/ignore.rs` apply. They leave
+out four groups:
+
+- Finder metadata.
+- Local secrets: every `.env` file except committed examples such as `.env.example`
+  and `.env.*.example`, private keys (`id_rsa`, `id_ed25519`, `*.p12`), and credential
+  stores (`.netrc`, `.pypirc`).
+- Installed dependencies: `node_modules` and `.venv`.
+- Tool caches that each tool regenerates: `target`, `.next/`, `.turbo/`, `__pycache__/`
+  and similar. A rule ending in `/` matches a directory only, so a file of the same
+  name is published.
+
+A rule that names a path the location's main tracks fails every snapshot until the
+rule or the path goes. So the defaults are only names that no repository is expected
+to track. They were checked against this workspace's 102 repositories (2026-10-27),
+which is a sample, not a guarantee. Names that real repositories do track are left
+out: `build`, `dist`, `out`, `*.log`, `.gradle`, `coverage`, `Pods`, `.cache`, `*.pem`
+and `.npmrc`. A location that never tracks them can add them.
+
+A location's own `.forkignore` **replaces** the defaults. Start from a copy of them,
+drop any rule that names a path the location tracks, and add your own.
+
+Keep build caches outside the checkout, per host: `CARGO_TARGET_DIR`, sccache, and the
+bun, uv and pip caches. Every fork on that host then shares one warm cache, and nothing
+heavy goes over the network. A file over 256 MiB fails the snapshot, so large assets
+such as models, datasets and renders belong outside forks.
+
 ## Checks and `cuenca verify`
 
 A location declares its checks in `.cuenca/checks.toml` on its main. Each check is a name and an argv, run from the checkout's root, with an optional time limit (the default is 1800 s):
