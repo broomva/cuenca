@@ -1,10 +1,12 @@
 # Cuenca 2026 dogfood receipts — Mac part (BRO-3259)
 
-Updated: 2026-10-25T12:47Z, from `date -u`; local trial observed 2026-10-25T07:31Z.
-**Preparation only; node incomplete.**
+Updated: 2026-10-27T05:58Z, from `date -u`; local trial observed 2026-10-25T07:31Z;
+live one-hour soak on the NUC authority 2026-10-27T04:55Z–05:55Z.
+**Node incomplete.**
 Delivery PR: https://github.com/broomva/cuenca/pull/31.
-R35, R41 and R43 remain pending. The required finish-line checker intentionally
-fails only on the pending R35/R41/R43 result statuses. The real merge is recorded
+R41 passed live on 2026-10-27 (section below). R35 and R43 remain pending. The
+required finish-line checker intentionally fails only on the pending R35/R43
+result statuses. The real merge is recorded
 below. Nothing in this document substitutes a local
 projection, advisory verification, or open PR for live acceptance.
 
@@ -168,9 +170,69 @@ Finder/Files marker hash, timed screenshot, device comparison and ≤15 s produc
 visibility remain pending on BRO-3461 (host) and BRO-3257 (deploy). Local materializer
 timing below is not that receipt.
 
-## R41 — scaled concurrent trial (pending)
+## R41 — scaled concurrent trial (pass, live on the NUC 2026-10-27)
 
-The final trial ran 30 independent agent principals/forks concurrently,
+**Live one-hour soak.** The run used the production authority on the NUC (`cuenca serve` under
+systemd, `http://100.112.149.32:7419`), with its location `soak` backed by a throwaway
+private repository `broomva/cuenca-soak`. That repository was deleted after the run, and
+[soak-nuc-prs.json](dogfood-2026/soak-nuc-prs.json) keeps its 193 PRs.
+Window: 2026-10-27T04:55:02Z–05:55:27Z.
+
+- **Agents:** 30 agents, each with its own key, fork and checkout. 15 ran on the Mac with
+  keys bound to node `nwPbDUaNzo11CNTRL`; 15 ran on the NUC with keys bound to
+  `n3RXH4cuyj11CNTRL`. They were scripted CLI loops ([soak.py](dogfood-2026/soak.py)),
+  not model sessions.
+- **Each round:**
+  1. Edit and snapshot.
+  2. Wait until the edit is readable in the volume. Mac agents read through the owner's
+     Finder SMB mount; NUC agents through a watcher running as `cuenca`, on the same clock.
+     The time counts from before the snapshot call.
+  3. Every 40th round, `verify` and `land`.
+  4. Pause 8–20 s.
+- **Shared file:** the 15 even agents all edit `conflict.txt`.
+- **Moving `main`:** GitHub `main` moved twice after the location was registered. #2 was
+  merged at 04:47:33Z in the smoke run, 7.5 min before the window. #1 was merged by hand at
+  05:10:34Z, inside the window. The harness's own merges at 15, 35 and 45 min were all
+  skipped: after #2, every open `conflict.txt` PR was already CONFLICTING.
+- **Restart:** the authority was SIGKILLed once, mid-traffic, at 05:25:07Z. systemd
+  restarted it and it answered 5.68 s later. Four snapshots taken while it was down were
+  queued and published later.
+
+| Target (spec) | Result |
+|---|---|
+| 0 lost / 0 duplicated changesets | **6,905 acknowledged; 0 lost; 0 duplicated.** Every acknowledged id appears exactly once in its own fork's `draft_published` records (`cuenca log <fork>`), and no id appears in two forks. A mutation test confirmed the audit catches an id moved to another fork's journal. The journal is read through the API, not compared byte for byte with `log.redb`. |
+| p95 snapshot → visible ≤ 15 s | **1.70 s** overall: Mac through SMB 1.60 s (p50 0.93 s, max 7.5 s); NUC volume 1.77 s (p50 0.99 s, max 11.0 s). 0 of 6,901 edits missed the 60 s limit. |
+| p95 landing request → PR opened ≤ 2 min | **25.3 s** over 179 landings (p50 9.6 s, max 35.2 s). Every landing opened a PR. |
+| Journal growth recorded and projected | `log.redb` grew from 1,589,248 bytes (04:55:25Z) to 38,432,768 bytes (05:55:42Z). At that rate, the 1.0 TB of free disk lasts about 1,138 days, as a journal-only linear projection. Free disk on the host fell further, by 176,025,600 bytes (about 238 days at that rate). That figure includes the 15 NUC agent checkouts, their client state and the harness output, all on the same disk; the volume grew 67,161 bytes. The raw command output is in [soak-nuc-disk-before.txt](dogfood-2026/soak-nuc-disk-before.txt) and [soak-nuc-disk-after.txt](dogfood-2026/soak-nuc-disk-after.txt). |
+
+**Caveats:**
+- Conflicts show up as GitHub merge conflicts: 94 of the 191 open PRs were CONFLICTING.
+  Cuenca does not resolve or rebase them, and that was not exercised.
+- Each landing opened its own PR (BRO-3501).
+- The readers were 15 polling threads on one Mac mount and one watcher on the NUC. No
+  second device was tested.
+- Visibility is timed for each round's tracked file (`conflict.txt` or
+  `agents/<name>.txt`) only. On every tenth round the 20 extra `data/` files go
+  unchecked, although the round itself is among the 6,901. The 4 rounds queued during
+  the outage are the only rounds not timed. They were published by the next snapshot
+  and are in the journal.
+- **Provenance:** some claims come from commands run during the session, not from the
+  events. The node ids come from the key mint commands and from `cuenca fork` output
+  (`holders`). The restart mechanism is the unit's `Restart=on-failure`, and after the
+  run `systemctl show cuenca` reported `NRestarts=2` (the smoke kill plus this one). The
+  build identity can be checked with `git diff 262ef7a 3c90911 -- '*.rs' Cargo.toml
+  Cargo.lock`, which prints nothing. The smoke and A/B counts are in BRO-3521.
+- The 2-minute smoke run before the hour had 4 of 5 Mac edits unreadable over SMB for
+  more than 60 s. That was not reproduced here or in an A/B run, and its cause is still
+  open (BRO-3521).
+
+The full record is in [soak-nuc.json](dogfood-2026/soak-nuc.json). The raw events from
+both sides are `soak-events-{mac,nuc}.jsonl.gz`.
+[soak-analyze.py](dogfood-2026/soak-analyze.py) recomputes the audit from them and the PR
+export, with no network access needed: `python3 soak-analyze.py <mac events>
+<nuc events> <out.json>`.
+
+**Earlier local trial (2026-10-25, kept for history).** The final trial ran 30 independent agent principals/forks concurrently,
 with 17 rounds of snapshots, base-manifest verification and landing
 requests. Fifteen forks changed the same `conflict.txt` path to different contents;
 fifteen used disjoint per-agent paths. They stayed distinct drafts. **Conflict
@@ -2139,11 +2201,11 @@ exist (BRO-3461 host; BRO-3257 deploy). Receipt paths are relative to `docs/`.
       "reason": "Real MCP-to-GitHub PR #30 merged; exact PR head, candidate and merged trees match on the unmoved base; main CI green. Production Finder/Files marker, screenshot, device agreement and timed visibility remain pending on BRO-3461 (host) and BRO-3257 (deploy)."
     },
     "R41": {
-      "status": "pending",
-      "pr": "https://github.com/broomva/cuenca/pull/30",
-      "merged_sha": "3063874e903d3ca7388b811a5846de0323a9b8b8",
-      "receipt": "dogfood-2026/load.json",
-      "reason": "30 forks, 510 acknowledged drafts, one kill/restart, zero lost/duplicate IDs in a scaled 121.3-second local trial; one-hour production load and bulk GitHub request-to-PR p95 remain unmeasured. Production waits on BRO-3461 (host) and BRO-3257 (deploy)."
+      "status": "pass",
+      "pr": "https://github.com/broomva/cuenca/pull/36",
+      "merged_sha": "3c90911f9cfb93031144dde25d348d5ab66c2b3e",
+      "receipt": "dogfood-2026/soak-nuc.json",
+      "reason": "Live one-hour soak on the NUC authority (deployed by #36; its Rust is identical to the 262ef7a build that ran), 2026-10-27T04:55Z-05:55Z: 30 agents with their own node-bound keys and forks, 15 on the Mac and 15 on the NUC; authority SIGKILLed once mid-traffic at 05:25:07Z and back in 5.68 s; 6,905 acknowledged changesets, 0 lost, 0 duplicated against every fork's journal; p95 snapshot-to-visible 1.70 s (Mac through the Finder SMB mount 1.60 s, NUC volume 1.77 s, 0 of 6,901 missed); 179 landings, all opened a PR, p95 request-to-PR 25.3 s (max 35.2 s); journal growth 36.8 MB in the hour, about 1,138 days of free disk at that rate. The earlier local trial stays recorded in load.json."
     },
     "R43": {
       "status": "pending",
@@ -2165,20 +2227,17 @@ exit 1
 ```
 
 The graph-only nonempty-file check exits 0. The stronger required check exits 1,
-as intended; the only remaining failures are the pending R35/R41/R43 statuses.
-The checker is fail-fast and prints R35 first; the complete status audit below
-also exercises all evidence fields and transcript checks without changing statuses.
-
-[Complete checker audit](dogfood-2026/acceptance-remaining.json) lists exactly:
+as intended; the only remaining failures are the pending R35/R43 statuses.
+The checker is fail-fast and prints R35 first. Re-run on 2026-10-27 with an
+accumulating `require` (same `dogfood` function, statuses unchanged), it lists exactly:
 
 ```text
 R35: missing passing result
-R41: missing passing result
 R43: missing passing result
 ```
 
-R35 still needs production Finder/Files/device/visibility receipts; R41 still needs
-the full one-hour production/conflict and bulk PR-open latency trial; R43 still
+The [2026-10-25 audit](dogfood-2026/acceptance-remaining.json) also listed R41; R41
+passed with the live soak above. R35 still needs production Finder/Files/device/visibility receipts; R43 still
 needs paired Mac LAN SMB measurements. All wait on BRO-3461 (host) and BRO-3257
 (deploy). No missing PR, SHA, receipt path or MCP structure error remains.
 
