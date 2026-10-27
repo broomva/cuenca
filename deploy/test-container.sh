@@ -98,5 +98,46 @@ v6 fd7a:115c:a1e0::12 >/fake/v6; wt_fails "another IPv6 address with the same pr
 rm /fake/v6; (sleep 2; v6 fd7a:115c:a1e0::1 >/fake/v6) & wt x 10 || fail "wait-tailnet gave up while the IPv6 address arrived"
 wait; rm /fake/v4; wt_fails "IPv6 without IPv4" "missing an IPv4 address"
 echo "test-container: wait-tailnet waits for both tailnet addresses"
+
+# By address: CUENCA_TAILNET_ADDRS names the host's own addresses on whatever interface holds them
+# (WSL2 mirrored networking: an ethN whose name changes between boots). /fake/all is `ip -o addr show`.
+printf "#!/bin/sh\ncase \"\$1\" in -4) cat /fake/v4 2>/dev/null;; -6) cat /fake/v6 2>/dev/null;; -o) cat /fake/all 2>/dev/null;; esac; true\n" >/fake/ip
+wa() { PATH=/fake:$PATH CUENCA_TAILNET_ADDRS="100.112.149.32 fd7a:115c:a1e0::9237:9520" CUENCA_WAIT_SECS=${2:-2} sh /deploy/wait-tailnet 2>/tmp/wt; }
+wa_fails() { if wa; then fail "wait-tailnet (by address) passed: $1"; fi; grep -q -- "$2" /tmp/wt || { cat /tmp/wt; fail "wrong reason: $1"; }; }
+wa_fails "no address at all" "no interface has 100.112.149.32 fd7a:115c:a1e0::9237:9520"
+echo "5: eth5    inet 100.112.149.3/32 scope global eth5" >/fake/all
+wa_fails "an IPv4 address the wanted one is a prefix of" "no interface has 100.112.149.32"
+echo "5: eth5    inet 100x112x149x32/32 scope global eth5" >/fake/all
+wa_fails "a spelling that only a regex would match" "no interface has 100.112.149.32"
+echo "5: eth5    inet 100.112.149.32/32 scope global eth5" >/fake/all
+wa_fails "IPv4 without the IPv6 address" "no interface has fd7a:115c:a1e0::9237:9520"
+(sleep 2; echo "5: eth5    inet6 fd7a:115c:a1e0::9237:9520/128 scope global" >>/fake/all) & wa x 10 || fail "wait-tailnet (by address) gave up while the IPv6 address arrived"
+wait
+echo "4: eth4    inet 100.112.149.32/32 scope global eth4
+4: eth4    inet6 fd7a:115c:a1e0::9237:9520/128 scope global" >/fake/all
+wa || fail "wait-tailnet (by address) failed when the addresses moved to another interface"
+echo "test-container: wait-tailnet by address waits for each address on any interface"
+
+# install.sh --tailnet-addr: smbd binds the addresses, the agent API defaults to the IPv4 one.
+targs="--no-start --allow 100.82.213.74 --tailnet-addr 100.112.149.32 --tailnet-addr fd7a:115c:a1e0::9237:9520"
+bash /deploy/install.sh $targs >/dev/null
+grep -qx "   interfaces = 100.112.149.32/32 fd7a:115c:a1e0::9237:9520/128" /etc/samba/smb.conf || fail "interfaces not rendered by address"
+grep -qx "CUENCA_BIND=100.112.149.32:7419" /etc/cuenca/cuenca.env || fail "the agent API did not default to the IPv4 tailnet address"
+grep -qx "CUENCA_TAILNET_ADDRS=\"100.112.149.32 fd7a:115c:a1e0::9237:9520\"" /etc/cuenca/cuenca.env || fail "CUENCA_TAILNET_ADDRS not written"
+grep -qx "EnvironmentFile=-/etc/cuenca/cuenca.env" /etc/systemd/system/smbd.service.d/cuenca.conf || fail "the smbd drop-in does not read cuenca.env"
+bash /deploy/check.sh --no-services | tee /tmp/out
+grep -q "^ok   smb.conf interfaces = 100.112.149.32/32 fd7a:115c:a1e0::9237:9520/128" /tmp/out || fail "check.sh did not check interfaces by address"
+cp /etc/samba/smb.conf /smb.addr
+sed -i "s|^   interfaces = .*|   interfaces = tailscale0|" /etc/samba/smb.conf; expect_fail "interfaces = tailscale0 on a by-address host"; cp /smb.addr /etc/samba/smb.conf
+sed -i "s|^   interfaces = .*|   interfaces = 100.112.149.32/32|" /etc/samba/smb.conf; expect_fail "the IPv6 address left out of interfaces"; cp /smb.addr /etc/samba/smb.conf
+for bad in "--tailnet-addr 192.168.78.121" "--tailnet-addr 100.112.149.32/32" "--tailnet-addr fd7a:115c:a1e0:0:0:0:9237:9520" \
+    "--tailnet-addr fd7a:115c:a1e0::9237:9520" "--tailnet-addr 100.112.149.32 --tailnet-addr 100.64.0.9"; do
+    refused "--tailnet-addr" "--allow 100.82.213.74 $bad"
+done
+bash /deploy/install.sh $args >/dev/null
+grep -qx "   interfaces = tailscale0" /etc/samba/smb.conf || fail "a re-install without --tailnet-addr did not return to tailscale0"
+grep -q CUENCA_TAILNET_ADDRS /etc/cuenca/cuenca.env && fail "a re-install without --tailnet-addr kept CUENCA_TAILNET_ADDRS"
+bash /deploy/check.sh --no-services >/dev/null || fail "the tailscale0 host does not pass after the round trip"
+echo "test-container: --tailnet-addr binds by address, refuses bad input, and reverts"
 echo "test-container: all passed"
 '

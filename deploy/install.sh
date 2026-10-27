@@ -8,6 +8,10 @@
 # --binary PATH   the `cuenca` binary to install as /usr/local/bin/cuenca (optional on a re-run)
 # --allow IP      an enrolled owner device's tailnet address, IPv4 or IPv6 (repeat; give both of each device's)
 # --bind ADDR     the agent API's address (default: `tailscale ip -4`, port 7419)
+# --tailnet-addr IP  this host's own tailnet address, when it is not on tailscale0 (repeat for
+#                 its IPv6 one). WSL2 with mirrored networking surfaces Windows' tailnet addresses
+#                 on an ethN whose name changes between boots, so smbd and the waits bind by
+#                 address instead (see README, "A host without tailscale0"). Default bind: IPv4:7419
 # --volume DIR    the volume Samba serves (default /srv/cuenca/volume)
 # --retire-spike  remove the spike C container `cuenca-spike` (BRO-3234) before smbd binds :445
 # --no-start      write everything but start nothing (containers without systemd; CI)
@@ -17,6 +21,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 binary=""
 allow=()
 bind=""
+tailnet_addrs=()
 volume=/srv/cuenca/volume
 home=/var/lib/cuenca
 state=/var/lib/cuenca/state
@@ -31,6 +36,7 @@ while [ $# -gt 0 ]; do
         --binary) binary=$2; shift 2 ;;
         --allow) allow+=("$2"); shift 2 ;;
         --bind) bind=$2; shift 2 ;;
+        --tailnet-addr) tailnet_addrs+=("$2"); shift 2 ;;
         --volume) volume=$2; shift 2 ;;
         --retire-spike) retire_spike=1; shift ;;
         --no-start) start=0; shift ;;
@@ -50,6 +56,29 @@ for ip in "${allow[@]}"; do
         || die "--allow $ip is not a single tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48)"
     [ "$c" = "$ip" ] || die "--allow $ip: write it canonically, as $c"
 done
+# The host's own tailnet addresses, when they are not on tailscale0: at most one of each family,
+# an IPv4 one required (the agent API binds it), each one address written canonically.
+own4=""; own6=""
+for ip in "${tailnet_addrs[@]}"; do
+    c=$(canonical_tailnet "$ip") \
+        || die "--tailnet-addr $ip is not a single tailnet address (100.64.0.0/10 or fd7a:115c:a1e0::/48)"
+    [ "$c" = "$ip" ] || die "--tailnet-addr $ip: write it canonically, as $c"
+    if [[ $ip == *:* ]]; then
+        [ -z "$own6" ] || die "--tailnet-addr: give at most one IPv6 address"
+        own6=$ip
+    else
+        [ -z "$own4" ] || die "--tailnet-addr: give at most one IPv4 address"
+        own4=$ip
+    fi
+done
+if [ ${#tailnet_addrs[@]} -gt 0 ]; then
+    [ -n "$own4" ] || die "--tailnet-addr: give the host's IPv4 tailnet address"
+    taddrs="$own4${own6:+ $own6}"
+    interfaces="$own4/32${own6:+ $own6/128}"
+else
+    taddrs=""
+    interfaces=tailscale0
+fi
 # Plain characters only: the path is written into smb.conf and the unit by sed.
 [[ $volume =~ ^/[A-Za-z0-9._/-]+$ ]] || die "--volume must be an absolute path of letters, digits, '.', '_', '-' and '/'"
 # The volume is chowned and re-moded below, so it must name a directory of its own: no '.' or '..'
@@ -66,7 +95,9 @@ if [ -n "$binary" ]; then
 elif [ ! -x /usr/local/bin/cuenca ]; then
     die "no /usr/local/bin/cuenca yet: give --binary"
 fi
-if [ -z "$bind" ]; then
+if [ -z "$bind" ] && [ -n "$own4" ]; then
+    bind="$own4:7419"
+elif [ -z "$bind" ]; then
     command -v tailscale >/dev/null || die "tailscale is not installed; give --bind"
     ip4=$(tailscale ip -4 | head -n1)
     [ -n "$ip4" ] || die "tailscale has no IPv4 address; is the host on the tailnet?"
@@ -129,6 +160,8 @@ install -o root -g root -m 0755 "$here/wait-tailnet" /usr/local/lib/cuenca/wait-
 install -d -o root -g root -m 0755 /etc/cuenca
 env_tmp=$(mktemp)
 printf 'CUENCA_STATE=%s\nCUENCA_BIND=%s\nCUENCA_VOLUME=%s\n' "$state" "$bind" "$volume" >"$env_tmp"
+# Quoted: systemd strips the quotes, and check.sh sources this file with bash.
+[ -z "$taddrs" ] || printf 'CUENCA_TAILNET_ADDRS="%s"\n' "$taddrs" >>"$env_tmp"
 install -o root -g cuenca -m 0640 "$env_tmp" /etc/cuenca/cuenca.env
 rm -f "$env_tmp"
 install -d -o root -g root -m 0755 /etc/systemd/system/smbd.service.d
@@ -138,7 +171,7 @@ install -o root -g root -m 0644 "$here/smbd-cuenca.conf" /etc/systemd/system/smb
 
 # smb.conf: rendered, checked by testparm, then installed. Ubuntu's own file is kept once.
 smb_tmp=$(mktemp)
-sed -e "s|@VOLUME@|$volume|g" -e "s|@HOSTS_ALLOW@|${allow[*]}|g" "$here/smb.conf.in" >"$smb_tmp"
+sed -e "s|@VOLUME@|$volume|g" -e "s|@HOSTS_ALLOW@|${allow[*]}|g" -e "s|@INTERFACES@|$interfaces|g" "$here/smb.conf.in" >"$smb_tmp"
 testparm -s "$smb_tmp" >/dev/null 2>&1 || { testparm -s "$smb_tmp" >&2 || true; rm -f "$smb_tmp"; die "testparm refused the rendered smb.conf"; }
 if [ -f /etc/samba/smb.conf ] && [ ! -f /etc/samba/smb.conf.pre-cuenca ] \
     && ! grep -q "^# Cuenca's volume over stock Samba" /etc/samba/smb.conf; then
@@ -185,7 +218,7 @@ done
 systemctl enable smbd cuenca >/dev/null 2>&1
 # Both units wait for the tailnet before starting; with it down, a restart blocks for minutes
 # and then fails. Say so now instead.
-CUENCA_WAIT_SECS=10 /usr/local/lib/cuenca/wait-tailnet \
+CUENCA_TAILNET_ADDRS=$taddrs CUENCA_WAIT_SECS=10 /usr/local/lib/cuenca/wait-tailnet \
     || die "the tailnet is not up on this host (see wait-tailnet above); run 'tailscale up' and re-run this script"
 systemctl restart smbd || die "smbd did not start; journalctl -u smbd"
 systemctl restart cuenca || die "cuenca did not start; journalctl -u cuenca"

@@ -55,7 +55,15 @@ expect_param() {
 for m in fruit streams_xattr; do
     compgen -G "/usr/lib/*/samba/vfs/$m.so" >/dev/null && ok "Samba's $m module is installed" || bad "Samba's $m module is missing (samba-vfs-modules)"
 done
-expect_param interfaces tailscale0
+if [ -n "${CUENCA_TAILNET_ADDRS:-}" ]; then
+    want_if=""
+    for a in $CUENCA_TAILNET_ADDRS; do
+        case $a in *:*) want_if="$want_if${want_if:+ }$a/128" ;; *) want_if="$want_if${want_if:+ }$a/32" ;; esac
+    done
+    expect_param interfaces "$want_if"
+else
+    expect_param interfaces tailscale0
+fi
 expect_param "bind interfaces only" Yes
 expect_param "disable netbios" Yes
 expect_param "hosts deny" ALL
@@ -96,10 +104,16 @@ for u in nmbd samba-ad-dc; do
 done
 
 # Listeners: the agent API and :445 on the tailnet address only, nothing on :139.
-# smbd binds both of tailscale0's addresses; nothing else may be bound.
+# smbd binds both of the host's tailnet addresses (tailscale0's, or CUENCA_TAILNET_ADDRS);
+# nothing else may be bound.
 command -v ss >/dev/null || { bad "ss is missing; listeners not checked"; echo "check.sh: $fails failed"; exit 1; }
-ts=$(tailscale ip -4 | head -n1)
-ts6=$(tailscale ip -6 2>/dev/null | head -n1)
+if [ -n "${CUENCA_TAILNET_ADDRS:-}" ]; then
+    ts=""; ts6=""
+    for a in $CUENCA_TAILNET_ADDRS; do case $a in *:*) ts6=$a ;; *) ts=$a ;; esac; done
+else
+    ts=$(tailscale ip -4 | head -n1)
+    ts6=$(tailscale ip -6 2>/dev/null | head -n1)
+fi
 listen_on() { ss -Hltn "sport = :$1" | awk '{print $4}' | sort -u | tr '\n' ' '; }
 want="$ts:445 "
 [ -n "$ts6" ] && want=$(printf '%s\n' "$ts:445" "[$ts6]:445" | sort -u | tr '\n' ' ')

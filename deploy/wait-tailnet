@@ -4,8 +4,28 @@
 # when `tailscale ip -6` names one, that IPv6 address too: smbd binds both, and check.sh
 # flags a missed IPv6 bind. Installed as /usr/local/lib/cuenca/wait-tailnet; exits 1
 # after CUENCA_WAIT_SECS (default 120), naming what is missing.
+#
+# With CUENCA_TAILNET_ADDRS set (install.sh --tailnet-addr; a host whose tailnet addresses sit on
+# another interface, as under WSL2's mirrored networking), it waits instead until each of those
+# addresses is on some interface, whatever its name.
 set -eu
 deadline=$(( $(date +%s) + ${CUENCA_WAIT_SECS:-120} ))
+if [ -n "${CUENCA_TAILNET_ADDRS:-}" ]; then
+    while :; do
+        missing=""
+        # Each address exactly, as text, with its prefix length stripped.
+        have=$(ip -o addr show 2>/dev/null | awk '{print $4}' | sed 's|/.*||')
+        for a in $CUENCA_TAILNET_ADDRS; do
+            printf '%s\n' "$have" | grep -qxF "$a" || missing="$missing $a"
+        done
+        [ -z "$missing" ] && exit 0
+        if [ "$(date +%s)" -ge "$deadline" ]; then
+            echo "wait-tailnet: no interface has$missing after ${CUENCA_WAIT_SECS:-120}s" >&2
+            exit 1
+        fi
+        sleep 1
+    done
+fi
 while :; do
     missing="an IPv4 address"
     if ip -4 -o addr show dev tailscale0 2>/dev/null | grep -q ' inet '; then
