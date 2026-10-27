@@ -1,0 +1,216 @@
+{
+  "row": "R41",
+  "status": "pass",
+  "observed_utc": "2026-10-27T05:58Z",
+  "window_utc": {
+    "nuc": [
+      "2026-10-27T04:55:02Z",
+      "2026-10-27T05:55:19Z"
+    ],
+    "mac": [
+      "2026-10-27T04:55:07Z",
+      "2026-10-27T05:55:27Z"
+    ]
+  },
+  "authority": {
+    "host": "NUC, WSL2 Ubuntu 24.04, systemd unit cuenca",
+    "url": "http://100.112.149.32:7419",
+    "binary": "cuenca 0.1.0 built 2026-10-26 from 262ef7a; no Rust or Cargo change between 262ef7a and 3c90911 (git diff 262ef7a 3c90911 -- '*.rs' Cargo.toml Cargo.lock: 0 lines)",
+    "location": "soak = throwaway private repo broomva/cuenca-soak (seed baab175), registered with --remote; deleted after the run, PR list kept in soak-nuc-prs.json"
+  },
+  "agents": {
+    "count": 30,
+    "mac": "15 keys bound to node nwPbDUaNzo11CNTRL, CLI from ~/.local/bin/cuenca",
+    "nuc": "15 keys bound to node n3RXH4cuyj11CNTRL, run as the agent user",
+    "loop": "edit -> snapshot -> wait until the edit is readable in the volume -> every 40th round verify + land --wait 180; pause 8-20 s; even agents all edit conflict.txt, odd ones agents/<name>.txt, every 10th round also 20 of 200 data files",
+    "kind": "scripted CLI agents (soak.py), not model sessions"
+  },
+  "visibility_method": {
+    "mac": "read through the owner's Finder SMB mount /Volumes/cuenca (smb://100.112.149.32/cuenca), 0.25 s poll",
+    "nuc": "a watcher running as the cuenca user reads /srv/cuenca/volume, same clock as the agents",
+    "t0": "before the snapshot call, so the time includes the snapshot itself"
+  },
+  "restart": {
+    "signal": "SIGKILL to the unit's MainPID at 2026-10-27T05:25:07Z, mid-traffic",
+    "restarted_by": "systemd Restart=on-failure",
+    "seconds_until_answering": 5.68,
+    "snapshots_queued_while_down": 4,
+    "queued_published_later": true
+  },
+  "github_main_moved": [
+    "#2 squash-merged 2026-10-27T04:47:33Z (smoke run, conflict.txt)",
+    "#1 squash-merged 2026-10-27T05:10:34Z (by hand during the run)"
+  ],
+  "harness_merges": "the 15/35/45-min merges were skipped: every open conflict.txt PR was already CONFLICTING after #2",
+  "journal_growth": {
+    "log_redb_bytes_before": 1589248,
+    "log_redb_bytes_after": 38432768,
+    "growth_bytes": 36843520,
+    "state_dir_bytes_before": 8435908,
+    "state_dir_bytes_after": 47303762,
+    "free_bytes_after": 1006700793856,
+    "projected_days_at_this_rate": 1138.0,
+    "note": "before captured 2026-10-27T04:55:25Z (23 s into the window; 9 snapshots had already published), after 05:55:42Z (after the final journal reads); raw command output in soak-nuc-disk-before.txt and soak-nuc-disk-after.txt; linear projection, allocator nonlinearity and blobs excluded",
+    "free_bytes_before": 1006876819456,
+    "host_free_bytes_drop": 176025600,
+    "projected_days_at_host_free_drop": 238.0,
+    "host_drop_includes": "the 15 NUC agent checkouts, their client state and the harness output (same disk); volume grew 67,161 bytes"
+  },
+  "targets": {
+    "lost": "0",
+    "duplicated": "0",
+    "p95_snapshot_to_visible_seconds": "<= 15",
+    "p95_land_to_pr_seconds": "<= 120"
+  },
+  "result": {
+    "mac": {
+      "side": "mac",
+      "agents": 15,
+      "snapshots": 3483,
+      "snapshot_errors": 0,
+      "snapshots_queued_offline": 0,
+      "p95_snapshot_seconds": 0.3446462154388428,
+      "acknowledged_changesets": 3483,
+      "journal_changesets": 3558,
+      "forks_audited": 15,
+      "lost": 0,
+      "duplicates_in_journal": 0,
+      "acknowledged_twice": 0,
+      "ids_in_two_forks": 0,
+      "in_journal_not_acknowledged": 75,
+      "visible_measured": 3483,
+      "visible_missed_60s": 0,
+      "p50_snapshot_to_visible_seconds": 0.9275188446044922,
+      "p95_snapshot_to_visible_seconds": 1.6043448448181152,
+      "max_snapshot_to_visible_seconds": 7.5080108642578125,
+      "lands": 90,
+      "lands_pr_opened": 90,
+      "land_failures": [],
+      "p50_land_to_pr_seconds": 9.521058797836304,
+      "p95_land_to_pr_seconds": 23.917241096496582,
+      "max_land_to_pr_seconds": 28.8306827545166,
+      "start": {
+        "kind": "start",
+        "side": "mac",
+        "agents": 15,
+        "seconds": 3600,
+        "utc": "2026-10-27T04:55:07Z",
+        "t": 1793076907.5667078
+      },
+      "end": {
+        "kind": "end",
+        "utc": "2026-10-27T05:55:27Z",
+        "t": 1793080527.154537
+      }
+    },
+    "nuc": {
+      "side": "nuc",
+      "agents": 15,
+      "snapshots": 3422,
+      "snapshot_errors": 0,
+      "snapshots_queued_offline": 4,
+      "p95_snapshot_seconds": 0.5992088317871094,
+      "acknowledged_changesets": 3422,
+      "journal_changesets": 3442,
+      "forks_audited": 15,
+      "lost": 0,
+      "duplicates_in_journal": 0,
+      "acknowledged_twice": 0,
+      "ids_in_two_forks": 0,
+      "in_journal_not_acknowledged": 20,
+      "visible_measured": 3418,
+      "visible_missed_60s": 0,
+      "p50_snapshot_to_visible_seconds": 0.9911267757415771,
+      "p95_snapshot_to_visible_seconds": 1.7695207595825195,
+      "max_snapshot_to_visible_seconds": 11.027851104736328,
+      "lands": 89,
+      "lands_pr_opened": 89,
+      "land_failures": [],
+      "p50_land_to_pr_seconds": 9.70980167388916,
+      "p95_land_to_pr_seconds": 26.32112431526184,
+      "max_land_to_pr_seconds": 35.15914797782898,
+      "start": {
+        "kind": "start",
+        "side": "nuc",
+        "agents": 15,
+        "seconds": 3600,
+        "utc": "2026-10-27T04:55:02Z",
+        "t": 1793076902.2438807
+      },
+      "end": {
+        "kind": "end",
+        "utc": "2026-10-27T05:55:19Z",
+        "t": 1793080519.9787526
+      }
+    },
+    "chaos": [
+      {
+        "kind": "merge",
+        "at": 900,
+        "pr": null,
+        "err": "no mergeable conflict.txt PR",
+        "t": 1793077811.519736
+      },
+      {
+        "kind": "restart",
+        "signal": "SIGKILL",
+        "old_pid": "58308",
+        "killed_utc": "2026-10-27T05:25:07Z",
+        "seconds_until_answering": 5.676400899887085,
+        "err": null,
+        "t": 1793078713.5811598
+      },
+      {
+        "kind": "merge",
+        "at": 2100,
+        "pr": null,
+        "err": "no mergeable conflict.txt PR",
+        "t": 1793079018.361821
+      },
+      {
+        "kind": "merge",
+        "at": 2700,
+        "pr": null,
+        "err": "no mergeable conflict.txt PR",
+        "t": 1793079619.3742132
+      }
+    ],
+    "github": {
+      "prs": 193,
+      "by_state": {
+        "OPEN": 191,
+        "MERGED": 2
+      },
+      "open_by_mergeable": {
+        "MERGEABLE": 97,
+        "CONFLICTING": 94
+      },
+      "branches_with_more_than_one_pr": []
+    },
+    "total": {
+      "acknowledged_changesets": 6905,
+      "lost": 0,
+      "duplicates": 0,
+      "p95_snapshot_to_visible_seconds": 1.7015271186828613,
+      "p95_land_to_pr_seconds": 25.34947156906128,
+      "lands_pr_opened": 179
+    }
+  },
+  "caveats": [
+    "Conflicts surface as GitHub merge conflicts (94 of 191 open PRs CONFLICTING); Cuenca does not resolve or rebase them, and that was not exercised.",
+    "Every landing opened its own PR (179 in the hour), the behaviour BRO-3501 changes.",
+    "in_journal_not_acknowledged (75 Mac, 20 NUC) are drafts from the smoke run, probes and A/B run on soak-mac-00/01 and soak-nuc-15/16 before the hour; no other fork has any.",
+    "The harness kept only stderr; in --json mode the CLI prints errors to stdout, so failure messages would have been dropped. No snapshot or landing failed in the hour.",
+    "In the 2-minute smoke run before the hour, 4 of 5 Mac edits were not readable over SMB within 60 s while the NUC volume had them in ~1 s. Not reproduced in an A/B run with Samba oplocks on and off (30/30 each) nor in the 3,483 Mac edits measured here (0 missed). Cause unknown; BRO-3521.",
+    "Readers: 15 polling threads on one Mac mount plus the NUC watcher; no second device.",
+    "soak.py is committed exactly as it ran. Its chaos step does not check the return codes of gh or of the ssh kill, and run() keeps only stderr. Both outcomes those gaps could have hidden were confirmed independently. The restart: systemd NRestarts=2 (smoke kill plus this one), and 4 NUC snapshots offline at 05:25:11-12Z. The skipped merges: every open conflict.txt PR is CONFLICTING in soak-nuc-prs.json. A rerun should fix both in the harness first."
+  ],
+  "audit": "per fork: each acknowledged id must appear exactly once in its own fork's draft_published records; ids in two forks counted (0); mutation-tested (an id moved to another fork's journal reads as lost 1)",
+  "commands": {
+    "nuc_watcher": "sudo systemd-run --unit soak-watch --uid=cuenca python3 /opt/soak/soak.py watch --req /tmp/soak-vis/req-main.jsonl --res /tmp/soak-vis-res/res-main.jsonl --seconds 4300",
+    "nuc_agents": "sudo systemd-run --unit soak-nuc --uid=agent --setenv=HOME=/home/agent --setenv=CUENCA_BIN=/usr/local/bin/cuenca python3 /opt/soak/soak.py agent --side nuc --names /home/agent/soak/names.txt --root /home/agent/soak/run --out /home/agent/soak/out/main --seconds 3600 --land-every 40 --req /tmp/soak-vis/req-main.jsonl --res /tmp/soak-vis-res/res-main.jsonl",
+    "mac_chaos": "CUENCA_BIN=$HOME/.local/bin/cuenca python3 soak.py chaos --out $R/out/main --seconds 3600 --restart-at 1800 --merge-at 900,2100,2700",
+    "mac_agents": "CUENCA_BIN=$HOME/.local/bin/cuenca python3 soak.py agent --side mac --names $R/names.txt --root $R --out $R/out/main --seconds 3600 --land-every 40",
+    "defaults_used": "--pause-min 8 --pause-max 20 (defaults); R=/Volumes/Broomva/scratch/soak-run"
+  }
+}
