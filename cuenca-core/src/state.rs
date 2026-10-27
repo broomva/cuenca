@@ -32,6 +32,10 @@ pub struct Location {
     pub main: GitOid,
     /// The last move of main, if any.
     pub main_moved: Option<MainMove>,
+    /// For a location with a remote, the remote commit whose tree main last followed
+    /// ([`crate::Event::MainFollowed`]); `None` until main first follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followed: Option<GitOid>,
 }
 
 /// One move of a location's main.
@@ -69,6 +73,14 @@ pub struct Fork {
     /// from for a fork of a fork, the head its parent's stale epoch left for a sibling
     /// ([`Fork::released_at`]).
     pub base: GitOid,
+    /// The main its line of forks started from: `base` for a fork of a location, and
+    /// the root main of the fork it came from for a fork of a fork or a sibling. On a
+    /// location with a remote it is a tree the remote has, so a landing is committed
+    /// onto it, and the pull request shows only this line's changes even after main
+    /// has followed the remote past it (BRO-3517). `None` for a fork recorded before
+    /// this field existed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub root_main: Option<GitOid>,
     /// The tree of its latest draft, or `base` before the first.
     pub head: GitOid,
     /// The latest draft's changeset and the offset of its record.
@@ -344,6 +356,7 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
                 remote: remote.clone(),
                 main: *main,
                 main_moved: None,
+                followed: None,
             })?;
         }
         Event::ForkCreated {
@@ -369,6 +382,7 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
                 parent: None,
                 from: None,
                 base: *base,
+                root_main: Some(*base),
                 head: *base,
                 head_changeset: None,
                 verified: None,
@@ -397,6 +411,7 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
                 parent: None,
                 from: Some(from.clone()),
                 base: *base,
+                root_main: source.root_main,
                 head: *base,
                 head_changeset: None,
                 verified: None,
@@ -537,6 +552,28 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             landing.step = LandingStep::Landed { offset };
             state.landing = Some(landing);
             view.put_fork(&state)?;
+        }
+        Event::MainFollowed {
+            location: at,
+            main,
+            commit,
+        } => {
+            let mut loc = location(view, at)?;
+            // A location without a remote moves only when the owner lands a fork on it.
+            if loc.remote.is_none() {
+                return Err(CoreError::NoRemote(at.to_string()));
+            }
+            if loc.main == *main {
+                return Err(CoreError::Inconsistent(format!(
+                    "main of {at:?} is already {main}; following it again records nothing"
+                )));
+            }
+            // Forks keep the base they started from; only the next forks see this main.
+            // A verify recorded against the old main no longer counts, since a landing
+            // needs one against main as it is now.
+            loc.main = *main;
+            loc.followed = Some(*commit);
+            view.put_location(&loc)?;
         }
         Event::LandingIntent {
             fork: name,
@@ -840,6 +877,7 @@ pub(crate) fn fenced_target(
                 parent: Some(at.name.clone()),
                 from: None,
                 base,
+                root_main: at.root_main,
                 head: base,
                 head_changeset: None,
                 verified: None,

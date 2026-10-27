@@ -6,8 +6,9 @@
 //!
 //! 1. **requested → exporting.** Fetch the remote's default branch into the authority's
 //!    own bare repository for the location (`<state>/git/<location>.git`), find the
-//!    newest first-parent commit whose tree is the main the request's verify judged
-//!    ([`cuenca_core::Landing::main`]), write the fork's head tree with
+//!    newest first-parent commit whose tree is the main the fork's line started from
+//!    ([`cuenca_core::Fork::root_main`]; the main the request's verify judged,
+//!    [`cuenca_core::Landing::main`], for a fork recorded before that field), write the fork's head tree with
 //!    [`cuenca_tree::git::Repo::write_tree`] and commit it onto that parent. A
 //!    `cp/<id>` already on the remote that is an export of this changeset onto that
 //!    main is taken as this landing's instead. The commit depends on the changeset and its parent alone
@@ -36,22 +37,33 @@
 //! that fork is the failed changeset again. A failing fsck has no owner-side fix
 //! yet (BRO-3484).
 //!
+//! **Main follows the remote** (BRO-3517). Each round, at most once per
+//! [`LandConfig::follow`] for each location with a remote, the lander fetches the
+//! remote's default branch into `refs/cuenca/followed`. When its tree is not the
+//! location's main, it reads the tree's blobs into the store and records
+//! [`cuenca_core::Event::MainFollowed`]. What merges on the remote, through a landing or
+//! a person's push, is then what the next forks start from, and the volume's `main/`
+//! shows it. Forks keep their base. A landing is committed onto the root main of its
+//! fork's line, so its pull request shows only that line's changes and never reverts
+//! what merged since; GitHub's merge brings in the rest.
+//!
 //! Identity: `gh` with the token already on the authority host (spec section 0, "the
 //! shared gh login at first"; the GitHub App is BRO-3305), as git's credential helper
 //! for `https://github.com` remotes too. Only GitHub remotes land through a PR.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cuenca_core::checks::CheckStatus;
 use cuenca_core::{
-    ChangesetId, CoreError, Event, Export, Fork, ForkName, Landing, LandingStep, Location, Store,
-    export_branch,
+    ChangesetId, CoreError, Event, Export, Fork, ForkName, Landing, LandingStep, Location,
+    LocationName, Store, export_branch,
 };
 use cuenca_tree::GitOid;
 use cuenca_tree::git::{Blobs, REDIRECTING_ENV, Repo};
@@ -60,6 +72,10 @@ use crate::authority::Authority;
 
 /// How far back the remote's first-parent history is searched for the base's tree.
 const PARENT_SEARCH: usize = 1000;
+
+/// Where the remote's default branch is fetched to follow main (BRO-3517), apart from
+/// the ref a landing fetches into.
+const FOLLOWED: &str = "refs/cuenca/followed";
 
 /// A crash test's hook, called with the name of each point a kill is tested at.
 pub type Fault = Arc<dyn Fn(&str) + Send + Sync>;
@@ -78,6 +94,9 @@ pub struct LandConfig {
     pub git_config: Vec<String>,
     /// How long the lander sleeps when nothing wakes it.
     pub poll: Duration,
+    /// How often main follows each remote's default branch: a location is fetched at
+    /// most once per this interval, on the lander's rounds (BRO-3517).
+    pub follow: Duration,
     /// The longest one git or gh call may take; past it the call is killed and the
     /// step retried on the next round.
     pub timeout: Duration,
@@ -94,6 +113,7 @@ impl LandConfig {
             git: PathBuf::from("git"),
             git_config: Vec::new(),
             poll: Duration::from_secs(30),
+            follow: Duration::from_secs(60),
             timeout: Duration::from_secs(600),
             fault: None,
         }
@@ -115,6 +135,7 @@ impl Lander {
         let worker = Worker {
             a: authority.clone(),
             config,
+            followed_at: RefCell::new(HashMap::new()),
         };
         let thread = {
             let stop = stop.clone();
@@ -170,6 +191,8 @@ type Step<T = ()> = Result<T, LandError>;
 struct Worker {
     a: Arc<Authority>,
     config: LandConfig,
+    /// When each location's remote was last fetched to follow its main.
+    followed_at: RefCell<HashMap<LocationName, Instant>>,
 }
 
 impl Worker {
@@ -181,8 +204,15 @@ impl Worker {
         }
     }
 
-    /// Drive every open request on a location with a remote as far as it goes.
+    /// Drive every open request on a location with a remote as far as it goes, then
+    /// follow each remote's main. Landings go first, so following a slow or
+    /// unreachable remote never delays them.
     fn round(&self, stop: &AtomicBool) {
+        self.drive_all(stop);
+        self.follow_all(stop);
+    }
+
+    fn drive_all(&self, stop: &AtomicBool) {
         let forks = match self.a.store.forks() {
             Ok(f) => f,
             Err(e) => {
@@ -224,6 +254,71 @@ impl Worker {
         }
     }
 
+    /// Follow the main of every location with a remote that is due
+    /// ([`LandConfig::follow`]). A failure is logged and tried again when next due.
+    fn follow_all(&self, stop: &AtomicBool) {
+        let locations = match self.a.store.locations() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "lander: cannot list locations");
+                return;
+            }
+        };
+        for location in locations {
+            if stop.load(Ordering::SeqCst) {
+                return;
+            }
+            let Some(remote) = location.remote.clone() else {
+                continue;
+            };
+            {
+                let mut at = self.followed_at.borrow_mut();
+                if at
+                    .get(&location.name)
+                    .is_some_and(|t| t.elapsed() < self.config.follow)
+                {
+                    continue;
+                }
+                at.insert(location.name.clone(), Instant::now());
+            }
+            match self.follow(&location, &remote) {
+                Ok(Some(offset)) => {
+                    tracing::info!(location = %location.name, offset, "main followed the remote");
+                }
+                Ok(None) | Err(LandError::Gone) => {}
+                Err(LandError::Retry(e) | LandError::Fail(e)) => {
+                    tracing::warn!(location = %location.name, error = %e, "main did not follow the remote; trying again when next due");
+                }
+            }
+        }
+    }
+
+    /// Fetch `location`'s remote default branch and, when its tree is not main, make it
+    /// main: the offset of the `MainFollowed` record, or `None` when main is current.
+    fn follow(&self, location: &Location, remote: &str) -> Step<Option<u64>> {
+        let git = Git::new(&self.config, location)?;
+        let branch = git.default_branch(remote)?;
+        git.fetch_to(remote, &format!("refs/heads/{branch}"), FOLLOWED)?;
+        let commit = git.rev_parse(&format!("{FOLLOWED}^{{commit}}"))?;
+        let tree_id = git.rev_parse(&format!("{FOLLOWED}^{{tree}}"))?;
+        if tree_id == location.main {
+            return Ok(None);
+        }
+        let repo = git.repo();
+        let tree = repo
+            .read_tree(FOLLOWED)
+            .map_err(|e| LandError::Retry(format!("reading {branch}'s tree: {e}")))?;
+        let blobs = repo
+            .read_tree_blobs(&tree)
+            .map_err(|e| LandError::Retry(format!("reading {branch}'s blobs: {e}")))?;
+        for (oid, content) in blobs {
+            self.a
+                .store
+                .ingest_blob(oid, content.len() as u64, content.as_slice())?;
+        }
+        Ok(self.a.store.follow_main(&location.name, &tree, commit)?)
+    }
+
     /// Move the landing of `id` from `fork` step by step until it is in review, or a
     /// step does not happen.
     fn drive(&self, name: &ForkName, id: ChangesetId) -> Step {
@@ -247,6 +342,9 @@ impl Worker {
                     "remote {remote:?} is not a GitHub repository; only GitHub remotes land through a pull request"
                 ))
             })?;
+            // The main this fork's line started from; a fork recorded before the field
+            // existed lands onto the main its verify judged, as before.
+            let root = fork.root_main.unwrap_or(landing.main);
             let git = Git::new(&self.config, &location)?;
             match &landing.step {
                 LandingStep::Requested => {
@@ -257,8 +355,8 @@ impl Worker {
                     // is not: the remote's main has a newer commit with the same tree,
                     // or the old parent fell out of the search.
                     let export = match git.remote_branch(&remote, &export_branch(id))? {
-                        Some(at) => git.adopt(&remote, &self.a.store, id, landing.main, at)?,
-                        None => self.build(&git, &remote, &landing, None)?,
+                        Some(at) => git.adopt(&remote, &self.a.store, id, root, at)?,
+                        None => self.build(&git, &remote, &landing, root, None)?,
                     };
                     self.a.store.record_export_intent(name, id, &export)?;
                     self.fault("export_intent");
@@ -268,7 +366,7 @@ impl Worker {
                     if !pushed && !git.has_commit(export.commit)? {
                         // Lost with the crash, or never fsynced: build it again, onto
                         // the parent the intent names; it must come out the same.
-                        let again = self.build(&git, &remote, &landing, Some(export))?;
+                        let again = self.build(&git, &remote, &landing, root, Some(export))?;
                         if again.commit != export.commit {
                             return Err(LandError::Fail(format!(
                                 "the export rebuilt as {}, not {}, the commit its intent names",
@@ -304,22 +402,26 @@ impl Worker {
 
     /// The export of the landing: the target tree written into the location's bare
     /// repository and committed onto `parent`, or onto the newest first-parent commit
-    /// of the remote's default branch whose tree is the main the request's verify judged.
+    /// of the remote's default branch whose tree is `root`, the main the fork's line
+    /// started from.
     fn build(
         &self,
         git: &Git,
         remote: &str,
         landing: &Landing,
+        root: GitOid,
         intent: Option<&Export>,
     ) -> Step<Export> {
         let store = &self.a.store;
         let changeset = store
             .changeset(landing.changeset)?
             .ok_or_else(|| LandError::Fail(format!("no changeset {}", landing.changeset)))?;
-        // The main the verify judged the head against: the export is the head's tree onto
-        // the remote's commit of that main. (Drafts chain, so the head changeset's own
-        // base is the previous draft's tree, which the remote has never seen.)
-        let main = landing.main;
+        // The main the fork's line started from: the export is the head's tree onto the
+        // remote's commit of that main, so the pull request holds this line's changes
+        // and nothing else, however far main has followed the remote since (BRO-3517).
+        // (Drafts chain, so the head changeset's own base is the previous draft's tree,
+        // which the remote has never seen.)
+        let main = root;
         let (parent, base_ref) = match intent {
             Some(e) => {
                 git.fetch(remote, &e.parent.to_hex())?;
@@ -584,6 +686,11 @@ impl<'c> Git<'c> {
 
     /// Fetch `what` from the remote into `refs/cuenca/fetched`.
     fn fetch(&self, remote: &str, what: &str) -> Step {
+        self.fetch_to(remote, what, "refs/cuenca/fetched")
+    }
+
+    /// Fetch `what` from the remote into the local ref `to`.
+    fn fetch_to(&self, remote: &str, what: &str, to: &str) -> Step {
         self.run(&[
             "fetch",
             "--quiet",
@@ -591,9 +698,15 @@ impl<'c> Git<'c> {
             "--no-write-fetch-head",
             "--",
             remote,
-            &format!("+{what}:refs/cuenca/fetched"),
+            &format!("+{what}:{to}"),
         ])?;
         Ok(())
+    }
+
+    /// The object `rev` names in the bare repository.
+    fn rev_parse(&self, rev: &str) -> Step<GitOid> {
+        let out = self.run(&["rev-parse", "--verify", "--quiet", rev])?;
+        GitOid::from_hex(out.trim()).map_err(|e| LandError::Retry(format!("{rev}: {e}")))
     }
 
     /// The newest first-parent commit of what was fetched whose tree is `tree`.

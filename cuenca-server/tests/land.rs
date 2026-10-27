@@ -1173,3 +1173,171 @@ impl Upstream {
         }
     }
 }
+
+/// Push a commit adding `path` with `content` to the upstream's `main`, as a merge on
+/// GitHub would: the new commit, and its tree.
+fn push_to_main(up: &Upstream, path: &str, content: &str) -> (String, String) {
+    let p = up.work.join(path);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, content).unwrap();
+    common::git(&up.work, &["add", "-A"]);
+    common::git(&up.work, &["commit", "-q", "-m", &format!("add {path}")]);
+    common::git(
+        &up.work,
+        &["push", "-q", up.remote.to_str().unwrap(), "main"],
+    );
+    (
+        up.git(&["rev-parse", "main"]).trim().to_string(),
+        up.git(&["rev-parse", "main^{tree}"]).trim().to_string(),
+    )
+}
+
+/// Wait until location l1's main is `tree`.
+fn wait_for_main(store: &Store, tree: &str) {
+    let start = Instant::now();
+    while store.location(&l1()).unwrap().unwrap().main.to_hex() != tree {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "main of l1 is still {}",
+            store.location(&l1()).unwrap().unwrap().main
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn follows(store: &Store) -> usize {
+    store
+        .records(0, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|r| matches!(r.event, Event::MainFollowed { .. }))
+        .count()
+}
+
+/// BRO-3517: what merges on the remote becomes the location's main, so the next fork
+/// starts from it; forks that exist keep their base, and a remote that has not moved
+/// records nothing.
+#[test]
+fn main_follows_the_remote_and_the_next_fork_starts_from_it() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let v = s.admin(AdminRequest::LocationAdd {
+        name: l1(),
+        remote: Some(up.url.clone()),
+        git: Some(GitSource {
+            repo: up.work.clone(),
+            rev: "HEAD".into(),
+        }),
+        dir: None,
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let a1 = s.mint("a1", PrincipalKind::Agent, NA, grant(&["l1"], &[]));
+    s.whois.node(NA);
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f1", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let store = s.authority.store();
+    let registered = store.location(&l1()).unwrap().unwrap().main;
+
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.follow = Duration::ZERO;
+    let lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    // The remote has not moved: following it records nothing, round after round.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(follows(store), 0);
+
+    let (commit, tree) = push_to_main(&up, "merged/elsewhere.txt", "merged\n");
+    wait_for_main(store, &tree);
+    let loc = store.location(&l1()).unwrap().unwrap();
+    assert_eq!(loc.followed.unwrap().to_hex(), commit);
+    assert_eq!(follows(store), 1);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(follows(store), 1, "an unmoved remote is not followed again");
+
+    // The fork that existed keeps its base; the next fork starts from the new main and
+    // holds what merged.
+    let f1 = store.fork(&f1()).unwrap().unwrap();
+    assert_eq!((f1.base, f1.root_main), (registered, Some(registered)));
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f2", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let f2 = store.fork(&ForkName::new("f2").unwrap()).unwrap().unwrap();
+    assert_eq!(f2.base.to_hex(), tree);
+    assert_eq!(f2.root_main.map(|t| t.to_hex()), Some(tree.clone()));
+    let head = s.fork_head(&a1, "f2");
+    assert!(
+        head.get("merged/elsewhere.txt").is_some(),
+        "the new fork holds the merged file"
+    );
+    drop(lander);
+}
+
+/// BRO-3517: a fork made before main followed the remote lands onto the main its line
+/// started from, so its pull request changes only what the fork changed and never
+/// reverts what merged since. Committed onto the new main instead, the fork's tree
+/// (which lacks the merged file) would delete it.
+#[test]
+fn a_fork_older_than_main_lands_onto_its_root_and_reverts_nothing() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n"), ("src/lib.rs", "//!\n")]);
+    let v = s.admin(AdminRequest::LocationAdd {
+        name: l1(),
+        remote: Some(up.url.clone()),
+        git: Some(GitSource {
+            repo: up.work.clone(),
+            rev: "HEAD".into(),
+        }),
+        dir: None,
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let root_commit = up.git(&["rev-parse", "main"]).trim().to_string();
+    let a1 = s.mint("a1", PrincipalKind::Agent, NA, grant(&["l1"], &[]));
+    s.whois.node(NA);
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f1", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let head = s.fork_head(&a1, "f1");
+    let cs = s.write(&a1, &head, &[("README", b"changed by f1\n")]);
+    let r: Value = s.publish(&a1, "f1", 1, &cs).json().unwrap();
+    let id = ChangesetId::from_hex(r["id"].as_str().unwrap()).unwrap();
+
+    // Someone else's change merges on the remote, and main follows it.
+    let (_, tree) = push_to_main(&up, "merged/elsewhere.txt", "merged\n");
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.follow = Duration::ZERO;
+    let lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    wait_for_main(s.authority.store(), &tree);
+
+    // The fork verifies against main as it is now, and asks to land.
+    verify_and_ask(&s, &a1, "f1", id);
+    let step = wait_for(s.authority.store(), &f1(), in_review);
+    let LandingStep::InReview { export, .. } = step else {
+        unreachable!()
+    };
+    assert_eq!(
+        up.git(&["rev-parse", &format!("{}^", export.branch)])
+            .trim(),
+        root_commit,
+        "the export's parent is the commit the fork's line started from"
+    );
+    let changed = up.git(&[
+        "diff",
+        "--name-only",
+        &format!("{}^", export.branch),
+        &export.branch,
+    ]);
+    assert_eq!(
+        changed.trim(),
+        "README",
+        "the pull request changes only README"
+    );
+    // GitHub's merge brings in the rest: the merged file survives.
+    let merged = up.git(&["merge-tree", "--write-tree", "main", &export.branch]);
+    let merged_tree = merged.lines().next().unwrap();
+    let files = up.git(&["ls-tree", "-r", "--name-only", merged_tree]);
+    assert!(
+        files.lines().any(|f| f == "merged/elsewhere.txt"),
+        "{files}"
+    );
+    assert!(files.lines().any(|f| f == "README"), "{files}");
+    drop(lander);
+}
