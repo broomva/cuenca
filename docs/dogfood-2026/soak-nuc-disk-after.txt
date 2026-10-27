@@ -1,0 +1,8 @@
+# captured 2026-10-27T05:55:42Z (file mtime), on the NUC, by: find /var/lib/cuenca/state -name "*.redb" (path, bytes); du -sb /var/lib/cuenca/state /srv/cuenca/volume; df -B1 --output=avail /; systemctl is-active
+/var/lib/cuenca/state/store/log.redb 38432768
+47303762	/var/lib/cuenca/state
+20788029	/srv/cuenca/volume
+1006700793856
+active
+active
+NRestarts=2
