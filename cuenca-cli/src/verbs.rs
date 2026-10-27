@@ -750,6 +750,11 @@ fn summarise(record: &cuenca_core::Record) -> (Value, String) {
         } => {
             format!("main of {location} advanced to {changeset} from {fork}")
         }
+        Event::MainFollowed {
+            location,
+            main,
+            commit,
+        } => format!("main of {location} followed its remote to commit {commit} (tree {main})"),
         Event::LandingIntent {
             fork, changeset, ..
         } => {
