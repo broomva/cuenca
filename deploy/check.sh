@@ -55,7 +55,33 @@ expect_param() {
 for m in fruit streams_xattr; do
     compgen -G "/usr/lib/*/samba/vfs/$m.so" >/dev/null && ok "Samba's $m module is installed" || bad "Samba's $m module is missing (samba-vfs-modules)"
 done
-expect_param interfaces tailscale0
+# shellcheck source=tailnet-addr.sh
+. "$(dirname "$0")/tailnet-addr.sh"
+# The host's own tailnet addresses, when they are not on tailscale0. cuenca.env is checked, not
+# trusted: one canonical tailnet IPv4 address and at most one IPv6 one, else everything the
+# listener checks below compare against would be the installer's say-so.
+own4=""; own6=""
+if [ -n "${CUENCA_TAILNET_ADDRS:-}" ]; then
+    n4=0; n6=0; okaddrs=1
+    for a in $CUENCA_TAILNET_ADDRS; do
+        [ "$(canonical_tailnet "$a" 2>/dev/null)" = "$a" ] || { okaddrs=0; continue; }
+        case $a in *:*) own6=$a; n6=$((n6 + 1)) ;; *) own4=$a; n4=$((n4 + 1)) ;; esac
+    done
+    [ "$okaddrs" = 1 ] && [ "$n4" -eq 1 ] && [ "$n6" -le 1 ] \
+        && ok "CUENCA_TAILNET_ADDRS is one tailnet IPv4 address${own6:+ and one IPv6 one}: $CUENCA_TAILNET_ADDRS" \
+        || { bad "CUENCA_TAILNET_ADDRS '$CUENCA_TAILNET_ADDRS' must be one canonical tailnet IPv4 address and at most one IPv6 one"; own4=""; own6=""; }
+    expect_param interfaces "${own4:-?}/32${own6:+ $own6/128}"
+else
+    expect_param interfaces tailscale0
+fi
+# The agent API's address: one canonical tailnet IPv4 address (the host's own, by address).
+bhost=${CUENCA_BIND%:*}
+if [[ $bhost != *:* ]] && [ "$(canonical_tailnet "$bhost" 2>/dev/null)" = "$bhost" ] \
+    && { [ -z "${CUENCA_TAILNET_ADDRS:-}" ] || [ "$bhost" = "$own4" ]; }; then
+    ok "CUENCA_BIND is on a tailnet address: $CUENCA_BIND"
+else
+    bad "CUENCA_BIND $CUENCA_BIND is not on the host's tailnet IPv4 address"
+fi
 expect_param "bind interfaces only" Yes
 expect_param "disable netbios" Yes
 expect_param "hosts deny" ALL
@@ -74,8 +100,6 @@ expect_param "nt acl support" No cuenca
 expect_param path "$CUENCA_VOLUME" cuenca
 allow=$(param "hosts allow")
 [ -n "$allow" ] && ok "hosts allow names the enrolled devices: $allow" || bad "hosts allow is empty"
-# shellcheck source=tailnet-addr.sh
-. "$(dirname "$0")/tailnet-addr.sh"
 for a in ${allow//,/ }; do
     [ "$(canonical_tailnet "$a")" = "$a" ] || bad "hosts allow entry $a is not a single, canonically written tailnet address"
 done
@@ -96,10 +120,21 @@ for u in nmbd samba-ad-dc; do
 done
 
 # Listeners: the agent API and :445 on the tailnet address only, nothing on :139.
-# smbd binds both of tailscale0's addresses; nothing else may be bound.
+# smbd binds both of the host's tailnet addresses (tailscale0's, or CUENCA_TAILNET_ADDRS);
+# nothing else may be bound.
 command -v ss >/dev/null || { bad "ss is missing; listeners not checked"; echo "check.sh: $fails failed"; exit 1; }
-ts=$(tailscale ip -4 | head -n1)
-ts6=$(tailscale ip -6 2>/dev/null | head -n1)
+if [ -n "${CUENCA_TAILNET_ADDRS:-}" ]; then
+    ts=$own4; ts6=$own6
+    # The whois-only Tailscale node in userspace mode adds no interface; a tailscale0 here would
+    # be a second node routing the tailnet, and replies to peers would leave through it.
+    ip link show tailscale0 >/dev/null 2>&1 && bad "tailscale0 exists on a host bound by address (tailscaled must run --tun=userspace-networking)" \
+        || ok "no tailscale0 on a host bound by address"
+else
+    ts=$(tailscale ip -4 | head -n1)
+    ts6=$(tailscale ip -6 2>/dev/null | head -n1)
+fi
+[ "${CUENCA_BIND%:*}" = "$ts" ] && ok "the agent API's address is the host's tailnet IPv4 address $ts" \
+    || bad "CUENCA_BIND $CUENCA_BIND is not on the host's tailnet IPv4 address '$ts'"
 listen_on() { ss -Hltn "sport = :$1" | awk '{print $4}' | sort -u | tr '\n' ' '; }
 want="$ts:445 "
 [ -n "$ts6" ] && want=$(printf '%s\n' "$ts:445" "[$ts6]:445" | sort -u | tr '\n' ' ')
