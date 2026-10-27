@@ -903,3 +903,71 @@ fn a_fork_at_a_main_that_moved_is_refused() {
         .create_fork_at(&fork("g"), &loc("l"), cs.target, &agent())
         .unwrap();
 }
+
+/// BRO-3517: every fork of a line knows the main the line started from, so a landing is
+/// committed onto a tree the remote has; a fork of a fork and a sibling inherit it, and
+/// main following the remote changes no fork that exists.
+#[test]
+fn a_line_of_forks_keeps_the_main_it_started_from() {
+    let (_d, store) = store();
+    let main = tree(&store, &[("a", b"1")]);
+    store
+        .add_location(&loc("l"), Some("https://github.com/o/r"), &main)
+        .unwrap();
+    store.create_fork(&fork("f"), &loc("l"), &agent()).unwrap();
+    let root = Some(main.git_tree_id());
+    assert_eq!(Some(store.root_main(&fork("f")).unwrap()), root);
+
+    // A draft, then a fork of the fork: its base is f's head, its root is still main.
+    let one = write(&store, &main, &[("a", b"2")]);
+    store.publish_draft(&fork("f"), &w1(), &one).unwrap();
+    store.branch_fork(&fork("g"), &fork("f"), &agent()).unwrap();
+    let g = store.fork(&fork("g")).unwrap().unwrap();
+    assert_ne!(Some(g.base), root);
+    assert_eq!(Some(store.root_main(&fork("g")).unwrap()), root);
+
+    // Main follows the remote: forks keep base and root, the next fork starts anew.
+    let followed = tree(&store, &[("a", b"1"), ("b", b"merged")]);
+    let at = cuenca_tree::GitOid::for_blob(b"a commit id stand-in");
+    assert!(
+        store
+            .follow_main(&loc("l"), &followed, at)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(
+        store.follow_main(&loc("l"), &followed, at).unwrap(),
+        None,
+        "following the same tree again records nothing"
+    );
+    assert_eq!(Some(store.root_main(&fork("f")).unwrap()), root);
+    store.create_fork(&fork("h"), &loc("l"), &agent()).unwrap();
+    let h = store.fork(&fork("h")).unwrap().unwrap();
+    assert_eq!(
+        (h.base, store.root_main(&fork("h")).unwrap()),
+        (followed.git_tree_id(), followed.git_tree_id())
+    );
+
+    // A stale-epoch draft lands in a sibling, which keeps f's root.
+    store.take_over(&fork("f"), 1, &owner()).unwrap();
+    let two = write(
+        &store,
+        &store.fork_head(&fork("f")).unwrap(),
+        &[("c", b"3")],
+    );
+    let p = store.publish_draft(&fork("f"), &w1(), &two).unwrap();
+    assert!(p.fenced);
+    assert_eq!(Some(store.root_main(&p.fork).unwrap()), root);
+}
+
+/// BRO-3517: only a location with a remote follows one; the owner moves the others.
+#[test]
+fn a_location_without_a_remote_never_follows_one() {
+    let (_d, store, _main) = forked();
+    let other = tree(&store, &[("a", b"elsewhere")]);
+    let at = cuenca_tree::GitOid::for_blob(b"x");
+    assert!(matches!(
+        store.follow_main(&loc("l"), &other, at),
+        Err(CoreError::NoRemote(_))
+    ));
+}

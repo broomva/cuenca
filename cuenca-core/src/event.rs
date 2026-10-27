@@ -109,6 +109,16 @@ pub enum Event {
         fork: ForkName,
         changeset: ChangesetId,
     },
+    /// A location with a git remote took the tree of its remote's default branch as its
+    /// main: the authority fetched the branch at `commit`, whose tree `main` was not the
+    /// location's main (BRO-3517). What merges on the remote, through a landing or not,
+    /// is what the location's next forks start from. An authority act, so it names no
+    /// writer; a location without a remote moves only by [`Event::MainAdvanced`].
+    MainFollowed {
+        location: LocationName,
+        main: GitOid,
+        commit: GitOid,
+    },
     /// The fork's holder asked to land the fork's head changeset, which a verify of
     /// the location's main now has judged ([`crate::Verified`]). What happens to it is
     /// recorded by the events below, each about this request ([`crate::Landing`]).
@@ -175,7 +185,9 @@ impl Event {
     /// The forks this event is about: the history of a fork is the records that name it.
     pub fn forks(&self) -> Vec<&ForkName> {
         match self {
-            Event::LocationAdded { .. } | Event::PrincipalRevoked { .. } => vec![],
+            Event::LocationAdded { .. }
+            | Event::MainFollowed { .. }
+            | Event::PrincipalRevoked { .. } => vec![],
             Event::ForkCreated { fork, .. }
             | Event::ForkBranched { fork, .. }
             | Event::DraftPublished { fork, .. }

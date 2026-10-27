@@ -701,6 +701,64 @@ impl Store {
         ))
     }
 
+    /// The main `fork`'s line started from (BRO-3517): the base of the fork of the
+    /// location at the top of its line, reached through `from` (a fork of a fork) and
+    /// `parent` (a sibling). Derived from the forks the log keeps, so every fork has one,
+    /// whenever it was recorded. It is the location's main when the line began, which the
+    /// remote holds whenever that main came from it (registration from a pushed revision,
+    /// or a follow); a location registered from a tree its remote never had has no commit
+    /// to land onto, and its landings fail saying so. A landing is committed onto it, so
+    /// the pull request holds only the line's changes after main has followed the remote
+    /// past it.
+    pub fn root_main(&self, fork: &ForkName) -> Result<GitOid> {
+        let mut name = fork.clone();
+        // Each step goes to a fork recorded earlier, so the walk ends; the bound only
+        // turns a corrupt projection into an error instead of a loop.
+        for _ in 0..100_000 {
+            let f = self
+                .fork(&name)?
+                .ok_or_else(|| CoreError::UnknownFork(name.to_string()))?;
+            match (f.from, f.parent) {
+                (Some(next), _) | (None, Some(next)) => name = next,
+                (None, None) => return Ok(f.base),
+            }
+        }
+        Err(CoreError::Inconsistent(format!(
+            "the line of {fork:?} does not reach a fork of its location"
+        )))
+    }
+
+    /// Make `main`, the tree of the remote's default branch at `commit`, the main of
+    /// `location`, a location with a git remote (BRO-3517). Every blob of `main` must
+    /// already be in the store. `None` when main is already that tree: nothing is
+    /// recorded. The earlier main stays in the log; forks keep the base they started
+    /// from.
+    pub fn follow_main(
+        &self,
+        location: &LocationName,
+        main: &Tree,
+        commit: GitOid,
+    ) -> Result<Option<u64>> {
+        let loc = self
+            .location(location)?
+            .ok_or_else(|| CoreError::UnknownLocation(location.to_string()))?;
+        if loc.remote.is_none() {
+            return Err(CoreError::NoRemote(location.to_string()));
+        }
+        if loc.main == main.git_tree_id() {
+            return Ok(None);
+        }
+        self.check_entries(main.entries())?;
+        let event = Event::MainFollowed {
+            location: location.clone(),
+            main: main.git_tree_id(),
+            commit,
+        };
+        let (offset, _) =
+            self.record(event, |txn| store_tree(&mut txn.open_table(TREES)?, main))?;
+        Ok(Some(offset))
+    }
+
     /// The owner lands `id` on a location without a git remote: main moves by `id`, the
     /// fork's head and its holder's live landing request, as a compare-and-swap (the
     /// changeset must start from the main the location has now). Advancing by the
@@ -1154,7 +1212,7 @@ fn prefix_roots(records: &[Record]) -> std::collections::BTreeSet<GitOid> {
     records
         .iter()
         .flat_map(|r| match &r.event {
-            Event::LocationAdded { main, .. } => vec![*main],
+            Event::LocationAdded { main, .. } | Event::MainFollowed { main, .. } => vec![*main],
             Event::ForkCreated { base, .. } | Event::ForkBranched { base, .. } => vec![*base],
             Event::DraftPublished { changeset, .. } | Event::DraftFenced { changeset, .. } => {
                 vec![changeset.base, changeset.target]
