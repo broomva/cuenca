@@ -32,6 +32,10 @@ pub struct Location {
     pub main: GitOid,
     /// The last move of main, if any.
     pub main_moved: Option<MainMove>,
+    /// For a location with a remote, the remote commit whose tree main last followed
+    /// ([`crate::Event::MainFollowed`]); `None` until main first follows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followed: Option<GitOid>,
 }
 
 /// One move of a location's main.
@@ -344,6 +348,7 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
                 remote: remote.clone(),
                 main: *main,
                 main_moved: None,
+                followed: None,
             })?;
         }
         Event::ForkCreated {
@@ -537,6 +542,28 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             landing.step = LandingStep::Landed { offset };
             state.landing = Some(landing);
             view.put_fork(&state)?;
+        }
+        Event::MainFollowed {
+            location: at,
+            main,
+            commit,
+        } => {
+            let mut loc = location(view, at)?;
+            // A location without a remote moves only when the owner lands a fork on it.
+            if loc.remote.is_none() {
+                return Err(CoreError::NoRemote(at.to_string()));
+            }
+            if loc.main == *main {
+                return Err(CoreError::Inconsistent(format!(
+                    "main of {at:?} is already {main}; following it again records nothing"
+                )));
+            }
+            // Forks keep the base they started from; only the next forks see this main.
+            // A verify recorded against the old main no longer counts, since a landing
+            // needs one against main as it is now.
+            loc.main = *main;
+            loc.followed = Some(*commit);
+            view.put_location(&loc)?;
         }
         Event::LandingIntent {
             fork: name,

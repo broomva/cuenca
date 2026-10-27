@@ -1173,3 +1173,411 @@ impl Upstream {
         }
     }
 }
+
+/// Push a commit adding `path` with `content` to the upstream's `main`, as a merge on
+/// GitHub would: the new commit, and its tree.
+fn push_to_main(up: &Upstream, path: &str, content: &str) -> (String, String) {
+    let p = up.work.join(path);
+    std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+    std::fs::write(&p, content).unwrap();
+    common::git(&up.work, &["add", "-A"]);
+    common::git(&up.work, &["commit", "-q", "-m", &format!("add {path}")]);
+    common::git(
+        &up.work,
+        &["push", "-q", up.remote.to_str().unwrap(), "main"],
+    );
+    (
+        up.git(&["rev-parse", "main"]).trim().to_string(),
+        up.git(&["rev-parse", "main^{tree}"]).trim().to_string(),
+    )
+}
+
+/// Append `n` commits to the work repository's `main`, each changing `counter.txt`, in
+/// one `git fast-import` (1,100 `git commit` calls take minutes).
+fn fast_import_commits(work: &Path, n: usize) {
+    let mut stream = String::new();
+    for i in 0..n {
+        let data = format!("{i}\n");
+        stream.push_str(&format!(
+            "commit refs/heads/main\ncommitter T <t@example.com> {} +0000\ndata 2\nc\n",
+            1_700_000_000 + i
+        ));
+        if i == 0 {
+            stream.push_str("from refs/heads/main^0\n");
+        }
+        stream.push_str(&format!(
+            "M 100644 inline counter.txt\ndata {}\n{data}\n",
+            data.len()
+        ));
+    }
+    let mut child = Command::new("git")
+        .args(["fast-import", "--quiet"])
+        .current_dir(work)
+        .stdin(Stdio::piped())
+        .spawn()
+        .unwrap();
+    use std::io::Write as _;
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(stream.as_bytes())
+        .unwrap();
+    assert!(child.wait().unwrap().success());
+    common::git(work, &["reset", "-q", "--hard", "main"]);
+}
+
+/// Wait until location l1's main is `tree`.
+fn wait_for_main(store: &Store, tree: &str) {
+    let start = Instant::now();
+    while store.location(&l1()).unwrap().unwrap().main.to_hex() != tree {
+        assert!(
+            start.elapsed() < Duration::from_secs(60),
+            "main of l1 is still {}",
+            store.location(&l1()).unwrap().unwrap().main
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+fn follows(store: &Store) -> usize {
+    store
+        .records(0, usize::MAX)
+        .unwrap()
+        .into_iter()
+        .filter(|r| matches!(r.event, Event::MainFollowed { .. }))
+        .count()
+}
+
+/// BRO-3517: what merges on the remote becomes the location's main, so the next fork
+/// starts from it; forks that exist keep their base, and a remote that has not moved
+/// records nothing.
+#[test]
+fn main_follows_the_remote_and_the_next_fork_starts_from_it() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let v = s.admin(AdminRequest::LocationAdd {
+        name: l1(),
+        remote: Some(up.url.clone()),
+        git: Some(GitSource {
+            repo: up.work.clone(),
+            rev: "HEAD".into(),
+        }),
+        dir: None,
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let a1 = s.mint("a1", PrincipalKind::Agent, NA, grant(&["l1"], &[]));
+    s.whois.node(NA);
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f1", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let store = s.authority.store();
+    let registered = store.location(&l1()).unwrap().unwrap().main;
+
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.follow = Duration::ZERO;
+    let lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    // The remote has not moved: following it records nothing, round after round.
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(follows(store), 0);
+
+    let (commit, tree) = push_to_main(&up, "merged/elsewhere.txt", "merged\n");
+    wait_for_main(store, &tree);
+    let loc = store.location(&l1()).unwrap().unwrap();
+    assert_eq!(loc.followed.unwrap().to_hex(), commit);
+    assert_eq!(follows(store), 1);
+    std::thread::sleep(Duration::from_millis(500));
+    assert_eq!(follows(store), 1, "an unmoved remote is not followed again");
+
+    // The fork that existed keeps its base; the next fork starts from the new main and
+    // holds what merged.
+    let f1 = store.fork(&f1()).unwrap().unwrap();
+    assert_eq!(
+        (f1.base, store.root_main(&f1.name).unwrap()),
+        (registered, registered)
+    );
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f2", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let f2 = store.fork(&ForkName::new("f2").unwrap()).unwrap().unwrap();
+    assert_eq!(f2.base.to_hex(), tree);
+    assert_eq!(store.root_main(&f2.name).unwrap().to_hex(), tree);
+    let head = s.fork_head(&a1, "f2");
+    assert!(
+        head.get("merged/elsewhere.txt").is_some(),
+        "the new fork holds the merged file"
+    );
+    drop(lander);
+}
+
+/// BRO-3517: a fork made before main followed the remote lands onto the main its line
+/// started from, so its pull request changes only what the fork changed and never
+/// reverts what merged since. Committed onto the new main instead, the fork's tree
+/// (which lacks the merged file) would delete it.
+#[test]
+fn a_fork_older_than_main_lands_onto_its_root_and_reverts_nothing() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n"), ("src/lib.rs", "//!\n")]);
+    let v = s.admin(AdminRequest::LocationAdd {
+        name: l1(),
+        remote: Some(up.url.clone()),
+        git: Some(GitSource {
+            repo: up.work.clone(),
+            rev: "HEAD".into(),
+        }),
+        dir: None,
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let root_commit = up.git(&["rev-parse", "main"]).trim().to_string();
+    let a1 = s.mint("a1", PrincipalKind::Agent, NA, grant(&["l1"], &[]));
+    s.whois.node(NA);
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f1", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let head = s.fork_head(&a1, "f1");
+    let cs = s.write(&a1, &head, &[("README", b"changed by f1\n")]);
+    let r: Value = s.publish(&a1, "f1", 1, &cs).json().unwrap();
+    let id = ChangesetId::from_hex(r["id"].as_str().unwrap()).unwrap();
+
+    // Someone else's change merges on the remote, and main follows it.
+    let (_, tree) = push_to_main(&up, "merged/elsewhere.txt", "merged\n");
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.follow = Duration::ZERO;
+    let lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    wait_for_main(s.authority.store(), &tree);
+
+    // The fork verifies against main as it is now, and asks to land.
+    verify_and_ask(&s, &a1, "f1", id);
+    let step = wait_for(s.authority.store(), &f1(), in_review);
+    let LandingStep::InReview { export, .. } = step else {
+        unreachable!()
+    };
+    assert_eq!(
+        up.git(&["rev-parse", &format!("{}^", export.branch)])
+            .trim(),
+        root_commit,
+        "the export's parent is the commit the fork's line started from"
+    );
+    let changed = up.git(&[
+        "diff",
+        "--name-only",
+        &format!("{}^", export.branch),
+        &export.branch,
+    ]);
+    assert_eq!(
+        changed.trim(),
+        "README",
+        "the pull request changes only README"
+    );
+    // GitHub's merge brings in the rest: the merged file survives.
+    let merged = up.git(&["merge-tree", "--write-tree", "main", &export.branch]);
+    let merged_tree = merged.lines().next().unwrap();
+    let files = up.git(&["ls-tree", "-r", "--name-only", merged_tree]);
+    assert!(
+        files.lines().any(|f| f == "merged/elsewhere.txt"),
+        "{files}"
+    );
+    assert!(files.lines().any(|f| f == "README"), "{files}");
+    drop(lander);
+}
+
+/// BRO-3517: the root of a line is derived from the forks the log keeps, so a fork of a
+/// fork made before main followed the remote lands onto the main its line started from,
+/// even when that main is more than 1000 first-parent commits behind the remote's tip.
+#[test]
+fn a_fork_of_an_old_fork_lands_onto_the_line_root_past_a_long_history() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let v = s.admin(AdminRequest::LocationAdd {
+        name: l1(),
+        remote: Some(up.url.clone()),
+        git: Some(GitSource {
+            repo: up.work.clone(),
+            rev: "HEAD".into(),
+        }),
+        dir: None,
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let root_commit = up.git(&["rev-parse", "main"]).trim().to_string();
+    let a1 = s.mint("a1", PrincipalKind::Agent, NA, grant(&["l1"], &[]));
+    s.whois.node(NA);
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f1", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let head = s.fork_head(&a1, "f1");
+    let cs = s.write(&a1, &head, &[("one.txt", b"from f1\n")]);
+    assert_eq!(s.publish(&a1, "f1", 1, &cs).status(), 200);
+    // g is a fork of f1: its base is f1's head, which the remote has never seen.
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "g", "from": "f1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let head = s.fork_head(&a1, "g");
+    let cs = s.write(&a1, &head, &[("two.txt", b"from g\n")]);
+    let r: Value = s.publish(&a1, "g", 1, &cs).json().unwrap();
+    let id = ChangesetId::from_hex(r["id"].as_str().unwrap()).unwrap();
+
+    // 1,100 commits merge on the remote after the line began, each with its own tree,
+    // so the line's root is past the old 1000-commit search window.
+    fast_import_commits(&up.work, 1100);
+    let (_, tree) = push_to_main(&up, "merged/elsewhere.txt", "merged\n");
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.follow = Duration::ZERO;
+    let lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    wait_for_main(s.authority.store(), &tree);
+
+    verify_and_ask(&s, &a1, "g", id);
+    let g = ForkName::new("g").unwrap();
+    let step = wait_for(s.authority.store(), &g, in_review);
+    let LandingStep::InReview { export, .. } = step else {
+        unreachable!()
+    };
+    assert_eq!(
+        up.git(&["rev-parse", &format!("{}^", export.branch)])
+            .trim(),
+        root_commit,
+        "the export's parent is the commit the line started from, 1,101 back"
+    );
+    let depth = up.git(&["rev-list", "--count", &format!("{root_commit}..main")]);
+    assert_eq!(depth.trim(), "1101");
+    let changed = up.git(&[
+        "diff",
+        "--name-only",
+        &format!("{}^", export.branch),
+        &export.branch,
+    ]);
+    assert_eq!(
+        changed.lines().collect::<Vec<_>>(),
+        ["one.txt", "two.txt"],
+        "the pull request holds the line's changes and nothing else"
+    );
+    // The projections still match a replay of the log.
+    s.authority.store().replay_check().unwrap();
+    drop(lander);
+}
+
+/// BRO-3517: following runs on its own thread, so a remote whose fetch hangs never holds
+/// up a landing asked for while the follow is stuck.
+#[test]
+fn a_stalled_follow_never_delays_a_new_landing() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    // git, except that fetching to follow main hangs for 12 s.
+    let wrapper = tmp.path().join("git-stalls-following");
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\ncase \"$*\" in *refs/cuenca/followed*) sleep 12 ;; esac\nexec git \"$@\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &wrapper,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.git = wrapper;
+    config.follow = Duration::ZERO;
+    // The location exists before the lander starts, so the follower is stuck in its
+    // fetch by the time the landing is asked for.
+    let v = s.admin(AdminRequest::LocationAdd {
+        name: l1(),
+        remote: Some(up.url.clone()),
+        git: Some(GitSource {
+            repo: up.work.clone(),
+            rev: "HEAD".into(),
+        }),
+        dir: None,
+    });
+    assert_eq!(v["ok"], true, "{v}");
+    let lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    std::thread::sleep(Duration::from_secs(1));
+    let a1 = s.mint("a1", PrincipalKind::Agent, NA, grant(&["l1"], &[]));
+    s.whois.node(NA);
+    let r = s.post(&a1, "/v1/forks", json!({ "fork": "f1", "location": "l1" }));
+    assert_eq!(r.status(), 200, "{}", r.text().unwrap());
+    let head = s.fork_head(&a1, "f1");
+    let cs = s.write(&a1, &head, &[("README", b"landed\n")]);
+    let r: Value = s.publish(&a1, "f1", 1, &cs).json().unwrap();
+    let id = ChangesetId::from_hex(r["id"].as_str().unwrap()).unwrap();
+    let asked = Instant::now();
+    verify_and_ask(&s, &a1, "f1", id);
+    wait_for(s.authority.store(), &f1(), in_review);
+    assert!(
+        asked.elapsed() < Duration::from_secs(8),
+        "the landing waited {:?} on a stalled follow",
+        asked.elapsed()
+    );
+    // Stopping kills the stalled fetch rather than waiting it out.
+    let stopping = Instant::now();
+    drop(lander);
+    assert!(
+        stopping.elapsed() < Duration::from_secs(5),
+        "stopping waited {:?} on a stalled follow",
+        stopping.elapsed()
+    );
+}
+
+/// BRO-3517: a remote that hangs holds the other locations back by `follow_timeout` at
+/// most, so a healthy location's main still follows.
+#[test]
+fn a_hung_remote_does_not_keep_other_locations_from_following() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(&tmp.path().join("one"), &[("README", "one\n")]);
+    let up2 = Upstream::new(&tmp.path().join("two"), &[("README", "two\n")]);
+    let url2 = "https://github.com/cuenca-test/land2";
+    // git, except that following the first location's remote hangs for 30 s.
+    let wrapper = tmp.path().join("git-hangs-on-one");
+    std::fs::write(
+        &wrapper,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *'-- {} '*refs/cuenca/followed*) sleep 30 ;; esac\nexec git \"$@\"\n",
+            up.url
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(
+        &wrapper,
+        std::os::unix::fs::PermissionsExt::from_mode(0o755),
+    )
+    .unwrap();
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.git = wrapper;
+    config.git_config.push(format!(
+        "url.file://{}.insteadOf={url2}",
+        up2.remote.display()
+    ));
+    config.follow = Duration::ZERO;
+    config.follow_timeout = Duration::from_secs(2);
+    for (name, up, url) in [("l1", &up, up.url.as_str()), ("l2", &up2, url2)] {
+        let v = s.admin(AdminRequest::LocationAdd {
+            name: LocationName::new(name).unwrap(),
+            remote: Some(url.to_string()),
+            git: Some(GitSource {
+                repo: up.work.clone(),
+                rev: "HEAD".into(),
+            }),
+            dir: None,
+        });
+        assert_eq!(v["ok"], true, "{v}");
+    }
+    let (_, tree) = push_to_main(&up2, "merged.txt", "merged\n");
+    let lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    let start = Instant::now();
+    let l2 = LocationName::new("l2").unwrap();
+    while s
+        .authority
+        .store()
+        .location(&l2)
+        .unwrap()
+        .unwrap()
+        .main
+        .to_hex()
+        != tree
+    {
+        assert!(
+            start.elapsed() < Duration::from_secs(15),
+            "l2 did not follow while l1's remote hung"
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+    drop(lander);
+}
