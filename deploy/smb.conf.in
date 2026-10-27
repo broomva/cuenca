@@ -6,8 +6,10 @@
 [global]
    server role = standalone server
    server string = cuenca
-   # The tailnet only. smbd starts after tailscale0 has its address (smbd.service.d/cuenca.conf).
-   interfaces = tailscale0
+   # The tailnet only: tailscale0, or the host's tailnet addresses by value when they sit on
+   # another interface (install.sh --tailnet-addr). smbd starts after they are up
+   # (smbd.service.d/cuenca.conf).
+   interfaces = @INTERFACES@
    bind interfaces only = yes
    disable netbios = yes
    smb ports = 445

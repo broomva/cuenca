@@ -98,5 +98,113 @@ v6 fd7a:115c:a1e0::12 >/fake/v6; wt_fails "another IPv6 address with the same pr
 rm /fake/v6; (sleep 2; v6 fd7a:115c:a1e0::1 >/fake/v6) & wt x 10 || fail "wait-tailnet gave up while the IPv6 address arrived"
 wait; rm /fake/v4; wt_fails "IPv6 without IPv4" "missing an IPv4 address"
 echo "test-container: wait-tailnet waits for both tailnet addresses"
+
+# By address: CUENCA_TAILNET_ADDRS names the own addresses of the host on whatever interface holds them
+# (WSL2 mirrored networking: an ethN whose name changes between boots). /fake/all is `ip -o addr show`.
+printf "#!/bin/sh\ncase \"\$1\" in -4) cat /fake/v4 2>/dev/null;; -6) cat /fake/v6 2>/dev/null;; -o) cat /fake/all 2>/dev/null;; link) [ -f /fake/ts0 ];; esac\n" >/fake/ip
+WA="100.112.149.32 fd7a:115c:a1e0::9237:9520"
+wa() { PATH=/fake:$PATH CUENCA_TAILNET_ADDRS="$WA" CUENCA_WAIT_SECS=${2:-2} sh /deploy/wait-tailnet 2>/tmp/wt; }
+wa_fails() { if wa; then fail "wait-tailnet (by address) passed: $1"; fi; grep -q -- "$2" /tmp/wt || { cat /tmp/wt; fail "wrong reason: $1"; }; }
+: >/fake/all
+wa_fails "no address at all" "no interface has 100.112.149.32 fd7a:115c:a1e0::9237:9520"
+echo "5: eth5    inet 100.112.149.3/32 scope global eth5" >/fake/all
+wa_fails "a shorter address the wanted one starts with" "no interface has 100.112.149.32"
+WA=100.112.149.3; echo "5: eth5    inet 100.112.149.32/32 scope global eth5" >/fake/all
+wa_fails "a longer address that starts with the wanted one" "no interface has 100.112.149.3"
+WA="100.112.149.32 fd7a:115c:a1e0::9237:9520"
+echo "5: eth5    inet 100x112x149x32/32 scope global eth5" >/fake/all
+wa_fails "a spelling that only a regex would match" "no interface has 100.112.149.32"
+echo "5: eth5    inet 100.112.149.32/32 scope global eth5" >/fake/all
+wa_fails "IPv4 without the IPv6 address" "no interface has fd7a:115c:a1e0::9237:9520"
+echo "5: eth5    inet6 fd7a:115c:a1e0::9237:9520/128 scope global tentative dadfailed" >>/fake/all
+wa_fails "an IPv6 address still in duplicate address detection" "no interface has fd7a:115c:a1e0::9237:9520"
+echo "5: eth5    inet 100.112.149.32/32 scope global eth5" >/fake/all
+(sleep 2; echo "5: eth5    inet6 fd7a:115c:a1e0::9237:9520/128 scope global" >>/fake/all) & wa x 10 || fail "wait-tailnet (by address) gave up while the IPv6 address arrived"
+wait
+echo "4: eth4    inet 100.112.149.32/32 scope global eth4
+4: eth4    inet6 fd7a:115c:a1e0::9237:9520/128 scope global" >/fake/all
+wa || fail "wait-tailnet (by address) failed when the addresses moved to another interface"
+WA="   "; wa_fails "CUENCA_TAILNET_ADDRS of blanks only" "names no address"; WA="100.112.149.32 fd7a:115c:a1e0::9237:9520"
+echo "test-container: wait-tailnet by address waits for each address, exactly, on any interface"
+
+# install.sh --tailnet-addr: smbd binds the addresses, the agent API defaults to the IPv4 one.
+targs="--no-start --allow 100.82.213.74 --tailnet-addr 100.112.149.32 --tailnet-addr fd7a:115c:a1e0::9237:9520"
+bash /deploy/install.sh $targs >/dev/null
+grep -qx "   interfaces = 100.112.149.32/32 fd7a:115c:a1e0::9237:9520/128" /etc/samba/smb.conf || fail "interfaces not rendered by address"
+grep -qx "CUENCA_BIND=100.112.149.32:7419" /etc/cuenca/cuenca.env || fail "the agent API did not default to the IPv4 tailnet address"
+grep -qx "CUENCA_TAILNET_ADDRS=\"100.112.149.32 fd7a:115c:a1e0::9237:9520\"" /etc/cuenca/cuenca.env || fail "CUENCA_TAILNET_ADDRS not written"
+grep -qx "EnvironmentFile=-/etc/cuenca/cuenca.env" /etc/systemd/system/smbd.service.d/cuenca.conf || fail "the smbd drop-in does not read cuenca.env"
+bash /deploy/check.sh --no-services | tee /tmp/out
+grep -q "^ok   smb.conf interfaces = 100.112.149.32/32 fd7a:115c:a1e0::9237:9520/128" /tmp/out || fail "check.sh did not check interfaces by address"
+cp /etc/samba/smb.conf /smb.addr; cp -p /etc/cuenca/cuenca.env /env.addr
+sed -i "s|^   interfaces = .*|   interfaces = tailscale0|" /etc/samba/smb.conf; expect_fail "interfaces = tailscale0 on a by-address host"; cp /smb.addr /etc/samba/smb.conf
+sed -i "s|^   interfaces = .*|   interfaces = 100.112.149.32/32|" /etc/samba/smb.conf; expect_fail "the IPv6 address left out of interfaces"; cp /smb.addr /etc/samba/smb.conf
+# cuenca.env is checked, not trusted: a LAN address there, with smb.conf to match, must fail.
+sed -i "s|^CUENCA_TAILNET_ADDRS=.*|CUENCA_TAILNET_ADDRS=\"192.168.78.121 fd7a:115c:a1e0::9237:9520\"|" /etc/cuenca/cuenca.env
+sed -i "s|^   interfaces = .*|   interfaces = 192.168.78.121/32 fd7a:115c:a1e0::9237:9520/128|" /etc/samba/smb.conf
+expect_fail "a LAN address recorded as a tailnet address of the host"; cp /smb.addr /etc/samba/smb.conf; cp -p /env.addr /etc/cuenca/cuenca.env
+sed -i "s|^CUENCA_TAILNET_ADDRS=.*|CUENCA_TAILNET_ADDRS=\"100.112.149.32 100.64.0.9\"|" /etc/cuenca/cuenca.env; expect_fail "two IPv4 addresses recorded"; cp -p /env.addr /etc/cuenca/cuenca.env
+# Only the validation of cuenca.env sees this one: smb.conf and the bind still match the right addresses.
+sed -i "s|^CUENCA_TAILNET_ADDRS=.*|CUENCA_TAILNET_ADDRS=\"100.112.149.32 fd7a:115c:a1e0::9237:9520 192.168.78.121\"|" /etc/cuenca/cuenca.env
+expect_fail "a LAN address beside the right ones"; cp -p /env.addr /etc/cuenca/cuenca.env
+sed -i "s|^CUENCA_BIND=.*|CUENCA_BIND=0.0.0.0:7419|" /etc/cuenca/cuenca.env; expect_fail "the agent API on every interface"; cp -p /env.addr /etc/cuenca/cuenca.env
+sed -i "s|^CUENCA_BIND=.*|CUENCA_BIND=100.64.0.1:7419|" /etc/cuenca/cuenca.env; expect_fail "the agent API on another tailnet address"; cp -p /env.addr /etc/cuenca/cuenca.env
+bash /deploy/check.sh --no-services >/dev/null || fail "the restored by-address host does not pass"
+for bad in "--tailnet-addr 192.168.78.121" "--tailnet-addr 100.112.149.32/32" "--tailnet-addr fd7a:115c:a1e0:0:0:0:9237:9520" \
+    "--tailnet-addr fd7a:115c:a1e0::9237:9520" "--tailnet-addr 100.112.149.32 --tailnet-addr 100.64.0.9" \
+    "--tailnet-addr 100.112.149.32 --no-tailnet-addr"; do
+    refused "--tailnet-addr" "--allow 100.82.213.74 $bad"
+done
+for bad in 0.0.0.0:7419 192.168.78.121:7419 100.64.0.1 100.64.0.1:0 100.64.0.1:99999 "[fd7a:115c:a1e0::1]:7419" nuc:7419; do
+    if bash /deploy/install.sh --no-start --no-tailnet-addr --allow 100.82.213.74 --bind "$bad" >/tmp/err 2>&1; then fail "install accepted --bind $bad"; fi
+    grep -q -- "--bind" /tmp/err || { cat /tmp/err; fail "--bind $bad refused for another reason"; }
+done
+if bash /deploy/install.sh $targs --bind 100.64.0.1:7419 >/tmp/err 2>&1; then fail "install accepted a --bind off the own address of the host"; fi
+grep -q "binds 100.112.149.32" /tmp/err || { cat /tmp/err; fail "wrong reason for a --bind off the own address of the host"; }
+echo "test-container: --tailnet-addr binds by address; bad addresses, binds and a forged cuenca.env refused"
+
+# A re-run that forgets --tailnet-addr keeps the recorded addresses; --no-tailnet-addr drops them.
+bash /deploy/install.sh --no-start --allow 100.82.213.74 >/tmp/i3
+grep -q "keeping the tailnet addresses 100.112.149.32 fd7a:115c:a1e0::9237:9520" /tmp/i3 || fail "the re-run did not say it kept the addresses"
+cmp -s /smb.addr /etc/samba/smb.conf && cmp -s /env.addr /etc/cuenca/cuenca.env || fail "a re-run without --tailnet-addr rebound the host"
+
+# Full mode, with systemd, ss, curl and ip stubbed: the start path of install.sh and the listener
+# checks of check.sh, which the --no-start / --no-services runs above never reach.
+mkdir -p /sbin-fake
+printf "#!/bin/sh\ncase \"\$1\" in\n    is-active|is-enabled) case \"\$*\" in *nmbd*|*samba-ad-dc*) exit 3 ;; esac; exit 0 ;;\n    show) echo on-failure ;;\nesac\nexit 0\n" >/sbin-fake/systemctl
+printf "#!/bin/sh\np=\${2##*:}; [ -f \"/sbin-fake/listen.\$p\" ] && cat \"/sbin-fake/listen.\$p\"; true\n" >/sbin-fake/ss
+printf "#!/bin/sh\nprintf 401\n" >/sbin-fake/curl
+cp /fake/ip /sbin-fake/ip
+chmod 755 /sbin-fake/systemctl /sbin-fake/ss /sbin-fake/curl /sbin-fake/ip
+lis() { echo "LISTEN 0 50 $1 0.0.0.0:* users:((\"$2\",pid=1,fd=3))"; }
+{ lis 100.112.149.32:445 smbd; lis "[fd7a:115c:a1e0::9237:9520]:445" smbd; } >/sbin-fake/listen.445
+lis 100.112.149.32:7419 cuenca >/sbin-fake/listen.7419
+install -d -o cuenca -m 0700 /run/cuenca
+echo "4: eth4    inet 100.112.149.32/32 scope global eth4
+4: eth4    inet6 fd7a:115c:a1e0::9237:9520/128 scope global" >/fake/all; rm -f /fake/ts0
+full() { PATH=/sbin-fake:$PATH bash /deploy/check.sh >/tmp/out 2>&1; }
+PATH=/sbin-fake:$PATH bash /deploy/install.sh --allow 100.82.213.74 --tailnet-addr 100.112.149.32 --tailnet-addr fd7a:115c:a1e0::9237:9520 >/tmp/i4 2>&1 \
+    || { cat /tmp/i4; fail "the start path of install.sh failed by address"; }
+full || { cat /tmp/out; fail "check.sh (full mode) failed on a correct by-address host"; }
+grep -q "^ok   :445 listens on the tailnet addresses only: 100.112.149.32:445 \[fd7a:115c:a1e0::9237:9520\]:445" /tmp/out || { cat /tmp/out; fail "the :445 check did not use the recorded addresses"; }
+full_fails() { if full; then fail "check.sh (full mode) passed: $1"; fi; grep -q "^FAIL" /tmp/out || fail "no FAIL line: $1"; echo "test-container: full check caught: $1"; }
+cp /sbin-fake/listen.445 /l445
+lis 192.168.78.121:445 smbd >>/sbin-fake/listen.445; full_fails "smbd also on the LAN address"; cp /l445 /sbin-fake/listen.445
+lis 100.112.149.32:445 smbd >/sbin-fake/listen.445; full_fails "smbd without the IPv6 address"; cp /l445 /sbin-fake/listen.445
+lis 0.0.0.0:7419 cuenca >/sbin-fake/listen.7419; full_fails "the agent API on every interface"; lis 100.112.149.32:7419 cuenca >/sbin-fake/listen.7419
+touch /fake/ts0; cp /fake/ip /sbin-fake/ip; full_fails "a tailscale0 on a host bound by address"; rm /fake/ts0
+printf "#!/bin/sh\nprintf 200\n" >/sbin-fake/curl; full_fails "the agent API answering without a key"; printf "#!/bin/sh\nprintf 401\n" >/sbin-fake/curl
+full || { cat /tmp/out; fail "the restored host does not pass in full mode"; }
+# The start path waits for the recorded addresses: with them gone it refuses to (re)start.
+: >/fake/all
+if PATH=/sbin-fake:$PATH bash /deploy/install.sh --allow 100.82.213.74 >/tmp/i5 2>&1; then fail "install started with the tailnet addresses missing"; fi
+grep -q "no interface has 100.112.149.32" /tmp/i5 || { cat /tmp/i5; fail "install did not wait for the recorded addresses"; }
+echo "test-container: full-mode check.sh and the start path, by address"
+
+bash /deploy/install.sh --no-tailnet-addr $args >/dev/null
+grep -qx "   interfaces = tailscale0" /etc/samba/smb.conf || fail "--no-tailnet-addr did not return the host to tailscale0"
+grep -q CUENCA_TAILNET_ADDRS /etc/cuenca/cuenca.env && fail "--no-tailnet-addr kept CUENCA_TAILNET_ADDRS"
+bash /deploy/check.sh --no-services >/dev/null || fail "the tailscale0 host does not pass after the round trip"
+echo "test-container: --tailnet-addr is kept on re-runs and dropped by --no-tailnet-addr"
 echo "test-container: all passed"
 '
