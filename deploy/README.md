@@ -58,6 +58,18 @@ There are two accounts, and neither has a shell. `cuenca` runs the authority. `c
 
 Re-running `install.sh` with the same arguments changes nothing except restarting both services. Without `--binary` it keeps the installed binary.
 
+## A host without `tailscale0` (WSL2, mirrored networking)
+
+On Windows with WSL2 in mirrored networking mode, Windows' Tailscale owns the node: its tailnet addresses show up inside WSL on an `ethN` interface whose name changes between boots (the NUC had `eth4` on one boot, `eth0` and `eth5` on others), and there is no `tailscale0`. Bind by address instead. Give the host's own two tailnet addresses (Windows' `tailscale ip -4` / `-6`, or `ip -o addr` inside WSL):
+
+```bash
+sudo bash deploy/install.sh --binary ./cuenca --tailnet-addr 100.112.149.32 --tailnet-addr fd7a:115c:a1e0::9237:9520 --allow <mac ipv4> --allow <mac ipv6> ...
+```
+
+Then smb.conf binds `interfaces = <ipv4>/32 <ipv6>/128`, the agent API defaults to `<ipv4>:7419`, `/etc/cuenca/cuenca.env` records `CUENCA_TAILNET_ADDRS`, and both units' `wait-tailnet` waits until each address is on some interface. `check.sh` checks the listeners against those addresses. `--bind` must be that IPv4 address. A re-run without `--tailnet-addr` keeps the recorded addresses; `--no-tailnet-addr` returns the host to `tailscale0`. `check.sh` validates `CUENCA_TAILNET_ADDRS` and `CUENCA_BIND` themselves (canonical tailnet addresses, the bind on the host's IPv4 one) and fails if a `tailscale0` appears. It sees Linux sockets only: on the NUC, Windows' own SMB server is kept off `:445` separately (`LanmanServer` disabled; workspace runbook `docs/references/nuc-wsl-cuenca-host.md`, W6).
+
+The authority still needs a `tailscale` CLI on the host to name each request's node (`tailscale whois`). With WSL interop off, Windows' CLI cannot be reached from Linux. So run a second, whois-only Tailscale node inside WSL from Tailscale's own apt repository, in userspace mode so it adds no interface or route: `/etc/default/tailscaled` holds `FLAGS="--tun=userspace-networking"` before the package's first start, then `sudo tailscale up --hostname=<host>-cuenca --accept-dns=false --accept-routes=false --shields-up --ssh=false`. The owner approves the node and turns off its key expiry. Requests still arrive through Windows' Tailscale with the peer's own tailnet source address, and the WSL node's netmap names that peer. Agents on the same host reach the authority from Windows' address, which whois names as the Windows node.
+
 ## Operate
 
 - **Owner acts** run on the host, as the authority's user:
