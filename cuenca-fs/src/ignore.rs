@@ -15,17 +15,56 @@ pub const FORKIGNORE: &str = ".forkignore";
 /// What a location without a `.forkignore` ignores, and what registering a location
 /// writes (spec section 2): Finder and iOS metadata, installed dependencies, build
 /// output and local secrets.
+///
+/// A default that names a path a location's main tracks fails every snapshot of that
+/// location, so a build or cache directory is a default only when no repository in the
+/// workspace tracks one (measured over 102 repositories on 2026-10-27, BRO-3528).
+/// `build`, `dist`, `out`, `*.log` and `.gradle` are tracked somewhere and stay out; a
+/// location that wants them adds them to its own `.forkignore`, which replaces these
+/// rules, so it restates the ones it keeps.
 pub const DEFAULT_FORKIGNORE: &str = "\
 # Paths a Cuenca snapshot never publishes (gitignore syntax). The location owns this file.
+# Finder and iOS metadata
 .DS_Store
 ._*
 .Spotlight-V100
 .Trashes
 .fseventsd
-node_modules
-target
-.venv
+# Local secrets: every .env file except the committed examples
 .env
+.env.*
+!.env.example
+!.env.*.example
+!.env.sample
+!.env.template
+# Installed dependencies and environments
+node_modules
+.venv
+Pods
+.dart_tool
+.tox
+*.egg-info
+.direnv
+# Build output and caches
+target
+.next
+.nuxt
+.svelte-kit
+.angular
+.expo
+.output
+.vite
+.turbo
+.parcel-cache
+.cache
+__pycache__
+.pytest_cache
+.mypy_cache
+.ruff_cache
+coverage
+DerivedData
+.wrangler
+.terraform
 ";
 
 /// A parsed `.forkignore`, in gitignore syntax. Only the file at the root counts; a
@@ -222,6 +261,88 @@ mod tests {
         }
         for path in ["src/main.rs", ".envrc", "env", "targets.md", "README.md"] {
             assert!(!rules.is_ignored(path, false), "{path} should be kept");
+        }
+    }
+
+    #[test]
+    fn every_env_file_is_a_secret_except_the_committed_examples() {
+        let rules = ForkIgnore::defaults();
+        for path in [
+            ".env.local",
+            ".env.production",
+            ".env.development.local",
+            "web/.env.local",
+            "apps/api/.env.test",
+            ".env.dev",
+        ] {
+            assert!(rules.is_ignored(path, false), "{path} should be ignored");
+        }
+        for path in [
+            ".env.example",
+            "web/.env.example",
+            ".env.production.example",
+            ".env.aws.example",
+            ".env.sample",
+            ".env.template",
+            ".envrc",
+            "src/env.rs",
+        ] {
+            assert!(!rules.is_ignored(path, false), "{path} should be kept");
+        }
+    }
+
+    #[test]
+    fn build_output_and_caches_stay_out_at_any_depth() {
+        let rules = ForkIgnore::defaults();
+        for name in [
+            "Pods",
+            ".dart_tool",
+            ".tox",
+            "pkg.egg-info",
+            ".direnv",
+            ".next",
+            ".nuxt",
+            ".svelte-kit",
+            ".angular",
+            ".expo",
+            ".output",
+            ".vite",
+            ".turbo",
+            ".parcel-cache",
+            ".cache",
+            "__pycache__",
+            ".pytest_cache",
+            ".mypy_cache",
+            ".ruff_cache",
+            "coverage",
+            "DerivedData",
+            ".wrangler",
+            ".terraform",
+        ] {
+            for path in [name.to_string(), format!("apps/web/{name}")] {
+                assert!(rules.is_ignored(&path, true), "{path} should be ignored");
+            }
+        }
+    }
+
+    #[test]
+    fn paths_some_workspace_repository_tracks_are_kept() {
+        // Tracked in at least one workspace repository on 2026-10-27 (BRO-3528): a
+        // default naming them would fail every snapshot of that location.
+        let rules = ForkIgnore::defaults();
+        for (path, dir) in [
+            ("build", true),
+            ("dist", true),
+            ("out", true),
+            ("run.log", false),
+            (".gradle", true),
+            (".vercel", true),
+            (".vscode", true),
+            ("tmp", true),
+            ("build.rs", false),
+            ("coverage.md", false),
+        ] {
+            assert!(!rules.is_ignored(path, dir), "{path} should be kept");
         }
     }
 

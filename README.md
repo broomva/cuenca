@@ -38,6 +38,35 @@ command = "cuenca"
 args = ["mcp"]
 ```
 
+## What a snapshot leaves out: `.forkignore`
+
+A snapshot publishes the checkout's files except the paths that the `.forkignore` at
+the location's root names. The rules use gitignore syntax. A snapshot does **not** read
+`.gitignore`, so a path that git ignores is still published unless the `.forkignore`
+also names it.
+
+Without a `.forkignore`, the defaults in `cuenca-fs/src/ignore.rs` apply. They leave
+out four groups:
+
+- Finder metadata.
+- Every `.env` file, except committed examples such as `.env.example` and
+  `.env.*.example`.
+- Installed dependencies: `node_modules`, `.venv`, `Pods` and similar.
+- Build output and caches: `target`, `.next`, `.turbo`, `.cache`, `__pycache__`,
+  `coverage` and similar.
+
+A rule that names a path the location's main tracks fails every snapshot. So `build`,
+`dist`, `out`, `*.log` and `.gradle` are not defaults, because some repositories track
+them. A location that never tracks them can add them.
+
+A location's own `.forkignore` **replaces** the defaults. Copy the defaults into it
+first, then add your rules.
+
+Keep build caches outside the checkout, per host: `CARGO_TARGET_DIR`, sccache, and the
+bun, uv and pip caches. Every fork on that host then shares one warm cache, and nothing
+heavy goes over the network. A file over 256 MiB fails the snapshot, so large assets
+such as models, datasets and renders belong outside forks.
+
 ## Checks and `cuenca verify`
 
 A location declares its checks in `.cuenca/checks.toml` on its main. Each check is a name and an argv, run from the checkout's root, with an optional time limit (the default is 1800 s):
