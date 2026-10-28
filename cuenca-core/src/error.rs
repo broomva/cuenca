@@ -114,6 +114,10 @@ pub enum CoreError {
     HasRemote(String),
     #[error("location {0:?} has no git remote: the owner lands it with `cuenca admin land`")]
     NoRemote(String),
+    #[error("landing request: {0}")]
+    Declarations(String),
+    #[error("main kept moving while the gates evaluated the landing request; try again")]
+    MainMoved,
     #[error("log record {offset} is unreadable: {reason}")]
     CorruptLog { offset: u64, reason: String },
     #[error("the tables disagree with a replay of the log: {0}")]

@@ -2,6 +2,7 @@ use cuenca_tree::{Changeset, ContentHash, GitOid};
 use serde::{Deserialize, Serialize};
 
 use crate::checks::{CheckRun, ManifestId};
+use crate::gates::Evaluation;
 use crate::names::{ForkName, LocationName, PrincipalName};
 use crate::owner::{Holder, Writer};
 
@@ -112,10 +113,13 @@ pub enum Event {
     /// The fork's holder asked to land the fork's head changeset, which a verify of
     /// the location's main now has judged ([`crate::Verified`]). What happens to it is
     /// recorded by the events below, each about this request ([`crate::Landing`]).
+    /// `gates` is the gate engine's verdict on it against that main ([`crate::gates`]):
+    /// log-only, so a failing verdict is recorded and refuses nothing.
     LandingIntent {
         fork: ForkName,
         writer: Writer,
         changeset: ChangesetId,
+        gates: Box<Evaluation>,
     },
     /// The authority built `commit` (the changeset's target tree, with `parent`, a
     /// commit of the remote's `base_ref` whose tree is the main the request's verify

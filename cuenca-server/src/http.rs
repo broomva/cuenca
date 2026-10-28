@@ -28,11 +28,21 @@
 //! | GET | `/v1/forks/{fork}/blobs/{oid}` | a blob of that tree |
 //! | GET | `/v1/forks/{fork}/history` | the log records naming the fork (and only forks the caller reads) |
 //! | POST | `/v1/forks/{fork}/drafts` | `{epoch, changeset}`: publish a draft |
-//! | POST | `/v1/forks/{fork}/landing` | `{epoch, changeset}` (an id): ask to land |
+//! | POST | `/v1/forks/{fork}/landing` | `{epoch, changeset, declarations?}` (an id): ask to land; answers the gates' verdict, journaled with the intent |
+//! | POST | `/v1/forks/{fork}/landing/dry-run` | the same body: the verdict a landing request would get now, recording nothing (so it too needs a verify of the head against main as it is now) |
 //! | GET | `/v1/forks/{fork}/landing` | the fork's landing request, its step, and the error it is being retried for |
 //! | POST | `/v1/forks/{fork}/verdicts` | `{epoch, changeset, base, checks}`: record a verify ([`cuenca_core::checks`]) |
 //! | PUT | `/v1/blobs/{oid}` | upload a blob; `Content-Length` is its size |
 //! | POST | `/v1/blobs` | upload a batch of blobs ([`batch_header`]), all or none |
+//!
+//! The gates are log-only (spec section 4, phase 2): a failing verdict is recorded and
+//! refuses nothing. The author the gates see is the key's kind: an agent key is an
+//! agent, an owner device a human.
+//!
+//! **One verdict per head.** A landing request for the changeset that already is the
+//! fork's latest intent is a retry: it records nothing and answers the journaled
+//! verdict (`fresh: false`), whatever declarations it brings and however main moved
+//! since, and a dry run answers the same. Judging a head again is BRO-3348.
 
 use std::io::Read;
 use std::net::SocketAddr;
@@ -56,6 +66,8 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use crate::authority::{AuthError, Authority, BranchError, Caller};
+use crate::keys::PrincipalKind;
+use cuenca_core::gates::{AuthorKind, Declarations, LandingRequest};
 
 /// Largest JSON request body (a changeset of tens of thousands of ops fits).
 const MAX_JSON_BYTES: usize = 64 * 1024 * 1024;
@@ -93,6 +105,7 @@ pub fn router(authority: Arc<Authority>) -> Router {
         .route("/v1/forks/{fork}/history", get(history))
         .route("/v1/forks/{fork}/drafts", post(publish))
         .route("/v1/forks/{fork}/landing", post(landing).get(landing_state))
+        .route("/v1/forks/{fork}/landing/dry-run", post(landing_dry_run))
         .route("/v1/forks/{fork}/verdicts", post(verdict))
         .route(
             "/v1/blobs/{oid}",
@@ -221,7 +234,8 @@ impl From<CoreError> for ApiError {
             | CoreError::Tree(_)
             | CoreError::Changeset(_)
             | CoreError::BadRemote(_)
-            | CoreError::WrongLocation { .. } => (S::BAD_REQUEST, "invalid"),
+            | CoreError::WrongLocation { .. }
+            | CoreError::Declarations(_) => (S::BAD_REQUEST, "invalid"),
             CoreError::ReservedName(_) => (S::BAD_REQUEST, "reserved_name"),
             CoreError::OwnerFork(_) => (S::FORBIDDEN, "owner_fork"),
             CoreError::Hash(_) | CoreError::OidMismatch { .. } => {
@@ -234,6 +248,7 @@ impl From<CoreError> for ApiError {
             | CoreError::UnknownChangeset(_) => return Self::not_found(),
             CoreError::LocationExists(_) | CoreError::ForkExists(_) => (S::CONFLICT, "exists"),
             CoreError::NotHead { .. } => (S::CONFLICT, "not_head"),
+            CoreError::MainMoved => (S::CONFLICT, "main_moved"),
             CoreError::NotVerified { .. } => (S::CONFLICT, "not_verified"),
             CoreError::NoLanding { .. } | CoreError::LandingStep { .. } => {
                 (S::CONFLICT, "landing_step")
@@ -521,9 +536,37 @@ async fn publish(
 }
 
 #[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
 struct Landing {
     epoch: u64,
     changeset: String,
+    #[serde(default)]
+    declarations: Declarations,
+}
+
+/// The writer and the request a landing or dry run is made as, once the fork is one a
+/// write by the caller reaches (otherwise 404).
+fn landing_request(
+    a: &Authority,
+    c: &Caller,
+    name: &ForkName,
+    req: Landing,
+) -> ApiResult<(Writer, LandingRequest)> {
+    writable_fork(a, c, name)?;
+    let writer = Writer::new(c.holder.clone(), req.epoch);
+    let request = LandingRequest {
+        author: author(c),
+        declarations: req.declarations,
+    };
+    Ok((writer, request))
+}
+
+/// The author the gates see: what the key says the caller is, never what it claims.
+fn author(c: &Caller) -> AuthorKind {
+    match c.key.kind {
+        PrincipalKind::Agent => AuthorKind::Agent,
+        PrincipalKind::OwnerDevice => AuthorKind::Human,
+    }
 }
 
 async fn landing(
@@ -536,13 +579,34 @@ async fn landing(
     let req: Landing = json_body(&body)?;
     let id = parse(&req.changeset, ChangesetId::from_hex)?;
     blocking(&a, move |a| {
-        writable_fork(a, &c, &name)?;
-        let writer = Writer::new(c.holder.clone(), req.epoch);
-        let offset = a.guarded(&c.key.principal, || {
-            a.store.record_landing_intent(&name, &writer, id)
+        let (writer, request) = landing_request(a, &c, &name, req)?;
+        let landed = a.guarded(&c.key.principal, || {
+            a.store.record_landing_intent(&name, &writer, id, &request)
         })?;
         a.wake_lander();
-        Ok(Json(json!({ "offset": offset })))
+        Ok(Json(json!({
+            "offset": landed.offset,
+            "fresh": landed.fresh,
+            "gates": landed.gates,
+        })))
+    })
+    .await
+}
+
+/// "Would this land?": the gates' verdict on a landing request now, recorded nowhere.
+async fn landing_dry_run(
+    State(a): Shared,
+    Extension(c): Me,
+    Path(fork): Path<String>,
+    body: axum::body::Bytes,
+) -> ApiResult {
+    let name = parse(&fork, ForkName::new)?;
+    let req: Landing = json_body(&body)?;
+    let id = parse(&req.changeset, ChangesetId::from_hex)?;
+    blocking(&a, move |a| {
+        let (writer, request) = landing_request(a, &c, &name, req)?;
+        let gates = a.store.evaluate_landing(&name, &writer, id, &request)?;
+        Ok(Json(json!({ "gates": gates })))
     })
     .await
 }

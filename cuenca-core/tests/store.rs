@@ -318,7 +318,7 @@ fn main_advances_by_compare_and_swap() {
     ));
     for (f, id) in [("f", pf.id), ("g", pg.id)] {
         verify(&store, &fork(f), &w1(), id);
-        store.record_landing_intent(&fork(f), &w1(), id).unwrap();
+        ask_landing(&store, &fork(f), &w1(), id).unwrap();
     }
 
     // Only the fork's own request can move main.
@@ -370,26 +370,19 @@ fn a_landing_intent_names_the_head_and_a_retry_appends_nothing() {
     let p = store.publish_draft(&fork("f"), &w1(), &cs).unwrap();
     let unknown = ChangesetId::of(&write(&store, &main, &[("z", b"z")]));
     assert!(matches!(
-        store.record_landing_intent(&fork("f"), &w1(), unknown),
+        ask_landing(&store, &fork("f"), &w1(), unknown),
         Err(CoreError::NotHead { .. })
     ));
     // The head must be verified against main first.
     assert!(matches!(
-        store.record_landing_intent(&fork("f"), &w1(), p.id),
+        ask_landing(&store, &fork("f"), &w1(), p.id),
         Err(CoreError::NotVerified { .. })
     ));
     verify(&store, &fork("f"), &w1(), p.id);
-    let at = store
-        .record_landing_intent(&fork("f"), &w1(), p.id)
-        .unwrap();
+    let at = ask_landing(&store, &fork("f"), &w1(), p.id).unwrap();
     store.create_fork(&fork("g"), &loc("l"), &agent()).unwrap();
     let len = store.len().unwrap();
-    assert_eq!(
-        store
-            .record_landing_intent(&fork("f"), &w1(), p.id)
-            .unwrap(),
-        at
-    );
+    assert_eq!(ask_landing(&store, &fork("f"), &w1(), p.id).unwrap(), at);
     assert_eq!(store.len().unwrap(), len);
     let landing = store.fork(&fork("f")).unwrap().unwrap().landing.unwrap();
     assert_eq!(

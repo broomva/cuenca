@@ -69,9 +69,7 @@ fn child_writer() {
             if state.landing.map(|l| l.changeset) != Some(head) {
                 verify(&store, &fork("f"), &w1(), head);
             }
-            store
-                .record_landing_intent(&fork("f"), &w1(), head)
-                .unwrap();
+            ask_landing(&store, &fork("f"), &w1(), head).unwrap();
             store.advance_main(&fork("f"), head).unwrap();
         }
         let head = store.fork_head(&fork("f")).unwrap();

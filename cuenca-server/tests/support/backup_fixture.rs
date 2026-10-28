@@ -1,3 +1,4 @@
+use cuenca_core::gates::{AuthorKind, LandingRequest};
 use cuenca_core::{ForkName, Holder, LocationName, NodeId, PrincipalName, Store, Writer};
 use cuenca_tree::{Changeset, Entry, GitOid, Op, RepoPath, Tree};
 use std::path::Path;
@@ -73,7 +74,9 @@ pub fn fixture(path: &Path) -> Store {
     store
         .record_verify(&agent, &writer, id, Tree::new().git_tree_id(), vec![])
         .unwrap();
-    store.record_landing_intent(&agent, &writer, id).unwrap();
+    store
+        .record_landing_intent(&agent, &writer, id, &LandingRequest::new(AuthorKind::Agent))
+        .unwrap();
     store
 }
 
@@ -110,7 +113,12 @@ pub fn resume(restored: &Store) {
     let id = state.head_changeset.unwrap().0;
     let before = restored.len().unwrap();
     restored
-        .record_landing_intent(&agent, &Writer::new(holder("successor"), 2), id)
+        .record_landing_intent(
+            &agent,
+            &Writer::new(holder("successor"), 2),
+            id,
+            &LandingRequest::new(AuthorKind::Agent),
+        )
         .unwrap();
     assert_eq!(before, restored.len().unwrap());
     let offset = restored.advance_main(&agent, id).unwrap();
