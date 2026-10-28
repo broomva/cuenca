@@ -1163,7 +1163,25 @@ cuenca:
             let eq = rest.find('=').expect("equals sign after SAMPLE_PATHS");
             let after_eq = &rest[eq + 1..];
             let open = after_eq.find(['[', '(']).expect("open bracket");
-            let close = after_eq[open..].find([']', ')']).expect("close bracket") + open;
+            let mut close = open;
+            let mut quote: Option<char> = None;
+            let mut escaped = false;
+            for (idx, c) in after_eq[open + 1..].char_indices() {
+                if escaped {
+                    escaped = false;
+                } else if c == '\\' {
+                    escaped = true;
+                } else if let Some(q) = quote {
+                    if c == q {
+                        quote = None;
+                    }
+                } else if c == '"' || c == '\'' {
+                    quote = Some(c);
+                } else if c == ']' || c == ')' {
+                    close = open + 1 + idx;
+                    break;
+                }
+            }
             after_eq[open + 1..close]
                 .split(',')
                 .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
@@ -1177,6 +1195,9 @@ cuenca:
             proj_paths, diff_paths,
             "SAMPLE_PATHS divergence between policy_projection.rs and policy-differential.py"
         );
+        assert_eq!(proj_paths.len(), 22);
+        assert!(proj_paths.contains(&"İ".to_string()));
+        assert!(proj_paths.contains(&"ſ".to_string()));
     }
 
     #[test]
