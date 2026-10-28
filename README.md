@@ -4,13 +4,21 @@ Cuenca is an agent-native change plane. Agents fork any storage location, work i
 
 The design is the spec, rev 2.2: [`docs/specs/2026-10-19-agent-native-change-plane.html`](https://github.com/broomva/workspace/blob/main/docs/specs/2026-10-19-agent-native-change-plane.html) in broomva/workspace. The build plan, one graph node per crate or feature, is [`docs/plans/2026-10-21-cuenca-build-plan.html`](https://github.com/broomva/workspace/blob/main/docs/plans/2026-10-21-cuenca-build-plan.html).
 
+See the [local dogfood workflow and cleanup guide](docs/dogfood-local-workflow.md)
+and [Mac dogfood receipts](docs/dogfood-2026.md). Production acceptance waits on
+BRO-3461 (NUC host readiness) and BRO-3257 (live deployment).
+
 | Crate | What it is |
 |---|---|
 | `cuenca-tree` | Git-isomorphic trees and changesets, and a bridge that reads and writes them through git with every object checked |
 | `cuenca-core` | The authority's durable log, locations, forks with fencing epochs, landing's recorded steps, and the blob store |
 | `cuenca-fs` | Snapshot any directory into a tree under its `.forkignore`, and check a tree out with copy-on-write clones |
 | `cuenca-server` | The authority: the agent API on the tailnet, per-principal keys, node identity, the local admin socket, and the lander that opens pull requests |
-| `cuenca-cli` | The `cuenca` binary: agent verbs (`forks`, `fork`, `checkout`, `status`, `snapshot`, `diff`, `log`, `verify`, `land`) with `--json`, a per-checkout outbox, watch mode, `cuenca mcp` (the same verbs as MCP tools), `cuenca admin` owner verbs, and `cuenca serve` |
+| `cuenca-cli` | The `cuenca` binary: agent verbs (`forks`, `fork`, `checkout`, `status`, `snapshot`, `diff`, `log`, `verify`, `land`) with `--json`, the CLI-only `worktree` adapter, a per-checkout outbox, watch mode, `cuenca mcp` (the same verbs as MCP tools), `cuenca admin` owner verbs, and `cuenca serve` |
+
+For Claude Code, Codex, Grok, Gemini/Antigravity, T3 and Paseo, see
+[agent harness setup](docs/harnesses.md): `cuenca fork LOCATION --checkout DIR`
+creates a harness-compatible Git worktree.
 
 ## Agents over MCP
 
@@ -29,6 +37,40 @@ For Codex the same entry can go in `~/.codex/config.toml`:
 command = "cuenca"
 args = ["mcp"]
 ```
+
+## What a snapshot leaves out: `.forkignore`
+
+A snapshot publishes the checkout's files except the paths that the `.forkignore` at
+the location's root names. The rules use gitignore syntax. A snapshot does **not** read
+`.gitignore`, so a path that git ignores is still published unless the `.forkignore`
+also names it.
+
+Without a `.forkignore`, the defaults in `cuenca-fs/src/ignore.rs` apply. They leave
+out four groups:
+
+- Finder metadata.
+- Local secrets: every `.env` file except committed examples such as `.env.example`
+  and `.env.*.example`, private keys (`id_rsa`, `id_ed25519`, `*.p12`), and credential
+  stores (`.netrc`, `.pypirc`).
+- Installed dependencies: `node_modules` and `.venv`.
+- Tool caches that each tool regenerates: `target`, `.next/`, `.turbo/`, `__pycache__/`
+  and similar. A rule ending in `/` matches a directory only, so a file of the same
+  name is published.
+
+A rule that names a path the location's main tracks fails every snapshot until the
+rule or the path goes. So the defaults are only names that no repository is expected
+to track. They were checked against this workspace's 102 repositories (2026-10-27),
+which is a sample, not a guarantee. Names that real repositories do track are left
+out: `build`, `dist`, `out`, `*.log`, `.gradle`, `coverage`, `Pods`, `.cache`, `*.pem`
+and `.npmrc`. A location that never tracks them can add them.
+
+A location's own `.forkignore` **replaces** the defaults. Start from a copy of them,
+drop any rule that names a path the location tracks, and add your own.
+
+Keep build caches outside the checkout, per host: `CARGO_TARGET_DIR`, sccache, and the
+bun, uv and pip caches. Every fork on that host then shares one warm cache, and nothing
+heavy goes over the network. A file over 256 MiB fails the snapshot, so large assets
+such as models, datasets and renders belong outside forks.
 
 ## Checks and `cuenca verify`
 
@@ -56,9 +98,9 @@ Verify is advisory for now. The results are the caller's own, and a check reads 
 1. The authority keeps a bare repository per location in `<state>/git/`. It fetches the remote's default branch and finds the newest first-parent commit (of the last 1000) whose tree is the main the verify was judged against.
 2. It writes the fork's head tree and commits it onto that commit. The commit depends on the changeset and its parent only: its author and committer are `Cuenca`, and its date is when the changeset was first recorded. So every landing of one changeset onto one main builds the same commit, whichever fork or holder asks, and rebuilding it after a crash gives the same id. The pull request's body names who asked.
 3. It pushes the commit to `cp/<changeset id>`, but only if that branch does not exist yet. A branch already at the commit counts as pushed. A changeset landed before is reused (its commit is the same one, built again): after a takeover dropped the first request, or from another fork with the same edit, the branch already holds one commit with the fork's head tree onto a parent whose tree is the main the verify judged, and that export and its pull request become this landing's. A branch holding anything else fails the landing.
-4. It opens a pull request with `gh`, the login on the authority host, or finds the one already open from that branch.
+4. It opens a pull request with `gh`, using the authority host's token (`GH_TOKEN` from `/etc/cuenca/gh.env`, [deploy/README.md](deploy/README.md) step 5), or finds the one already open from that branch.
 
-Each step is written to the log as an intent before the call to GitHub and confirmed after it. An authority killed between the two finishes the step on restart, with no duplicate commit, branch or pull request. The authority is not a ruleset bypass actor, so GitHub's required checks gate the merge. A step that fails for a reason that may pass (the network, GitHub, a call that ran past 10 minutes and was killed) is retried every 30 s, and the error is shown at `GET /v1/forks/{fork}/landing`. A rejection that will never pass, such as push protection or a file over GitHub's size limit, is retried too; it shows there until the owner acts. A step that fails for good (the remote has no commit with the base's tree, the branch belongs to someone else, the holder was revoked) is recorded as `failed`; landing it again needs a new draft.
+Each step is written to the log as an intent before the call to GitHub and confirmed after it. An authority killed between the two finishes the step on restart, with no duplicate commit, branch or pull request. The authority is not a ruleset bypass actor, so GitHub's required checks gate the merge. A step that fails for a reason that may pass (the network, GitHub, a call that ran past 10 minutes and was killed) is retried every 30 s, and the error is shown at `GET /v1/forks/{fork}/landing`. A missing `git` or `gh` binary is retried too, since the host can gain one. A step that fails for good is recorded as `failed`, with the reason. That covers: the remote has no commit with the base's tree; the branch or a same-repository pull request from it belongs to someone else; the holder was revoked; GitHub refused the push by rule (GH013 push protection or rulesets, GH001 a file over its size limit, a token not allowed to create or update workflow files); or the remote's history fails `fsck` (a legacy `badDate`, say). Landing again needs a new draft with a changed tree, even after the cause is fixed: changeset ids are content-addressed, so the same edit from that fork is the failed changeset again. A failing `fsck` has no owner-side fix yet (BRO-3484). A pull request from another repository with a branch of the same name is ignored. `location add --remote` takes GitHub remotes only.
 
 `cuenca land` waits up to `--wait` seconds (60 by default; the MCP tool always waits 60) and reports the step it reached: `requested`, `exporting`, `exported`, `reviewing`, `in_review` (with `pr` and `url`) or `failed` (with `reason`, and exit 1). `cuenca status` shows the same step later.
 
@@ -90,7 +132,7 @@ The snapshot records Finder's own conversions as changes:
 - a symlink saved as an XSym file becomes a change of kind;
 - a lost executable bit becomes a change of mode.
 
-`cuenca diff` shows both. A file the authority cannot read, one that keeps changing while it is read, or a rule added to the fork's `.forkignore` that names a path the fork tracks, fails that fork's snapshot loudly, with the path in the log output. Nothing of the fork is published until a later pass succeeds. An owner fork is refused at creation if the location's main tracks a path its own rules name, such as a committed `.DS_Store` or `.env`, since such a fork could never be snapshotted; remove those paths from main first. To work on an owner fork elsewhere, fork it: `cuenca fork --from owner-mac` (MCP: `fork` with `from`). The authority snapshots the owner fork first, so the new fork holds every edit that reached the volume, and what Finder writes later stays in the owner fork. A file still being written then is taken as far as it had gone (the owner fork's next snapshot has it whole), and a file that changes between the scan and its upload makes the authority snapshot again; if it cannot within 5 s, the fork is refused with `409 snapshot_failed`, naming the file.
+`cuenca diff` shows both. A file the authority cannot read, one that keeps changing while it is read, or a rule added to the fork's `.forkignore` that names a path the fork tracks, fails that fork's snapshot loudly, with the path in the log output and in `status/<fork>.txt` in the volume, which Finder shows next to `forks/`. Nothing of the fork is published until a later pass succeeds, and that pass removes the status file. An owner fork is refused at creation if the location's main tracks a path its own rules name, such as a committed `.DS_Store` or `.env`, since every snapshot of it would fail until those paths were deleted from the fork; remove them from main first. To work on an owner fork elsewhere, fork it: `cuenca fork --from owner-mac` (MCP: `fork` with `from`). The authority snapshots the owner fork first, so the new fork holds every edit that reached the volume, and what Finder writes later stays in the owner fork. A file still being written then is taken as far as it had gone (the owner fork's next snapshot has it whole), and a file that changes between the scan and its upload makes the authority snapshot again; if it cannot within 5 s, the fork is refused with `409 snapshot_failed`, naming the file.
 
 More crates land as the plan's nodes do. Install, operate and recover sections arrive with the close-out node (BRO-3260).
 

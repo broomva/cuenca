@@ -1,0 +1,71 @@
+[
+  {
+    "check": "format",
+    "argv": [
+      "cargo",
+      "fmt",
+      "--all",
+      "--",
+      "--check"
+    ],
+    "start_utc": "2026-10-25T07:22:20Z",
+    "end_utc": "2026-10-25T07:22:21Z",
+    "exit": 0,
+    "seconds": 0.29147879099764396
+  },
+  {
+    "check": "clippy",
+    "argv": [
+      "cargo",
+      "clippy",
+      "--workspace",
+      "--all-targets",
+      "--locked",
+      "--",
+      "-D",
+      "warnings"
+    ],
+    "start_utc": "2026-10-25T07:22:21Z",
+    "end_utc": "2026-10-25T07:22:36Z",
+    "exit": 0,
+    "seconds": 14.821618832997046
+  },
+  {
+    "check": "test",
+    "argv": [
+      "cargo",
+      "test",
+      "--workspace",
+      "--locked"
+    ],
+    "start_utc": "2026-10-25T07:22:36Z",
+    "end_utc": "2026-10-25T07:25:54Z",
+    "exit": 0,
+    "seconds": 198.4011494590086
+  },
+  {
+    "check": "msrv",
+    "argv": [
+      "cargo",
+      "+1.93.0",
+      "check",
+      "--workspace",
+      "--locked"
+    ],
+    "start_utc": "2026-10-25T07:25:54Z",
+    "end_utc": "2026-10-25T07:26:10Z",
+    "exit": 0,
+    "seconds": 15.873386125007528
+  },
+  {
+    "check": "audit",
+    "argv": [
+      "cargo",
+      "audit"
+    ],
+    "start_utc": "2026-10-25T07:26:10Z",
+    "end_utc": "2026-10-25T07:26:11Z",
+    "exit": 0,
+    "seconds": 1.5120129170099972
+  }
+]

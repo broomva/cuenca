@@ -1,19 +1,39 @@
 #!/usr/bin/env bash
 # Mutation check for cuenca-cli: each mutant breaks one guarantee, and the tests must
 # fail for every one. Run from the crate directory: scripts/mutation-check.sh
+# Use --worktree to prove just the harness adapter guards (full CLI baseline still runs).
 # Prints one line per mutant and exits non-zero if any mutant survives. The source is
-# restored after each mutant, also on interrupt.
+# restored after each mutant, also on interrupt. Exit codes: ../scripts/mutation-guard.sh.
 set -uo pipefail
+worktree_only=${1:-}
+case $worktree_only in
+  '' | --worktree) ;;
+  *) echo 'usage: mutation-check.sh [--worktree]' >&2; exit 2 ;;
+esac
 cd "$(dirname "$0")/.."
-backup=$(mktemp -d)
+. ../scripts/mutation-guard.sh
+backup=$guard_backup
 lock=$(git rev-parse --show-toplevel)/Cargo.lock
-cp "$lock" "$backup/Cargo.lock"
-restore() { [ -n "${current:-}" ] && cp "$backup/file" "$current"; current=; cp "$backup/Cargo.lock" "$lock"; }
-trap 'restore; rm -rf "$backup"' EXIT
-trap 'exit 130' INT TERM
+# Checked byte for byte: a truncated copy (full scratch disk) would be copied back over the real lock.
+cp "$lock" "$backup/Cargo.lock" && cmp -s "$lock" "$backup/Cargo.lock" || { echo "cannot back up $lock"; exit 6; }
+# A failed copy back keeps the run dir, and .backup/path or .backup/lock-failed makes the
+# next run refuse to start. .backup/path goes only after the lock is back too.
+restore() {
+  if [ -n "${current:-}" ] && ! cp "$backup/file" "$current"; then
+    echo "restore failed: $current is still mutated; its original is $backup/file" >&2; trap - EXIT; exit 4
+  fi
+  if ! cp "$backup/Cargo.lock" "$lock"; then
+    : >"$backup/lock-failed"
+    echo "restore failed: $lock; its original is $backup/Cargo.lock" >&2; trap - EXIT; exit 4
+  fi
+  current=; rm -f "$backup/path"
+}
+trap 'guard_kill; restore; guard_cleanup' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # A mutant only counts as killed against a suite that passes unmutated.
-if ! cargo test -q -p cuenca-cli >"$backup/log" 2>&1; then
+if ! bounded cargo test -q -p cuenca-cli >"$backup/log" 2>&1; then
   echo "baseline is red: fix the suite before reading any mutant verdict"; cat "$backup/log"; exit 2
 fi
 echo "baseline  green"
@@ -21,7 +41,9 @@ echo "baseline  green"
 survived=0
 mutate() { # file, old, new, then the cargo test arguments that should catch it
   local file=$1 old=$2 new=$3; shift 3
-  current=$file; cp "$file" "$backup/file"
+  if [ "$worktree_only" = --worktree ] && [ "$file" != src/worktree.rs ] && [ "$file" != src/main.rs ]; then return; fi
+  cp "$file" "$backup/file" && echo "$PWD/$file" >"$backup/path" || { echo "cannot back up $file"; exit 6; }
+  current=$file
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
@@ -29,10 +51,21 @@ if s.count(sys.argv[2]) != 1: sys.exit("anchor not unique: " + sys.argv[2])
 p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $file: $old"; survived=1; restore; return; fi
-  if cargo test -q -p cuenca-cli "$@" >"$backup/log" 2>&1; then
+  bounded cargo test -q -p cuenca-cli "$@" >"$backup/log" 2>&1; local status=$?
+  if [ "$status" -ge 128 ]; then
+    # The guard or the test run was itself killed by a signal: no verdict is possible.
+    echo "ABORTED   $file: $old (status $status)"; exit 3
+  elif [ "$status" -eq 0 ]; then
     echo "SURVIVED  $file: $old"; survived=1
   elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' "$backup/log"; then
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; survived=1
+  elif [ "$status" -eq 124 ] || [ "$status" -eq 125 ]; then
+    # Stopped by the guard: a kill only if the tests had started, not mid-build.
+    if grep -qE '^running [0-9]+ tests?$' "$backup/log"; then
+      echo "killed    $file: $old ($(tail -n 1 "$backup/log"))"
+    else
+      echo "NO TEST   $file: $old (stopped before any test ran: $(tail -n 1 "$backup/log"))"; survived=1
+    fi
   else
     echo "killed    $file: $old"
   fi
@@ -146,5 +179,20 @@ mutate src/verbs.rs '        exit: if matches!(status.as_str(), "failed" | "drop
 # Forking a fork: --from forks the fork, and MCP takes exactly one of location and from.
 mutate src/verbs.rs '        Some(from) => client.branch_fork(&name, from)?,' '        Some(_) => client.create_fork(&name, &location)?,' --test cli every_agent_verb
 mutate src/mcp.rs '            Self::Fork(f) if f.location.is_some() == f.from.is_some() => {' '            Self::Fork(f) if false && f.location.is_some() == f.from.is_some() => {' --test mcp owner_acts_are_no_tools
+
+# Harness worktrees: current round-1 contracts, including no-follow component walks.
+mutate src/worktree.rs 'let root = prepare(dest)?;' 'let root = Local::prepare(dest)?;' --test worktree_review worktree_refuses_every
+mutate src/worktree.rs 'std::fs::read_dir(&root)?.next().is_none()' 'true' --test worktree worktree_refuses
+mutate src/worktree.rs 'Local::prepare_root(root)' 'Ok(root)' --test worktree worktree_refuses
+mutate src/worktree.rs 'if key.to_string_lossy().starts_with("GIT_") {' 'if false {' --test worktree worktree_ignores
+mutate src/worktree.rs '            "--no-checkout".as_ref(),' '' --test worktree worktree_fork
+mutate src/worktree.rs '    git(&root, &["read-tree".as_ref(), commit.as_ref()], b"")?;' '' --test worktree worktree_fork
+mutate src/worktree.rs 'if let Some(found) = source.fetch(oid)? {' 'if let Some(found) = None::<Fetched> {' --test worktree_review worktree_fetches
+mutate src/worktree.rs 'let object = objects.join(&hex[..2]).join(&hex[2..]);' 'let _ = client.fork_blob(&name, entry.oid())?; let object = objects.join(&hex[..2]).join(&hex[2..]);' --test worktree_review worktree_fetches
+mutate src/worktree.rs '        .with_isolated_config()' '' --test worktree_review worktree_private_repo
+mutate src/worktree.rs '    git(&root, &["update-index".as_ref(), "--refresh".as_ref()], b"")?;' '' --test worktree_review worktree_initial
+mutate src/worktree.rs '    local.save_cache(&cache)?;' '    let _ = &cache;' --test worktree_review worktree_initial
+mutate src/worktree.rs '"clean": seen.changes.is_empty(), "ignored": seen.ignored' '"clean": false, "ignored": Vec::<String>::new()' --test worktree_review worktree_initial
+mutate src/main.rs '                cuenca_cli::worktree::prepare(dir)?;' '                let _ = dir;' --test worktree_review worktree_invalid
 
 exit $survived

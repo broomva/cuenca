@@ -5,6 +5,7 @@
 //! <volume>/main/<location>/   the location's main
 //! <volume>/forks/<fork>/      the fork's head: its latest draft, or its base before one
 //! <volume>/forks/owner-<x>/   an owner fork: written in place from Finder, snapshotted
+//! <volume>/status/<fork>.txt  why an owner fork's snapshots fail, while they do
 //! <volume>/.cuenca/           the materialiser's own state, 0700: staging and records
 //! ```
 //!
@@ -40,6 +41,9 @@
 //! [`VolumeConfig::snapshot_interval`] (10 s by default; the spec's row is 60 s). A file
 //! the authority cannot read, or one that keeps changing, fails that fork's snapshot
 //! loudly, naming the path, and nothing of it is published until a later pass succeeds.
+//! So that the owner sees it in Finder, not only in the authority's log, the failure is
+//! also written to `status/<fork>.txt` (read-only, like `main/`), which the next
+//! snapshot that succeeds removes.
 //!
 //! # Modes
 //!
@@ -229,6 +233,8 @@ pub struct Volume {
     retry_after: Duration,
     /// Each owner fork's stat cache, so a snapshot reads only files that changed.
     caches: HashMap<ForkName, cuenca_fs::StatCache>,
+    /// The error each owner fork's status file holds, as written by this materialiser.
+    statuses: HashMap<ForkName, String>,
     /// The lock that keeps this the volume's only materialiser, held while it lives.
     _lock: File,
     next_staging: u64,
@@ -240,6 +246,8 @@ impl Volume {
     /// Leftovers of a materialiser that was killed are removed: what it was staging was
     /// never shown.
     pub fn open(root: &Path, objects: &Path) -> io::Result<Self> {
+        // Absolute, so a host path is told apart from a path in a fork by where it starts.
+        let root = &std::path::absolute(root)?;
         fs::create_dir_all(root)?;
         fs::set_permissions(root, fs::Permissions::from_mode(DIR_MODE))?;
         let private = root.join(".cuenca");
@@ -263,6 +271,8 @@ impl Volume {
         let state = private.join("state");
         for dir in ["main", "forks"] {
             fs::create_dir_all(state.join(dir))?;
+        }
+        for dir in ["main", "forks", STATUS] {
             let shown = root.join(dir);
             fs::create_dir_all(&shown)?;
             fs::set_permissions(&shown, fs::Permissions::from_mode(DIR_MODE))?;
@@ -277,6 +287,7 @@ impl Volume {
             failed: HashMap::new(),
             retry_after: RETRY_AFTER,
             caches: HashMap::new(),
+            statuses: HashMap::new(),
             _lock: lock,
             next_staging: 0,
         })
@@ -472,9 +483,53 @@ impl Volume {
             return None;
         }
         let cache = self.caches.entry(fork.name.clone()).or_default();
-        Some(snapshot_one(store, fork, &dir, cache))
+        let result = snapshot_one(store, fork, &dir, cache);
+        if let Err(e) = self.set_status(&fork.name, result.as_ref().err()) {
+            tracing::warn!(fork = %fork.name, error = %e, "could not update the fork's status file");
+        }
+        Some(result)
+    }
+
+    /// Write why `fork`'s snapshot failed to `status/<fork>.txt`, or remove the file
+    /// once a snapshot succeeds. The file is staged and renamed into place, so a reader
+    /// sees a whole one; it is rewritten only when the error changes, so its
+    /// modification time is when this failure was first seen.
+    fn set_status(&mut self, fork: &ForkName, error: Option<&String>) -> io::Result<()> {
+        let path = self.root.join(STATUS).join(format!("{fork}.txt"));
+        let Some(error) = error else {
+            self.statuses.remove(fork);
+            return match fs::remove_file(&path) {
+                Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(()),
+                other => other,
+            };
+        };
+        if self.statuses.get(fork) == Some(error) {
+            return Ok(());
+        }
+        let text = format!(
+            "The authority cannot snapshot owner fork {fork}:\n\n  {error}\n\nNothing \
+             written to forks/{fork}/ is published until this is fixed. The authority tries \
+             again every few seconds and removes this file once it succeeds; the file's \
+             modification time is when this failure was first seen.\n"
+        );
+        let staged = self.staging.join(self.next_staging.to_string());
+        self.next_staging += 1;
+        let written = (|| {
+            fs::write(&staged, text)?;
+            fs::set_permissions(&staged, fs::Permissions::from_mode(FILE_MODE))?;
+            fs::rename(&staged, &path)
+        })();
+        if written.is_err() {
+            let _ = fs::remove_file(&staged);
+        }
+        written?;
+        self.statuses.insert(fork.clone(), error.clone());
+        Ok(())
     }
 }
+
+/// The volume's directory of owner fork status files.
+const STATUS: &str = "status";
 
 /// The file content a snapshot of an owner fork keeps from its read and uploads as it
 /// was hashed, so a client still writing a file cannot fail the upload. A larger file,
@@ -500,34 +555,38 @@ fn snapshot_one(
     publish_scanned(store, fork, scanned, cache)
 }
 
-/// A scan of an owner fork not yet published, and its stat cache as it was before.
+/// A scan of an owner fork not yet published, and the stat cache that scan left. The
+/// fork's own cache is not touched until the scan's draft is published.
 struct Scanned {
     snap: cuenca_fs::Snapshot,
-    before: cuenca_fs::StatCache,
+    cache: cuenca_fs::StatCache,
 }
 
 fn scan_fork(
     store: &Store,
     fork: &cuenca_core::Fork,
     dir: &Path,
-    cache: &mut cuenca_fs::StatCache,
+    cache: &cuenca_fs::StatCache,
 ) -> Result<Scanned, String> {
     let head = store.tree(fork.head).map_err(|e| e.to_string())?;
-    let before = cache.clone();
-    let snap = scan(dir, &head, cache).map_err(|e| e.to_string())?;
-    Ok(Scanned { snap, before })
+    let mut cache = cache.clone();
+    let snap = scan(dir, &head, &mut cache).map_err(|e| e.to_string())?;
+    Ok(Scanned { snap, cache })
 }
 
 /// Publish a scan. The stat cache may only name content the log holds, since a file it
-/// answers is not read and so would be uploaded by path: a scan that publishes nothing
-/// puts the cache back as it was before that scan.
+/// answers is not read and so would be uploaded by path: the scan's cache replaces the
+/// fork's only once its publish returns, so a scan whose publish fails (or panics)
+/// leaves the cache as it was.
 fn publish_scanned(
     store: &Store,
     fork: &cuenca_core::Fork,
     scanned: Scanned,
     cache: &mut cuenca_fs::StatCache,
 ) -> Result<SnapshotOne, String> {
-    publish(store, fork, scanned.snap).inspect_err(|_| *cache = scanned.before)
+    let published = publish(store, fork, scanned.snap)?;
+    *cache = scanned.cache;
+    Ok(published)
 }
 
 /// Scan an owner fork's directory against `head`, keeping [`KEEP`] of what it reads.
@@ -855,6 +914,22 @@ mod tests {
     use super::*;
     use cuenca_tree::{Entry, RepoPath, Tree};
 
+    /// A volume opened by a relative path keeps its absolute path, which is how a host
+    /// path in an error is told apart from a path inside a fork.
+    #[test]
+    fn a_volume_opened_by_a_relative_path_is_absolute() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let cwd = std::env::current_dir().unwrap();
+        let up = "../".repeat(cwd.components().count() - 1);
+        let target = dir.path().join("volume");
+        let relative = PathBuf::from(up).join(target.strip_prefix("/").unwrap());
+        assert!(relative.is_relative());
+        let volume = Volume::open(&relative, store.object_dir()).unwrap();
+        assert!(volume.root().is_absolute(), "{}", volume.root().display());
+        assert!(volume.root().join("main").is_dir());
+    }
+
     /// Below `converge`, which never shows an owner fork that is there already: if it
     /// ever did, the folder Finder writes is refused, never exchanged out of place.
     #[test]
@@ -940,7 +1015,7 @@ mod tests {
         }
         let mut cache = cuenca_fs::StatCache::new();
         // The large file is uploaded by path; changed first, it fails the attempt.
-        let scanned = scan_fork(&store, &fork, &root, &mut cache).unwrap();
+        let scanned = scan_fork(&store, &fork, &root, &cache).unwrap();
         let mut changed = big.clone();
         changed[0] = b'c';
         fs::write(root.join("big.bin"), &changed).unwrap();
@@ -953,7 +1028,7 @@ mod tests {
             .unwrap()
             .set_modified(old)
             .unwrap();
-        let scanned = scan_fork(&store, &fork, &root, &mut cache).unwrap();
+        let scanned = scan_fork(&store, &fork, &root, &cache).unwrap();
         let x = scanned
             .snap
             .new_blobs
@@ -971,6 +1046,49 @@ mod tests {
             .tree(store.fork(&owner).unwrap().unwrap().head)
             .unwrap();
         assert_eq!(head.get("x.md"), Some(&Entry::file(b"first\n")));
+    }
+
+    /// `snapshot_one` advances the fork's stat cache only with a publish: a publish that
+    /// fails after the scan (the blob store's staging directory refuses writes) leaves
+    /// the cache empty, and the next, successful one fills it.
+    #[test]
+    fn a_snapshot_advances_the_cache_only_when_it_publishes() {
+        use std::os::unix::fs::PermissionsExt;
+        if rustix::process::geteuid().is_root() {
+            return; // root writes through mode 0500
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path().join("store")).unwrap();
+        let main = Tree::new();
+        let site = LocationName::new("site").unwrap();
+        store.add_location(&site, None, &main).unwrap();
+        let owner = ForkName::new("owner-mac").unwrap();
+        store.create_fork(&owner, &site, &Holder::volume()).unwrap();
+        let fork = store.fork(&owner).unwrap().unwrap();
+        let root = dir.path().join("fork");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("x.md"), b"first\n").unwrap();
+        // Old enough that a stat cache trusts it.
+        let old = std::time::SystemTime::now() - Duration::from_secs(60);
+        File::options()
+            .write(true)
+            .open(root.join("x.md"))
+            .unwrap()
+            .set_modified(old)
+            .unwrap();
+        let tmp = dir.path().join("store/blobs/tmp");
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o500)).unwrap();
+        let mut cache = cuenca_fs::StatCache::new();
+        let failed = snapshot_one(&store, &fork, &root, &mut cache);
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(failed.is_err(), "{failed:?}");
+        assert!(
+            cache.is_empty(),
+            "the cache names x.md, which the log does not hold"
+        );
+        let (published, _) = snapshot_one(&store, &fork, &root, &mut cache).unwrap();
+        assert!(published.is_some());
+        assert_eq!(cache.len(), 1);
     }
 
     /// A folder swapped for a link to a folder outside the fork, between the scan and

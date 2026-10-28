@@ -45,7 +45,15 @@ jobs:
         with:
           toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
+      # Keep the normal temp environment for tests outside the harness adapter.
+      - run: cargo test --workspace --locked -- --skip worktree
+      # Worktree bootstrap refuses symlinks in every supplied path component.
+      # Only these tests need a physical path (macOS may supply a /var alias).
+      - name: Worktree tests (physical temporary path)
+        run: |
+          mkdir -p "$RUNNER_TEMP/cuenca"
+          export TMPDIR="$(cd "$RUNNER_TEMP/cuenca" && pwd -P)"
+          cargo test --workspace --locked worktree
 
   test-macos:
     name: Test (macOS)
@@ -56,7 +64,15 @@ jobs:
         with:
           toolchain: "1.99.0"
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test --workspace --locked
+      # Keep the normal temp environment for tests outside the harness adapter.
+      - run: cargo test --workspace --locked -- --skip worktree
+      # Worktree bootstrap refuses symlinks in every supplied path component.
+      # Only these tests need a physical path (macOS may supply a /var alias).
+      - name: Worktree tests (physical temporary path)
+        run: |
+          mkdir -p "$RUNNER_TEMP/cuenca"
+          export TMPDIR="$(cd "$RUNNER_TEMP/cuenca" && pwd -P)"
+          cargo test --workspace --locked worktree
 
   policy-differential:
     # The gate engine reads .control/policy.yaml as p9 (PyYAML) does: generated policies
@@ -96,6 +112,11 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
+    # rustsec/audit-check reports warnings (e.g. unmaintained crates) as a check
+    # run; on push the default token is read-only and the call 403s.
+    permissions:
+      contents: read
+      checks: write
     steps:
       - uses: actions/checkout@v7
       - uses: rustsec/audit-check@v2
@@ -107,5 +128,5 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
-      - run: bash -n deploy/install.sh deploy/check.sh deploy/test-container.sh deploy/test-systemd.sh deploy/wait-tailnet
+      - run: bash -n deploy/install.sh deploy/check.sh deploy/test-container.sh deploy/test-systemd.sh deploy/wait-tailnet deploy/tailnet-addr.sh
       - run: bash deploy/test-container.sh

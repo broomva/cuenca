@@ -1,0 +1,38 @@
+[
+  {
+    "check": "deploy-syntax",
+    "argv": [
+      "bash",
+      "-n",
+      "deploy/install.sh",
+      "deploy/check.sh",
+      "deploy/test-container.sh",
+      "deploy/test-systemd.sh",
+      "deploy/wait-tailnet",
+      "deploy/tailnet-addr.sh"
+    ],
+    "start_utc": "2026-10-25T07:22:22Z",
+    "exit": 0,
+    "seconds": 0.05241037499217782
+  },
+  {
+    "check": "deploy-container",
+    "argv": [
+      "bash",
+      "deploy/test-container.sh"
+    ],
+    "start_utc": "2026-10-25T07:22:22Z",
+    "exit": 0,
+    "seconds": 39.84229058299388
+  },
+  {
+    "check": "deploy-systemd",
+    "argv": [
+      "bash",
+      "deploy/test-systemd.sh"
+    ],
+    "start_utc": "2026-10-25T07:23:02Z",
+    "exit": 1,
+    "seconds": 0.022467832997790538
+  }
+]

@@ -2,18 +2,34 @@
 # Mutation check for cuenca-server: each mutant breaks one guarantee, and the tests must
 # fail for every one. Run from the crate directory: scripts/mutation-check.sh
 # Prints one line per mutant and exits non-zero if any mutant survives. The source is
-# restored after each mutant, also on interrupt.
+# restored after each mutant, also on interrupt. Exit codes: ../scripts/mutation-guard.sh.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-backup=$(mktemp -d)
+. ../scripts/mutation-guard.sh
+backup=$guard_backup
 lock=$(git rev-parse --show-toplevel)/Cargo.lock
-cp "$lock" "$backup/Cargo.lock"
-restore() { [ -n "${current:-}" ] && cp "$backup/file" "$current"; current=; cp "$backup/Cargo.lock" "$lock"; }
-trap 'restore; rm -rf "$backup"' EXIT
-trap 'exit 130' INT TERM
+# Checked byte for byte: a truncated copy (full scratch disk) would be copied back over the real lock.
+cp "$lock" "$backup/Cargo.lock" && cmp -s "$lock" "$backup/Cargo.lock" || { echo "cannot back up $lock"; exit 6; }
+# A failed copy back keeps the run dir, and .backup/path or .backup/lock-failed makes the
+# next run refuse to start. .backup/path goes only after the lock is back too.
+restore() {
+  if [ -n "${current:-}" ] && ! cp "$backup/file" "$current"; then
+    echo "restore failed: $current is still mutated; its original is $backup/file" >&2; trap - EXIT; exit 4
+  fi
+  if ! cp "$backup/Cargo.lock" "$lock"; then
+    : >"$backup/lock-failed"
+    echo "restore failed: $lock; its original is $backup/Cargo.lock" >&2; trap - EXIT; exit 4
+  fi
+  current=; rm -f "$backup/path"
+}
+trap 'guard_kill; restore; guard_cleanup' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # A mutant only counts as killed against a suite that passes unmutated.
-if ! cargo test -q -p cuenca-server >"$backup/log" 2>&1; then
+baseline_args=()
+if [ "${1:-}" = --restore-only ]; then baseline_args=(--lib restore::tests); fi
+if ! bounded cargo test -q -p cuenca-server "${baseline_args[@]}" >"$backup/log" 2>&1; then
   echo "baseline is red: fix the suite before reading any mutant verdict"; cat "$backup/log"; exit 2
 fi
 echo "baseline  green"
@@ -21,7 +37,8 @@ echo "baseline  green"
 survived=0
 mutate() { # file, old, new, then the cargo test arguments that should catch it
   local file=$1 old=$2 new=$3; shift 3
-  current=$file; cp "$file" "$backup/file"
+  cp "$file" "$backup/file" && echo "$PWD/$file" >"$backup/path" || { echo "cannot back up $file"; exit 6; }
+  current=$file
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
@@ -29,15 +46,61 @@ if s.count(sys.argv[2]) != 1: sys.exit("anchor not unique: " + sys.argv[2])
 p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $file: $old"; survived=1; restore; return; fi
-  if cargo test -q -p cuenca-server "$@" >"$backup/log" 2>&1; then
+  bounded cargo test -q -p cuenca-server "$@" >"$backup/log" 2>&1; local status=$?
+  if [ "$status" -ge 128 ]; then
+    # The guard or the test run was itself killed by a signal: no verdict is possible.
+    echo "ABORTED   $file: $old (status $status)"; exit 3
+  elif [ "$status" -eq 0 ]; then
     echo "SURVIVED  $file: $old"; survived=1
   elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' "$backup/log"; then
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; survived=1
+  elif [ "$status" -eq 124 ] || [ "$status" -eq 125 ]; then
+    # Stopped by the guard: a kill only if the tests had started, not mid-build.
+    if grep -qE '^running [0-9]+ tests?$' "$backup/log"; then
+      echo "killed    $file: $old ($(tail -n 1 "$backup/log"))"
+    else
+      echo "NO TEST   $file: $old (stopped before any test ran: $(tail -n 1 "$backup/log"))"; survived=1
+    fi
   else
     echo "killed    $file: $old"
   fi
   restore
 }
+
+# Backup restore refusals (BRO-3258). --restore-only runs this bounded slice.
+mutate src/restore.rs 'trust
+            .verify_strict(&signed_bytes(&manifest)?, &signature)
+            .is_ok()' true --lib restore::tests::forged_manifest
+mutate src/restore.rs 'manifest.offset == manifest.records.checked_sub(1)' true --lib restore::tests::signed_offset_and_journal
+mutate src/restore.rs 'digest(&journal) == manifest.journal_sha256' true --lib restore::tests::journal_digest_size
+mutate src/restore.rs 'journal.len() as u64 == manifest.journal_size' true --lib restore::tests::journal_digest_size
+mutate src/restore.rs 'prefix.records.len() as u64 == manifest.records' true --lib restore::tests::signed_offset_and_journal
+mutate src/restore.rs '.all(|(i, r)| r.offset == i as u64)' '.all(|(i, r)| r.offset == i as u64 || true)' --lib restore::tests::signed_offset_and_journal
+mutate src/restore.rs 'reachable == listed' true --lib restore::tests::incomplete_and_duplicate
+mutate src/restore.rs 'digest(&plain) == blob.sha256' true --lib restore::tests::signed_plaintext_hash
+mutate src/restore.rs 'plain.len() as u64 == blob.size' true --lib restore::tests::signed_plaintext_hash
+mutate src/restore.rs 'verified.oid() == blob.oid' true --lib restore::tests::signed_plaintext_hash
+mutate src/restore.rs 'bytes.len() as u64 == object.size' true --lib restore::tests::missing_truncated
+mutate src/restore.rs 'digest(&bytes) == object.sha256' true --lib restore::tests::missing_truncated
+mutate src/restore.rs 'manifest.format_version == FORMAT_VERSION' true --lib restore::tests::journal_digest_size
+mutate src/restore.rs 'envelope.format_version == FORMAT_VERSION' true --lib restore::tests::envelope_tampering
+mutate src/restore.rs 'manifest.signing_key_id == digest(trust.as_bytes())' true --lib restore::tests::journal_digest_size
+mutate src/restore.rs 'verified.sha256() == info.sha256' 'true' --lib restore::tests::backup_independently
+mutate src/restore.rs 'verified.size() == info.size' 'true' --lib restore::tests::backup_independently
+mutate src/restore.rs 'previous == manifest.journal_sha256' 'true' --lib restore::tests::opaque_commits
+mutate src/restore.rs 'rustix::fs::OFlags::NOFOLLOW | rustix::fs::OFlags::NONBLOCK' 'rustix::fs::OFlags::NONBLOCK' --lib restore::tests::local_objects
+# P20 r1: relative publication, private creation and canonical order.
+mutate src/restore.rs '        .filter(|parent| !parent.as_os_str().is_empty())' '' --test restore relative_single_component_destination_succeeds_and_is_private
+mutate src/restore.rs '.permissions(fs::Permissions::from_mode(0o700))' '.permissions(fs::Permissions::from_mode(0o755))' --lib restore::tests::staging_is_private_at_creation_and_manifest_order_is_enforced
+mutate src/restore.rs '.all(|pair| pair[0].oid < pair[1].oid)' '.all(|_| true)' --lib restore::tests::staging_is_private_at_creation_and_manifest_order_is_enforced
+mutate src/restore.rs 'pair[0].oid < pair[1].oid' 'pair[0].oid <= pair[1].oid' --lib restore::tests::incomplete_and_duplicate_blob_lists_refuse
+if [ "${1:-}" = --restore-only ]; then
+  if ! bounded cargo test -q -p cuenca-server --lib restore::tests >"$backup/log" 2>&1; then
+    echo "restored baseline is red"; cat "$backup/log"; exit 2
+  fi
+  echo "restored baseline green"
+  exit "$survived"
+fi
 
 # Keys: only the right secret, with the right prefix, verifies; one key per principal;
 # removal ends a key; the file is private.

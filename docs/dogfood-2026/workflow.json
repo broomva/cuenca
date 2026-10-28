@@ -1,0 +1,225 @@
+{
+  "start_utc": "2026-10-25T07:26:29Z",
+  "source_sha": "d2f3b92ae3c5af53ece908aa7cf1c668f5b0cda3",
+  "identity": "loopback test fixture; no real tailnet authentication",
+  "github_enabled": true,
+  "host": "Darwin arm64",
+  "checkout": {
+    "clean": true,
+    "cloned": 0,
+    "copied": 96,
+    "epoch": 1,
+    "files": 96,
+    "fork": "bro-3259-docs",
+    "head": "c17ac6b0e26453f28936f18cd636f9e73282f198",
+    "ignored": [],
+    "location": "cuenca",
+    "root": "/Volumes/Broomva/scratch/bro-3259/trial-5/checkout"
+  },
+  "primary_snapshot": {
+    "changes": [
+      {
+        "change": "added",
+        "kind": "file",
+        "path": "docs/dogfood-local-workflow.md"
+      }
+    ],
+    "flush": {
+      "error": null,
+      "offline": false,
+      "pending": 0,
+      "published": [
+        {
+          "fenced": false,
+          "fork": "bro-3259-docs",
+          "id": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+          "target": "ccdf02aa132117edd64fd9346837efef120dc422"
+        }
+      ]
+    }
+  },
+  "primary_verify": {
+    "base": "c17ac6b0e26453f28936f18cd636f9e73282f198",
+    "candidate": "ccdf02aa132117edd64fd9346837efef120dc422",
+    "changeset": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+    "checks": [],
+    "fork": "bro-3259-docs",
+    "manifest": null,
+    "offset": 4,
+    "passed": true,
+    "record_error": null,
+    "recorded": true
+  },
+  "primary_land_started_utc": "2026-10-25T07:26:32Z",
+  "primary_land": {
+    "changeset": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+    "fork": "bro-3259-docs",
+    "offset": 5,
+    "pr": 30,
+    "reason": null,
+    "retrying_after": null,
+    "status": "in_review",
+    "url": "https://github.com/broomva/cuenca/pull/30",
+    "waiting_for": null
+  },
+  "request_to_pr_or_wait_seconds": 3.187882375001209,
+  "primary_log": {
+    "fork": "bro-3259-docs",
+    "records": [
+      {
+        "at_ms": 1792913190714,
+        "event": {
+          "base": "c17ac6b0e26453f28936f18cd636f9e73282f198",
+          "event": "fork_created",
+          "fork": "bro-3259-docs",
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "dogfood-mac"
+          },
+          "location": "cuenca"
+        },
+        "offset": 2
+      },
+      {
+        "at_ms": 1792913191598,
+        "event": {
+          "changeset": {
+            "base": "c17ac6b0e26453f28936f18cd636f9e73282f198",
+            "ops": 1,
+            "target": "ccdf02aa132117edd64fd9346837efef120dc422"
+          },
+          "event": "draft_published",
+          "fork": "bro-3259-docs",
+          "id": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+          "writer": {
+            "epoch": 1,
+            "holder": {
+              "node": "dogfoodlocalnode",
+              "principal": "dogfood-mac"
+            }
+          }
+        },
+        "offset": 3
+      },
+      {
+        "at_ms": 1792913192201,
+        "event": {
+          "base": "c17ac6b0e26453f28936f18cd636f9e73282f198",
+          "candidate": "ccdf02aa132117edd64fd9346837efef120dc422",
+          "changeset": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+          "checks": [],
+          "event": "verify_recorded",
+          "fork": "bro-3259-docs",
+          "manifest": null,
+          "writer": {
+            "epoch": 1,
+            "holder": {
+              "node": "dogfoodlocalnode",
+              "principal": "dogfood-mac"
+            }
+          }
+        },
+        "offset": 4
+      },
+      {
+        "at_ms": 1792913192231,
+        "event": {
+          "changeset": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+          "event": "landing_intent",
+          "fork": "bro-3259-docs",
+          "writer": {
+            "epoch": 1,
+            "holder": {
+              "node": "dogfoodlocalnode",
+              "principal": "dogfood-mac"
+            }
+          }
+        },
+        "offset": 5
+      },
+      {
+        "at_ms": 1792913194322,
+        "event": {
+          "base_ref": "main",
+          "branch": "cp/81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+          "changeset": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+          "commit": "f340cb61cf44db2442202a1a0254de9f03bcbc26",
+          "event": "export_intent",
+          "fork": "bro-3259-docs",
+          "parent": "d2f3b92ae3c5af53ece908aa7cf1c668f5b0cda3"
+        },
+        "offset": 6
+      },
+      {
+        "at_ms": 1792913194762,
+        "event": {
+          "changeset": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+          "event": "exported",
+          "fork": "bro-3259-docs"
+        },
+        "offset": 7
+      },
+      {
+        "at_ms": 1792913194768,
+        "event": {
+          "changeset": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+          "event": "review_intent",
+          "fork": "bro-3259-docs"
+        },
+        "offset": 8
+      },
+      {
+        "at_ms": 1792913195271,
+        "event": {
+          "changeset": "81a6cb1d11cb73d8a9301f90ba5c1ccd40e65b00987f654e28ef9407455fb38b",
+          "event": "in_review",
+          "fork": "bro-3259-docs",
+          "pr": 30,
+          "url": "https://github.com/broomva/cuenca/pull/30"
+        },
+        "offset": 9
+      }
+    ]
+  },
+  "scratch_verify": {
+    "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+    "candidate": "f705d3bdfc9ebbcdd627e22f8feb6170ff445b56",
+    "changeset": "a5e1d1d4822dae8e08048d1033178a5a1231bcd65893da15e8454bb23b6e0a86",
+    "checks": [
+      {
+        "argv": [
+          "/bin/test",
+          "-s",
+          "README.md"
+        ],
+        "duration_ms": 7,
+        "exit_code": 0,
+        "name": "scratch-readme",
+        "output": "",
+        "status": "passed",
+        "timeout_secs": 1800
+      }
+    ],
+    "fork": "bro-3259-owner-wait",
+    "manifest": {
+      "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+      "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+    },
+    "offset": 12,
+    "passed": true,
+    "record_error": null,
+    "recorded": true
+  },
+  "owner_wait": {
+    "changeset": "a5e1d1d4822dae8e08048d1033178a5a1231bcd65893da15e8454bb23b6e0a86",
+    "fork": "bro-3259-owner-wait",
+    "offset": 13,
+    "pr": null,
+    "reason": null,
+    "retrying_after": null,
+    "status": "requested",
+    "url": null,
+    "waiting_for": "owner"
+  },
+  "end_utc": "2026-10-25T07:28:38Z"
+}

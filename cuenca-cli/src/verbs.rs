@@ -131,15 +131,19 @@ fn open(client: &Client, dir: &Path) -> anyhow::Result<Local> {
 /// the changes a snapshot would publish, and the base paths `.forkignore` names, which a
 /// snapshot refuses to delete unless told `--drop-ignored`. Such a scan never fails on
 /// those paths: it reports them.
-struct Look {
-    changes: Vec<Change>,
-    ignored: Vec<String>,
+pub(crate) struct Look {
+    pub(crate) changes: Vec<Change>,
+    pub(crate) ignored: Vec<String>,
     /// Entries that are not content (sockets, FIFOs, devices).
     skipped: Vec<Value>,
     target: GitOid,
 }
 
-fn look(root: &Path, base: &Tree, cache: &mut cuenca_fs::StatCache) -> anyhow::Result<Look> {
+pub(crate) fn look(
+    root: &Path,
+    base: &Tree,
+    cache: &mut cuenca_fs::StatCache,
+) -> anyhow::Result<Look> {
     let options = SnapshotOptions {
         drop_ignored: true,
         ..Default::default()
@@ -162,7 +166,7 @@ fn look(root: &Path, base: &Tree, cache: &mut cuenca_fs::StatCache) -> anyhow::R
     })
 }
 
-fn ignored_note(ignored: &[String]) -> String {
+pub(crate) fn ignored_note(ignored: &[String]) -> String {
     match ignored.first() {
         None => String::new(),
         Some(first) => format!(

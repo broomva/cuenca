@@ -369,7 +369,8 @@ impl Upstream {
             std::fs::create_dir_all(p.parent().unwrap()).unwrap();
             std::fs::write(p, content).unwrap();
         }
-        git(&work, &["add", "-A"]);
+        // Explicit fixture files must not disappear because of a host global ignore.
+        git(&work, &["add", "--force", "-A"]);
         git(&work, &["commit", "-q", "-m", "init"]);
         git(
             dir.path(),
@@ -401,7 +402,7 @@ case "$cmd" in
     if [ -f "$DIR/prs/$key" ]; then
       n=$(cat "$DIR/prs/$key")
       oid=$(git --git-dir="$REMOTE" rev-parse "refs/heads/$head")
-      printf '[{{"number":%s,"url":"https://github.com/%s/pull/%s","headRefOid":"%s","headRefName":"%s"}}]\n' "$n" "$repo" "$n" "$oid" "$head"
+      printf '[{{"number":%s,"url":"https://github.com/%s/pull/%s","headRefOid":"%s","headRefName":"%s","isCrossRepository":false}}]\n' "$n" "$repo" "$n" "$oid" "$head"
     else
       echo '[]'
     fi ;;

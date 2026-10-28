@@ -226,6 +226,16 @@ fn handle(a: &Authority, req: AdminRequest) -> Result<Value, String> {
             git,
             dir,
         } => {
+            // Only GitHub remotes land, through a pull request; a location with another
+            // remote could be landed by neither the lander nor `admin land`.
+            if let Some(r) = &remote
+                && crate::land::github_slug(r).is_none()
+            {
+                return Err(format!(
+                    "remote {r:?} is not a GitHub repository; only GitHub remotes land \
+                     (https://github.com/<owner>/<repo>, git@github.com:<owner>/<repo>)"
+                ));
+            }
             let tree = match (git, dir) {
                 (Some(_), Some(_)) => return Err("give git or dir, not both".into()),
                 (None, None) => Tree::new(),
@@ -472,7 +482,7 @@ mod tests {
             assert!(err.contains(path), "{err}");
         }
         // Rules a scan would refuse are refused here too, never read loosely: text
-        // that is not UTF-8, and a symlink in the file's place.
+        // that is not UTF-8, a symlink in the file's place, and a folder.
         let latin = location(&a, "latin", &[(".forkignore", b"caf\xe9\n")]);
         let linked = {
             use cuenca_tree::{Entry, GitOid, RepoPath};
@@ -486,8 +496,10 @@ mod tests {
             a.store.add_location(&name, None, &tree).unwrap();
             name
         };
-        let len = len + 2;
-        for l in [&latin, &linked] {
+        // A folder in the file's place, which a scan finds on disk and refuses.
+        let folder = location(&a, "folder", &[(".forkignore/x", b"x")]);
+        let len = len + 3;
+        for l in [&latin, &linked, &folder] {
             let err = handle(&a, req(l)).unwrap_err();
             assert!(err.contains(".forkignore"), "{err}");
         }

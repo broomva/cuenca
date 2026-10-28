@@ -28,8 +28,8 @@ use sha2::{Digest, Sha256};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PrincipalKind {
-    /// Reads main of the locations it is granted, the forks its grant names and the
-    /// forks it holds now (its own drafts fenced after a takeover land in a sibling it
+    /// Reads main of the locations it is granted, the forks its grant names of those
+    /// locations and the forks it holds now (its own drafts fenced after a takeover land in a sibling it
     /// holds); creates forks of granted locations.
     Agent,
     /// One of the owner's devices: reads every location and fork, and writes like an
@@ -43,7 +43,8 @@ pub struct Grant {
     /// Locations whose main it reads and which it may fork.
     #[serde(default)]
     pub locations: BTreeSet<LocationName>,
-    /// Other forks it may read, such as its swarm's.
+    /// Other forks it may read, such as its swarm's: a name here reads a fork only of
+    /// a location in `locations`, whoever created it.
     #[serde(default)]
     pub forks: BTreeSet<ForkName>,
 }

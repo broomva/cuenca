@@ -1,0 +1,643 @@
+   Compiling libc v0.2.190
+   Compiling regex-syntax v0.8.10
+   Compiling idna v1.1.0
+   Compiling num-traits v0.2.19
+   Compiling scopeguard v1.2.0
+   Compiling bit-vec v0.8.0
+   Compiling allocator-api2 v0.2.21
+   Compiling borrow-or-share v0.2.4
+   Compiling foldhash v0.2.0
+   Compiling vsimd v0.8.0
+   Compiling outref v0.5.2
+   Compiling micromap v0.3.0
+   Compiling email_address v0.2.9
+   Compiling unicode-general-category v1.1.0
+   Compiling lock_api v0.4.14
+   Compiling fluent-uri v0.4.1
+   Compiling num-cmp v0.1.0
+   Compiling bit-set v0.8.0
+   Compiling data-encoding v2.11.1
+   Compiling bytecount v0.6.9
+   Compiling hashbrown v0.16.1
+   Compiling uuid-simd v0.8.0
+   Compiling url v2.5.8
+   Compiling num-integer v0.1.47
+   Compiling chrono v0.4.45
+   Compiling num-complex v0.4.6
+   Compiling num-bigint v0.4.8
+   Compiling num-iter v0.1.46
+   Compiling errno v0.3.14
+   Compiling getrandom v0.4.2
+   Compiling cpufeatures v0.2.17
+   Compiling socket2 v0.6.3
+   Compiling mio v1.2.0
+   Compiling core-foundation v0.9.4
+   Compiling system-configuration-sys v0.6.0
+   Compiling security-framework-sys v2.17.0
+   Compiling getrandom v0.2.17
+   Compiling nix v0.31.3
+   Compiling redb v2.6.4
+   Compiling uuid v1.29.0
+   Compiling parking_lot_core v0.9.12
+   Compiling schemars v1.2.3
+   Compiling sha1 v0.10.6
+   Compiling rustix v1.1.4
+   Compiling sha2 v0.10.9
+   Compiling signal-hook-registry v1.4.8
+   Compiling rand_core v0.6.4
+   Compiling getrandom v0.3.4
+   Compiling system-configuration v0.7.0
+   Compiling sha1-checked v0.10.0
+   Compiling security-framework v2.11.1
+   Compiling parking_lot v0.12.5
+   Compiling ahash v0.8.12
+   Compiling rand_chacha v0.3.1
+   Compiling tokio v1.53.3
+   Compiling regex-automata v0.4.14
+   Compiling jsonschema-regex v0.46.10
+   Compiling cuenca-tree v0.1.0 (/Volumes/Broomva/home/broomva/core/cuenca/.worktrees/bro-3259/cuenca-tree)
+   Compiling referencing v0.46.10
+   Compiling rand v0.8.8
+   Compiling num-rational v0.4.2
+   Compiling num v0.4.3
+   Compiling tempfile v3.27.0
+   Compiling fraction v0.15.4
+   Compiling native-tls v0.2.14
+   Compiling globset v0.4.19
+   Compiling matchers v0.2.0
+   Compiling regex v1.12.3
+   Compiling fancy-regex v0.18.0
+   Compiling cuenca-core v0.1.0 (/Volumes/Broomva/home/broomva/core/cuenca/.worktrees/bro-3259/cuenca-core)
+   Compiling tracing-subscriber v0.3.23
+   Compiling ignore v0.4.32
+   Compiling jsonschema v0.46.10
+   Compiling cuenca-fs v0.1.0 (/Volumes/Broomva/home/broomva/core/cuenca/.worktrees/bro-3259/cuenca-fs)
+   Compiling tokio-util v0.7.20
+   Compiling tower v0.5.3
+   Compiling tokio-native-tls v0.3.1
+   Compiling process-wrap v10.0.1
+   Compiling tokio-stream v0.1.19
+   Compiling tower-http v0.6.11
+   Compiling h2 v0.4.19
+   Compiling rmcp v3.7.0
+   Compiling hyper v1.12.0
+   Compiling hyper-util v0.1.21
+   Compiling axum v0.8.9
+   Compiling hyper-tls v0.6.0
+   Compiling reqwest v0.12.28
+   Compiling cuenca-server v0.1.0 (/Volumes/Broomva/home/broomva/core/cuenca/.worktrees/bro-3259/cuenca-server)
+   Compiling cuenca-cli v0.1.0 (/Volumes/Broomva/home/broomva/core/cuenca/.worktrees/bro-3259/cuenca-cli)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 22.82s
+     Running unittests src/lib.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/cuenca_cli-ba6bd94f2cef8b08)
+
+running 6 tests
+test verbs::tests::a_landing_report_names_the_step_and_exits_1_on_failure_or_a_dropped_request ... ok
+test local::tests::an_object_is_kept_only_if_it_still_hashes_to_its_id ... ok
+test local::tests::uploads_are_cut_into_batches_within_both_limits ... ok
+test run::tests::only_the_end_of_the_output_is_kept ... ok
+test run::tests::a_check_ends_as_its_exit_says ... ok
+test run::tests::a_check_past_its_limit_is_killed_with_what_it_started ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.13s
+
+     Running unittests src/main.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/cuenca-d4efc36afa9d1995)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/cli.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/cli-9f1f2974df3d3383)
+
+running 23 tests
+test a_reused_checkout_path_never_publishes_to_the_old_fork ... ok
+test a_crash_around_acknowledgement_loses_and_duplicates_nothing ... ok
+test a_checkout_inside_a_checkout_is_refused ... ok
+test after_a_takeover_a_rename_a_mode_change_and_a_copy_go_to_the_sibling ... ok
+test an_old_mtime_on_the_root_keeps_the_checkout ... ok
+test a_refused_record_still_reports_the_checks_it_ran ... ok
+test after_a_takeover_the_old_holders_snapshots_go_to_a_sibling ... ok
+test a_refused_upload_batch_reports_its_refusal ... ok
+test a_refused_large_upload_is_a_refusal_not_offline ... ok
+test owner_acts_have_no_agent_verb ... ok
+test a_thousand_file_snapshot_publishes_within_5_s ... ok
+test every_agent_verb_works_on_a_plain_directory ... ok
+test queued_renames_edited_before_a_takeover_still_reach_the_sibling ... ok
+test land_reports_a_failed_landing_and_exits_1 ... ok
+test verify_refuses_a_checkout_behind_its_fork_and_a_fork_with_no_draft ... ok
+test snapshots_taken_offline_publish_on_reconnect ... ok
+test a_write_from_a_non_holder_is_refused ... ok
+test verify_passes_when_the_bases_checks_pass_and_times_a_check_out ... ok
+test watch_mode_publishes_a_new_file_within_15_s ... ok
+test a_git_location_with_ignored_paths_is_reported_not_broken ... ok
+test a_blob_larger_than_a_batch_is_uploaded_alone ... ok
+test watch_mode_reports_a_snapshot_it_cannot_take ... ok
+test a_candidate_that_rewrites_its_checks_is_judged_by_the_bases_10_of_10 ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 18.26s
+
+     Running tests/mcp.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/mcp-a7f93bd2d5a59d58)
+
+running 3 tests
+test an_unreachable_authority_is_a_structured_offline_error ... ok
+test owner_acts_are_no_tools_and_denials_are_structured_errors ... ok
+test an_mcp_client_lists_the_agent_verbs_and_forks_snapshots_and_diffs ... ok
+
+test result: ok. 3 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 1.35s
+
+     Running unittests src/lib.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/cuenca_core-0c4727ce4ab7f598)
+
+running 31 tests
+test owner::tests::siblings_are_named_for_the_node_and_epoch ... ok
+test owner::tests::node_ids ... ok
+test names::tests::names ... ok
+test checks::tests::parses_the_documented_form ... ok
+test checks::tests::a_run_serializes_flat ... ok
+test checks::tests::refuses_anything_else ... ok
+test owner::tests::a_sibling_name_always_fits_and_never_names_two_siblings ... ok
+test store::tests::replay_refuses_a_draft_under_a_wrong_id ... ok
+test store::tests::replay_refuses_a_branch_that_does_not_start_at_the_head ... ok
+test store::tests::replay_refuses_a_draft_by_a_revoked_principal ... ok
+test store::tests::replay_refuses_a_duplicated_draft ... ok
+test store::tests::replay_refuses_a_draft_fenced_from_a_fork_its_writer_holds ... ok
+test store::tests::replay_refuses_a_draft_fenced_by_a_writer_that_never_held_the_fork ... ok
+test store::tests::a_sibling_first_held_by_another_writer_is_never_written ... ok
+test store::tests::replay_refuses_a_duplicated_revocation ... ok
+test store::tests::replay_refuses_a_changeset_index_the_log_does_not_explain ... ok
+test store::tests::a_stored_tree_that_does_not_rebuild_to_its_id_is_refused ... ok
+test store::tests::a_short_blob_index_row_is_an_error_not_a_panic ... ok
+test store::tests::replay_refuses_a_draft_fenced_into_the_wrong_sibling ... ok
+test store::tests::a_fenced_draft_is_found_by_its_changeset_id ... ok
+test store::tests::replay_refuses_a_fork_created_under_a_reserved_name ... ok
+test store::tests::replay_refuses_a_gap ... ok
+test store::tests::replay_refuses_a_location_filed_under_another_key ... ok
+test store::tests::replay_refuses_a_fork_that_does_not_start_at_main ... ok
+test store::tests::replay_refuses_a_forks_table_the_log_does_not_explain ... ok
+test store::tests::replay_refuses_a_locations_table_the_log_does_not_explain ... ok
+test store::tests::replay_refuses_a_revocations_table_the_log_does_not_explain ... ok
+test store::tests::replay_refuses_a_takeover_from_the_wrong_epoch ... ok
+test store::tests::replay_refuses_a_record_filed_under_another_offset ... ok
+test store::tests::replay_refuses_main_moved_by_another_locations_fork ... ok
+test store::tests::replay_refuses_a_verify_of_another_tree ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.76s
+
+     Running tests/batch_crash.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/batch_crash-80d48e203f6b24b9)
+
+running 2 tests
+test child_ingester ... ignored, run by kill_during_batch_ingest as a child process
+test kill_during_batch_ingest ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 10.20s
+
+     Running tests/batch_fds.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/batch_fds-ff8156310579cc36)
+
+running 2 tests
+test child_batch ... ignored, run by a_batch_larger_than_the_fd_limit_is_stored as a child process
+test a_batch_larger_than_the_fd_limit_is_stored ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 0.52s
+
+     Running tests/crash.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/crash-7a6d625cd6dee193)
+
+running 4 tests
+test child_fenced_writer ... ignored, run by kill_during_fenced_append as a child process
+test child_writer ... ignored, run by kill_during_append as a child process
+test kill_during_fenced_append ... ok
+test kill_during_append ... ok
+
+test result: ok. 2 passed; 0 failed; 2 ignored; 0 measured; 0 filtered out; finished in 13.25s
+
+     Running tests/forks.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/forks-4628ee49c9b170c1)
+
+running 25 tests
+test a_fork_cannot_take_a_name_kept_for_siblings ... ok
+test a_new_fork_is_held_by_its_creator_under_epoch_1 ... ok
+test a_fork_of_a_fork_meets_the_rules_of_a_new_fork ... ok
+test a_long_forks_stale_drafts_are_kept_under_a_hashed_name ... ok
+test a_sibling_is_written_like_any_fork_by_its_holder ... ok
+test a_fork_at_a_main_that_moved_is_refused ... ok
+test a_fork_of_a_fork_survives_reopen ... ok
+test a_divergent_stale_draft_is_refused_until_rebased ... ok
+test a_forks_history_is_the_records_that_name_it ... ok
+test a_revoked_principal_is_refused_on_its_next_request ... ok
+test a_holder_fenced_under_two_epochs_keeps_both_episodes ... ok
+test a_draft_fenced_from_a_taken_over_sibling_goes_one_level_down ... ok
+test a_fork_of_a_fork_starts_at_its_head_and_then_moves_apart ... ok
+test a_sibling_starts_only_from_the_head_its_epoch_left ... ok
+test a_takeover_drops_the_old_holders_landing_intent ... ok
+test an_owner_fork_is_never_taken_over_and_the_volume_takes_nothing ... ok
+test a_takeover_fences_every_earlier_holder ... ok
+test only_the_volume_holds_an_owner_fork_and_only_owner_forks ... ok
+test two_nodes_whose_ids_differ_only_in_case_are_each_kept ... ok
+test ownership_survives_reopen ... ok
+test two_principals_on_one_node_are_each_kept ... ok
+test each_stale_epoch_resumes_from_its_own_released_head ... ok
+test a_write_from_anyone_but_the_holder_is_refused_50_of_50 ... ok
+test a_takeover_while_the_holder_is_offline_keeps_its_drafts_in_a_sibling_10_of_10 ... ok
+test of_concurrent_takeovers_exactly_one_wins ... ok
+
+test result: ok. 25 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.13s
+
+     Running tests/land.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/land-456bb73ad43e28b1)
+
+running 11 tests
+test a_failed_landing_stops_and_asking_again_is_a_retry ... ok
+test an_export_names_the_changesets_own_branch ... ok
+test a_location_without_a_remote_waits_for_the_owner_and_keeps_the_old_main ... ok
+test a_takeover_drops_a_landing_in_flight ... ok
+test a_changeset_is_dated_by_its_first_record ... ok
+test a_remote_landing_moves_one_step_at_a_time_and_each_retry_appends_nothing ... ok
+test a_pull_request_needs_a_number_and_a_url ... ok
+test a_request_needs_a_verify_of_the_head_against_main_as_it_is_now ... ok
+test the_owner_lands_only_a_live_request_for_the_head ... ok
+test a_fork_with_several_drafts_lands_its_head_onto_its_own_base_only ... ok
+test a_revoked_holder_s_request_goes_no_further ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.63s
+
+     Running tests/store.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/store-be359e9c0d694778)
+
+running 21 tests
+test a_blob_batch_that_is_not_committed_stores_nothing ... ok
+test a_blob_damaged_on_disk_is_reported_not_returned ... ok
+test a_blob_that_does_not_hash_to_its_claim_is_refused_and_nothing_is_stored ... ok
+test a_held_blob_is_ingested_like_a_new_one ... ok
+test a_snapshot_sees_one_moment ... ok
+test a_blob_is_stored_under_its_git_id_with_a_derived_sha256 ... ok
+test a_retried_publish_appends_nothing ... ok
+test a_changeset_published_on_two_forks_is_indexed_at_its_first_draft ... ok
+test a_draft_needs_every_blob_it_puts_and_passes_content_rules ... ok
+test a_changeset_that_does_not_apply_to_its_base_is_refused_and_appends_nothing ... ok
+test a_publish_retried_after_a_newer_draft_is_refused_as_stale ... ok
+test a_landing_intent_names_the_head_and_a_retry_appends_nothing ... ok
+test a_fork_moves_by_drafts_from_its_head ... ok
+test a_blob_batch_stores_all_of_its_blobs ... ok
+test a_tree_naming_an_uningested_blob_is_refused_and_the_log_is_unchanged ... ok
+test locations_hold_any_tree_and_an_optional_remote ... ok
+test leftovers_of_an_interrupted_ingest_are_removed_on_open ... ok
+test concurrent_ingests_into_one_new_shard_all_succeed ... ok
+test main_advances_by_compare_and_swap ... ok
+test main_follows_a_fork_draft_by_draft ... ok
+test state_survives_reopen_and_matches_a_replay_of_the_log ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.71s
+
+     Running tests/verify.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/verify-3c8cb71754604705)
+
+running 6 tests
+test a_base_with_no_manifest_has_no_checks ... ok
+test the_reported_list_must_be_the_bases_exactly ... ok
+test a_verify_is_judged_by_the_bases_manifest_and_records_its_hash ... ok
+test only_the_holder_records_on_the_head_against_the_main_of_the_moment ... ok
+test once_main_moves_a_verify_against_the_old_main_is_refused ... ok
+test a_base_manifest_that_does_not_parse_or_is_no_file_is_refused ... ok
+
+test result: ok. 6 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.44s
+
+     Running unittests src/lib.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/cuenca_fs-471faabf22f39f20)
+
+running 23 tests
+test cache::tests::only_settled_stamps_are_recorded ... ok
+test cache::tests::a_changed_stamp_misses ... ok
+test ignore::tests::a_bad_pattern_is_refused ... ok
+test ignore::tests::excludes_matches_the_walk_under_an_ignored_directory ... ok
+test ignore::tests::negation_and_anchoring_follow_gitignore ... ok
+test cache::tests::a_raw_stat_and_std_metadata_give_one_stamp ... ok
+test ignore::tests::the_defaults_cover_the_spec_list_at_any_depth ... ok
+test ignore::tests::rules_from_a_tree_are_read_as_strictly_as_from_disk ... ok
+test scan::tests::a_file_removed_after_the_listing_is_left_out ... ok
+test scan::tests::rules_that_changed_during_the_scan_are_refused ... ok
+test checkout::tests::a_link_inside_the_destination_is_never_followed ... ok
+test scan::tests::a_file_read_again_takes_from_the_budget_once ... ok
+test checkout::tests::hashing_and_copying_ignore_the_shared_offset ... ok
+test ignore::tests::a_forkignore_that_is_a_symlink_or_a_directory_is_refused ... ok
+test scan::tests::a_read_under_a_stale_stamp_is_refused ... ok
+test cache::tests::a_corrupt_or_foreign_cache_loads_empty ... ok
+test scan::tests::a_directory_swapped_for_a_symlink_is_not_walked ... ok
+test checkout::tests::a_vouched_file_that_changed_while_cloned_is_refused ... ok
+test scan::tests::a_file_within_the_budget_is_kept_as_the_bytes_that_were_hashed ... ok
+test scan::tests::a_file_replaced_by_a_symlink_is_not_followed ... ok
+test checkout::tests::a_hard_link_put_in_a_clones_place_is_refused ... ok
+test scan::tests::a_link_to_the_same_directory_renamed_out_of_the_root_is_not_walked ... ok
+test scan::tests::rules_changed_after_the_walk_are_refused ... ok
+
+test result: ok. 23 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/fs.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/fs-a7cd4db813ce0d33)
+
+running 37 tests
+test a_checkout_never_creates_the_parent_of_dest ... ok
+test a_file_that_became_a_directory_under_a_rule_for_both_kinds_is_refused ... ok
+test a_file_over_the_blob_limit_fails_the_snapshot ... ok
+test a_file_that_became_a_directory_under_a_directory_rule_is_an_ordinary_deletion ... ok
+test a_gitattributes_git_cannot_parse_fails_the_snapshot ... ok
+test a_failed_snapshot_leaves_the_cache_alone ... ok
+test a_directory_that_became_a_file_under_a_rule_for_both_kinds_is_an_ordinary_deletion ... ok
+test a_file_written_just_now_is_not_cached ... ok
+test a_link_planted_at_a_file_name_is_never_followed ... ok
+test a_gitattributes_git_cannot_parse_is_refused_at_checkout ... ok
+test a_checkout_source_never_offers_a_file_edited_since_its_snapshot ... ok
+test a_corrupt_object_fails_the_checkout ... ok
+test a_kind_change_under_a_directory_rule_does_not_wedge_snapshots ... ok
+test an_unreadable_file_fails_the_snapshot_with_its_path ... ok
+test a_checkout_source_tries_every_path_with_the_content ... ok
+test checkout_refuses_a_non_empty_destination ... ok
+test a_symlink_target_too_long_to_check_out_is_refused_unread ... ok
+test an_ignored_directory_is_never_entered ... ok
+test a_vouched_file_is_taken_only_for_its_own_blob ... ok
+test checkout_refuses_a_destination_that_is_a_link_or_a_file ... ok
+test explicit_rules_override_the_location_file ... ok
+test checkout_refuses_wrong_or_missing_content ... ok
+test forkignore_rules_can_leave_out_a_name_no_tree_holds ... ok
+test a_base_holding_ignored_paths_is_refused_unless_the_drop_is_accepted ... ok
+test new_blobs_are_exactly_those_the_base_lacks ... ok
+test a_locked_source_file_checks_out_editable ... ok
+test git_state_is_left_out_and_special_files_are_listed ... ok
+test a_checkout_source_serves_files_too_new_to_be_cached ... ok
+test what_a_tree_cannot_hold_fails_loudly ... ok
+test drift_from_a_checkout_is_seen ... ok
+test the_stat_cache_hashes_only_what_changed ... ok
+test forkignored_paths_never_reach_a_changeset ... ok
+test a_checkout_never_writes_a_file_larger_than_a_snapshot_accepts ... ok
+test a_snapshot_is_the_tree_git_computes ... ok
+test snapshot_checkout_snapshot_is_the_same_tree_from_every_source ... ok
+test a_parent_swapped_mid_checkout_never_splits_created_from_written ... ok
+test a_snapshot_after_writing_1000_files_takes_under_five_seconds ... ok
+
+test result: ok. 37 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.98s
+
+     Running unittests src/lib.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/cuenca_server-9da38f0bacc29e2f)
+
+running 24 tests
+test authority::tests::mapped_v4_is_v4 ... ok
+test authority::tests::a_snapshot_error_names_no_host_path ... ok
+test land::tests::github_refusals_and_fsck_errors_are_for_good ... ok
+test identity::tests::the_authority_itself_is_found_under_self ... ok
+test identity::tests::a_peer_in_the_netmap_is_named ... ok
+test identity::tests::routes_from_either_source_mark_the_peer ... ok
+test land::tests::only_github_remotes_have_a_slug ... ok
+test identity::tests::a_node_missing_from_the_netmap_or_garbage_is_not_named ... ok
+test keys::tests::a_keys_file_others_can_read_is_refused ... ok
+test keys::tests::wrong_or_malformed_tokens_are_refused ... ok
+test keys::tests::a_token_verifies_and_survives_a_reopen_but_its_secret_is_not_stored ... ok
+test tests::only_tailnet_addresses_bind_by_default ... ok
+test materialise::tests::an_upload_opens_only_a_regular_file ... ok
+test keys::tests::a_principal_gets_one_key_and_removal_ends_it ... ok
+test admin::tests::a_revocation_the_log_cannot_record_still_refuses_the_key ... ok
+test materialise::tests::a_folder_swapped_for_a_link_after_the_scan_publishes_nothing_from_outside ... ok
+test materialise::tests::a_volume_opened_by_a_relative_path_is_absolute ... ok
+test materialise::tests::a_small_file_changed_after_the_scan_is_uploaded_as_it_was_read ... ok
+test materialise::tests::a_snapshot_advances_the_cache_only_when_it_publishes ... ok
+test admin::tests::a_volume_key_on_file_is_refused_at_start ... ok
+test admin::tests::an_owner_fork_of_a_main_tracking_ignored_paths_is_refused ... ok
+test authority::tests::a_ban_waits_for_a_write_past_its_check ... ok
+test materialise::tests::a_failed_snapshot_leaves_the_cache_naming_only_what_the_log_holds ... ok
+test materialise::tests::an_owner_fork_is_never_exchanged ... ok
+
+test result: ok. 24 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.51s
+
+     Running unittests src/main.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/cuenca_server-18a32048058af1d5)
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+     Running tests/api.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/api-b14bf32d29f115f4)
+
+running 31 tests
+test a_plain_directory_registers_as_a_location ... ok
+test a_recorded_revocation_survives_a_restart ... ok
+test a_ban_refuses_at_once_without_a_write ... ok
+test a_verify_is_recorded_for_the_holder_against_the_bases_list ... ok
+test a_takeover_to_the_same_principal_on_another_node_fences_the_first_node ... ok
+test a_revoked_key_is_refused_on_its_next_request_and_its_name_is_not_reused ... ok
+test a_draft_cannot_launder_a_blob_the_caller_cannot_read ... ok
+test a_former_holder_cannot_launder_or_probe_the_new_holders_blobs ... ok
+test a_fork_grant_does_not_read_a_fork_of_a_location_it_is_not_granted ... ok
+test a_blob_batch_is_all_or_nothing ... ok
+test after_a_takeover_the_old_holder_publishes_to_a_sibling ... ok
+test an_agent_reads_its_grant_and_its_forks_and_nothing_else ... ok
+test an_owner_device_reads_everything_and_writes_only_its_own_forks ... ok
+test bodies_are_not_read_before_authentication ... ok
+test a_location_registers_from_a_git_repository ... ok
+test blobs_are_verified_on_upload_and_read_only_through_a_visible_tree ... ok
+test every_request_is_authenticated_ten_of_ten_each ... ok
+test the_authority_refuses_a_non_tailnet_bind ... ok
+test an_upload_longer_than_it_says_is_refused ... ok
+test the_admin_socket_refuses_a_directory_others_can_write ... ok
+test a_blob_batch_is_stored_and_its_blobs_may_be_named ... ok
+test staging_left_by_a_crash_is_cleared_on_open ... ok
+test no_owner_act_has_a_route ... ok
+test fifty_publishes_by_non_holders_are_all_refused ... ok
+test history_hides_drafts_fenced_into_a_sibling_the_reader_cannot_read ... ok
+test possession_is_per_principal ... ok
+test publishes_and_landing_intents_are_idempotent ... ok
+test the_admin_socket_is_private_and_lists_no_secrets ... ok
+test ten_offline_takeovers_lose_no_file ... ok
+test a_write_in_flight_when_its_principal_is_revoked_writes_nothing ... ok
+test a_blob_batch_over_its_limits_is_refused ... ok
+
+test result: ok. 31 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 3.62s
+
+     Running tests/crash.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/crash-3b11466dfc8f5d6d)
+
+running 2 tests
+test child_server ... ignored, run by kill_during_publish as a child process
+test kill_during_publish ... ok
+
+test result: ok. 1 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 2.22s
+
+     Running tests/land.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/land-edf09da892160acf)
+
+running 20 tests
+test a_location_with_a_remote_off_github_is_refused ... ok
+test a_branch_that_is_someone_elses_fails_the_landing ... ok
+test a_remote_history_that_fails_fsck_fails_the_landing ... ok
+test a_missing_gh_is_retried ... ok
+test a_branch_with_the_drafts_tree_onto_another_parent_fails_the_landing ... ok
+test child_lander ... ignored, run by a_kill_at_each_landing_step_is_finished_on_restart as a child process
+test a_merge_commit_with_the_drafts_tree_is_not_an_export ... ok
+test a_takeover_clears_the_dropped_landings_retry_error ... ok
+test a_pull_request_from_the_branch_at_another_commit_fails_the_landing ... ok
+test a_remote_without_the_bases_tree_fails_the_landing_and_opens_nothing ... ok
+test a_draft_lands_as_one_pull_request_whose_tree_is_the_drafts ... ok
+test a_push_github_refuses_by_rule_fails_the_landing ... ok
+test a_changeset_landed_again_reuses_its_export_and_pull_request ... ok
+test a_pull_request_from_another_repository_is_not_the_landings ... ok
+test a_fork_with_several_drafts_lands_its_head ... ok
+test a_landing_killed_mid_export_finishes_on_the_branch_another_landing_pushed ... ok
+test an_export_with_the_right_trees_and_other_metadata_is_adopted ... ok
+test without_a_remote_the_request_waits_for_the_owner_10_of_10 ... ok
+test a_hung_call_is_killed_and_retried ... ok
+test a_kill_at_each_landing_step_is_finished_on_restart ... ok
+
+test result: ok. 19 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 8.47s
+
+     Running tests/materialise.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/materialise-60ea8d4a26477aad)
+
+running 13 tests
+test child_materialiser ... ignored, run by killed_while_materialising as a child process
+test one_materialiser_per_volume ... ok
+test a_tree_that_fails_leaves_the_previous_one_shown ... ok
+test a_failed_swap_records_nothing ... ok
+test a_record_that_cannot_be_forgotten_stops_the_swap ... ok
+test records_of_dotted_names_do_not_collide ... ok
+test a_published_draft_is_in_the_volume_within_15_s ... ok
+test a_draft_is_shown_whole_and_read_only ... ok
+test a_failed_tree_is_tried_again_after_its_wait ... ok
+test a_reopened_volume_rebuilds_nothing_it_shows ... ok
+test a_tree_whose_record_failed_is_not_believed ... ok
+test a_reader_never_sees_a_shown_tree_missing ... ok
+test killed_while_materialising ... ok
+
+test result: ok. 12 passed; 0 failed; 1 ignored; 0 measured; 0 filtered out; finished in 19.43s
+
+     Running tests/owner_forks.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/owner_forks-53e35fcc3580ef0b)
+
+running 21 tests
+test an_owner_fork_is_not_forked_without_a_volume ... ok
+test forking_a_fork_needs_reading_it ... ok
+test a_fork_rule_naming_a_tracked_path_fails_the_snapshot ... ok
+test an_owner_fork_without_a_record_is_adopted_not_rebuilt ... ok
+test an_unreadable_file_fails_the_snapshot_loudly ... ok
+test an_owner_fork_is_shown_once_writable_and_never_replaced ... ok
+test finder_metadata_never_reaches_a_changeset ... ok
+test no_key_creates_an_owner_fork_over_http ... ok
+test the_admin_socket_makes_owner_forks_and_keeps_the_volume_keyless ... ok
+test a_symlink_or_executable_overwritten_from_finder_is_recorded_10_of_10 ... ok
+test owner_fork_drafts_are_the_volumes ... ok
+test forking_an_owner_fork_takes_its_unsnapshotted_edits_10_of_10 ... ok
+test a_snapshot_failing_once_is_tried_again ... ok
+test a_refused_fork_of_an_owner_fork_snapshots_nothing ... ok
+test a_file_being_written_while_forked_is_whole_in_the_next_snapshot ... ok
+test forking_an_owner_fork_while_it_is_written_loses_nothing_10_of_10 ... ok
+test forking_while_two_copies_keep_changing_is_never_refused_10_of_10 ... ok
+test a_revocation_does_not_wait_for_a_fork ... ok
+test an_owner_fork_that_cannot_be_snapshotted_is_not_forked ... ok
+test a_fork_retrying_its_snapshot_leaves_the_volume_to_others ... ok
+test an_owner_edit_is_a_draft_within_60_s ... ok
+
+test result: ok. 21 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 11.87s
+
+     Running unittests src/lib.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/cuenca_tree-2d65b7d04a11b294)
+
+running 35 tests
+test entry::tests::submodules_are_refused ... ok
+test entry::tests::entries_serialize_as_git_identity_only ... ok
+test oid::tests::collision_detection_fires_on_a_known_collision ... ok
+test entry::tests::streaming_hash_equals_one_shot ... ok
+test entry::tests::the_blob_hasher_refuses_a_known_collision ... ok
+test changeset::tests::refuses_missing_deletes_and_no_op_puts ... ok
+test changeset::tests::refuses_other_formats_and_unknown_fields ... ok
+test changeset::tests::refuses_a_result_that_is_not_a_tree ... ok
+test changeset::tests::new_sorts_ops_and_equals_between ... ok
+test changeset::tests::between_then_apply_reaches_the_target ... ok
+test changeset::tests::refuses_non_canonical_ops ... ok
+test changeset::tests::json_round_trip ... ok
+test oid::tests::content_hash_matches_sha256 ... ok
+test oid::tests::hex_round_trip_and_rejects ... ok
+test oid::tests::known_git_ids ... ok
+test path::tests::accepts_ordinary_paths ... ok
+test path::tests::enforces_length_limits ... ok
+test changeset::tests::refuses_the_wrong_base ... ok
+test changeset::tests::refuses_a_forged_target ... ok
+test path::tests::fold_merges_case_normalisation_and_full_folds ... ok
+test path::tests::gitmodules_aliases ... ok
+test path::tests::non_utf8_bytes_are_rejected ... ok
+test path::tests::rejects_every_git_dir_alias ... ok
+test path::tests::rejects_malformed_paths ... ok
+test path::tests::split_and_components ... ok
+test tree::tests::empty_tree_is_gits_empty_tree ... ok
+test tree::tests::gitattributes_content_limits ... ok
+test tree::tests::git_order_puts_a_tree_after_names_with_lower_bytes_than_slash ... ok
+test tree::tests::gitattributes_must_be_a_file ... ok
+test tree::tests::rejects_duplicates ... ok
+test tree::tests::refuses_gitmodules_anywhere ... ok
+test tree::tests::rejects_file_that_is_also_a_directory ... ok
+test tree::tests::serde_revalidates_and_refuses_duplicate_keys ... ok
+test tree::tests::rejects_case_and_normalisation_collisions ... ok
+test tree::tests::deepest_allowed_path_validates_fast ... ok
+
+test result: ok. 35 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
+
+     Running tests/git_bridge.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/git_bridge-93bb8664e90713b0)
+
+running 34 tests
+test a_hostile_deep_path_is_refused_before_any_work ... ok
+test a_blob_missing_from_the_object_store_is_reported ... ok
+test a_submodule_is_refused ... ok
+test a_blob_id_that_is_a_tree_in_the_repository_is_refused ... ok
+test a_legacy_mode_tree_is_named_non_canonical ... ok
+test a_sha256_repository_is_refused_before_anything_is_written ... ok
+test a_new_long_line_gitattributes_is_refused_before_anything_is_written ... ok
+test a_present_blob_failing_a_content_rule_stores_nothing ... ok
+test a_corrupt_tree_already_in_the_store_fails_the_write ... ok
+test a_corrupt_loose_object_is_detected ... ok
+test a_repository_with_alternates_is_refused ... ok
+test an_empty_directory_is_refused_by_its_own_name ... ok
+test forged_bytes_for_a_present_blob_are_refused ... ok
+test forged_bytes_cannot_vouch_for_a_gitattributes_the_repository_has ... ok
+test a_case_collision_in_git_is_refused ... ok
+test a_normalisation_collision_in_git_is_refused ... ok
+test a_partial_clone_is_not_fetched_from_or_written_into ... ok
+test any_alternates_content_is_refused_by_every_reader ... ok
+test reading_a_tree_id_as_a_blob_is_refused ... ok
+test a_symlink_target_a_mac_cannot_create_is_refused ... ok
+test git_dir_rules_match_gits_own ... ok
+test reading_blobs_keeps_to_its_memory_limits ... ok
+test reading_a_tree_with_a_corrupt_subtree_is_refused ... ok
+test the_empty_tree_round_trips ... ok
+test writing_checks_gitattributes_the_repository_already_has ... ok
+test this_repository_head_round_trips ... ok
+test writing_refuses_content_that_does_not_match_its_id ... ok
+test replace_refs_cannot_swap_a_blob ... ok
+test symlink_targets_no_checkout_can_hold_are_refused ... ok
+test trees_git_fsck_rejects_are_refused ... ok
+test many_gitattributes_paths_over_one_blob_are_checked_once ... ok
+test substitutes_the_listing_normalises_are_refused ... ok
+test fold_collisions_match_apfs_across_unicode ... ok
+test path_rules_cover_gits_own_under_fuzz ... ok
+
+test result: ok. 34 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 14.47s
+
+     Running tests/round_trip.rs (/Volumes/Broomva/scratch/bro-3259/target/debug/deps/round_trip-675fe9f0b5fb47bf)
+
+running 1 test
+test forty_case_round_trip_matrix ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 42.81s
+
+   Doc-tests cuenca_cli
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cuenca_core
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cuenca_fs
+
+running 1 test
+test cuenca-fs/src/lib.rs - (line 12) - compile ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 1.26s; merged doctests compilation took 1.00s
+   Doc-tests cuenca_server
+
+running 0 tests
+
+test result: ok. 0 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+   Doc-tests cuenca_tree
+
+running 1 test
+test cuenca-tree/src/lib.rs - (line 11) ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s
+
+all doctests ran in 0.63s; merged doctests compilation took 0.34s

@@ -79,7 +79,7 @@ enum Key {
         /// A location whose main it reads and which it may fork (repeatable).
         #[arg(long = "location")]
         locations: Vec<String>,
-        /// Another fork it may read (repeatable).
+        /// Another fork it may read, if it is a fork of a `--location` (repeatable).
         #[arg(long = "fork")]
         forks: Vec<String>,
     },
@@ -95,7 +95,7 @@ enum LocationAct {
     /// authority's host.
     Add {
         name: String,
-        /// The git remote it lands to.
+        /// The GitHub remote it lands to (https or ssh on github.com); other hosts are refused.
         #[arg(long)]
         remote: Option<String>,
         /// A git repository on the authority's host.

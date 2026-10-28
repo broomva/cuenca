@@ -2,18 +2,34 @@
 # Mutation check for cuenca-core: each mutant breaks one guarantee, and the tests must
 # fail for every one. Run from the crate directory: scripts/mutation-check.sh
 # Prints one line per mutant and exits non-zero if any mutant survives. The source is
-# restored after each mutant, also on interrupt.
+# restored after each mutant, also on interrupt. Exit codes: ../scripts/mutation-guard.sh.
 set -uo pipefail
 cd "$(dirname "$0")/.."
-backup=$(mktemp -d)
+. ../scripts/mutation-guard.sh
+backup=$guard_backup
 lock=$(git rev-parse --show-toplevel)/Cargo.lock
-cp "$lock" "$backup/Cargo.lock"
-restore() { [ -n "${current:-}" ] && cp "$backup/file" "$current"; current=; cp "$backup/Cargo.lock" "$lock"; }
-trap 'restore; rm -rf "$backup"' EXIT
-trap 'exit 130' INT TERM
+# Checked byte for byte: a truncated copy (full scratch disk) would be copied back over the real lock.
+cp "$lock" "$backup/Cargo.lock" && cmp -s "$lock" "$backup/Cargo.lock" || { echo "cannot back up $lock"; exit 6; }
+# A failed copy back keeps the run dir, and .backup/path or .backup/lock-failed makes the
+# next run refuse to start. .backup/path goes only after the lock is back too.
+restore() {
+  if [ -n "${current:-}" ] && ! cp "$backup/file" "$current"; then
+    echo "restore failed: $current is still mutated; its original is $backup/file" >&2; trap - EXIT; exit 4
+  fi
+  if ! cp "$backup/Cargo.lock" "$lock"; then
+    : >"$backup/lock-failed"
+    echo "restore failed: $lock; its original is $backup/Cargo.lock" >&2; trap - EXIT; exit 4
+  fi
+  current=; rm -f "$backup/path"
+}
+trap 'guard_kill; restore; guard_cleanup' EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 # A mutant only counts as killed against a suite that passes unmutated.
-if ! cargo test -q -p cuenca-core >"$backup/log" 2>&1; then
+baseline_args=()
+if [ "${1:-}" = --import-only ]; then baseline_args=(--test restore); fi
+if ! bounded cargo test -q -p cuenca-core "${baseline_args[@]}" >"$backup/log" 2>&1; then
   echo "baseline is red: fix the suite before reading any mutant verdict"; cat "$backup/log"; exit 2
 fi
 echo "baseline  green"
@@ -21,7 +37,8 @@ echo "baseline  green"
 survived=0
 mutate() { # file, old, new, then the cargo test arguments that should catch it
   local file=$1 old=$2 new=$3; shift 3
-  current=$file; cp "$file" "$backup/file"
+  cp "$file" "$backup/file" && echo "$PWD/$file" >"$backup/path" || { echo "cannot back up $file"; exit 6; }
+  current=$file
   if ! python3 - "$file" "$old" "$new" <<'PY'
 import sys, pathlib
 p = pathlib.Path(sys.argv[1]); s = p.read_text()
@@ -29,15 +46,54 @@ if s.count(sys.argv[2]) != 1: sys.exit("anchor not unique: " + sys.argv[2])
 p.write_text(s.replace(sys.argv[2], sys.argv[3]))
 PY
   then echo "ANCHOR MISSING  $file: $old"; survived=1; restore; return; fi
-  if cargo test -q -p cuenca-core "$@" >"$backup/log" 2>&1; then
+  bounded cargo test -q -p cuenca-core "$@" >"$backup/log" 2>&1; local status=$?
+  if [ "$status" -ge 128 ]; then
+    # The guard or the test run was itself killed by a signal: no verdict is possible.
+    echo "ABORTED   $file: $old (status $status)"; exit 3
+  elif [ "$status" -eq 0 ]; then
     echo "SURVIVED  $file: $old"; survived=1
   elif grep -qE '^error\[E[0-9]+\]|could not compile|failed to select a version' "$backup/log"; then
     echo "NO BUILD  $file: $old (a mutant that does not build proves nothing)"; survived=1
+  elif [ "$status" -eq 124 ] || [ "$status" -eq 125 ]; then
+    # Stopped by the guard: a kill only if the tests had started, not mid-build.
+    if grep -qE '^running [0-9]+ tests?$' "$backup/log"; then
+      echo "killed    $file: $old ($(tail -n 1 "$backup/log"))"
+    else
+      echo "NO TEST   $file: $old (stopped before any test ran: $(tail -n 1 "$backup/log"))"; survived=1
+    fi
   else
     echo "killed    $file: $old"
   fi
   restore
 }
+
+# Backup import admission and held-snapshot cut (BRO-3258 P20 r1).
+mutate src/store.rs 'prefix.reachable_blobs()?;' '' --test restore import_rejects_missing_and_unreferenced_roots
+mutate src/store.rs 'if tree.git_tree_id() != *oid {' 'if false {' --test restore import_rejects_a_tree_under_the_wrong_git_id
+mutate src/store.rs 'self.check_entries(tree.entries())?;' '' --test restore import_checks_blob_presence_and_content_admission
+mutate src/store.rs '                    check_remote(remote)?;' '' --test restore import_rejects_invalid_remotes
+mutate src/store.rs '                    changeset.apply(&load_tree(&trees, changeset.base)?)?;' '' --test restore import_reapplies_changesets_to_check_their_target
+mutate src/store.rs '                    if ChangesetId::of(changeset) != *id {' '                    if false {' --test restore import_rejects_changeset_ids_offsets_and_duplicate_events_atomically
+mutate src/store.rs '            if record.offset != expected as u64 {' '            if false {' --test restore import_rejects_changeset_ids_offsets_and_duplicate_events_atomically
+mutate src/store.rs '                    if *manifest != expected_id {' '                    if false {' --test restore import_rechecks_verify_manifest_identity_and_declared_checks
+mutate src/store.rs '                    if reported != expected {' '                    if false {' --test restore import_rechecks_verify_manifest_identity_and_declared_checks
+mutate src/store.rs '                Applied::Fresh
+            ) {' '                Applied::Fresh | Applied::Repeat(_)
+            ) {' --test restore import_rejects_changeset_ids_offsets_and_duplicate_events_atomically
+mutate src/store.rs '        if !log.is_empty()? {' '        if false {' --test restore import_round_trips_records_and_refuses_nonempty_destinations
+mutate src/store.rs '            .open_table(LOG)?
+            .iter()?
+            .map(|row|' '            .open_table(LOG)?
+            .iter()?
+            .take(1)
+            .map(|row|' --test restore held_snapshot_exports_the_original_cut_after_later_writes_commit
+if [ "${1:-}" = --import-only ]; then
+  if ! bounded cargo test -q -p cuenca-core --test restore >"$backup/log" 2>&1; then
+    echo "restored baseline is red"; cat "$backup/log"; exit 2
+  fi
+  echo "restored baseline green"
+  exit "$survived"
+fi
 
 # Blob ingest: only bytes that hash to the claim, of exactly the announced size, and
 # the same path whether or not the store holds the blob.

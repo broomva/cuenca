@@ -1,0 +1,1260 @@
+{
+  "fork": "load-03",
+  "records": [
+    {
+      "at_ms": 1792913195864,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "event": "fork_created",
+        "fork": "load-03",
+        "holder": {
+          "node": "dogfoodlocalnode",
+          "principal": "load-03"
+        },
+        "location": "scratch"
+      },
+      "offset": 24
+    },
+    {
+      "at_ms": 1792913196448,
+      "event": {
+        "changeset": {
+          "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+          "ops": 1,
+          "target": "e05e73d3f83ef4ab445bdcbaab4b76ba7a8b2c45"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "cad3d1e01dda480c2019faca8d955ca13f62ba48648f5b02229c80625ffcf115",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 54
+    },
+    {
+      "at_ms": 1792913199699,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "e05e73d3f83ef4ab445bdcbaab4b76ba7a8b2c45",
+        "changeset": "cad3d1e01dda480c2019faca8d955ca13f62ba48648f5b02229c80625ffcf115",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 80
+    },
+    {
+      "at_ms": 1792913199727,
+      "event": {
+        "changeset": "cad3d1e01dda480c2019faca8d955ca13f62ba48648f5b02229c80625ffcf115",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 81
+    },
+    {
+      "at_ms": 1792913204700,
+      "event": {
+        "changeset": {
+          "base": "e05e73d3f83ef4ab445bdcbaab4b76ba7a8b2c45",
+          "ops": 1,
+          "target": "20b103c7283d9bd2494602611f55f48bda3eda17"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "e5e30d3721e7ca343ad00f474efd4940f268960d1ad0842228e7825de551d9db",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 136
+    },
+    {
+      "at_ms": 1792913206193,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "20b103c7283d9bd2494602611f55f48bda3eda17",
+        "changeset": "e5e30d3721e7ca343ad00f474efd4940f268960d1ad0842228e7825de551d9db",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 7,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 170
+    },
+    {
+      "at_ms": 1792913206252,
+      "event": {
+        "changeset": "e5e30d3721e7ca343ad00f474efd4940f268960d1ad0842228e7825de551d9db",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 171
+    },
+    {
+      "at_ms": 1792913211861,
+      "event": {
+        "changeset": {
+          "base": "20b103c7283d9bd2494602611f55f48bda3eda17",
+          "ops": 1,
+          "target": "c7db81b5a379e34cca116e6e00d9b34aaa7ccd97"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "89df3c2ca07b95182d4f9c24e20798f31623fb795144f98c5624afda324e53a6",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 226
+    },
+    {
+      "at_ms": 1792913213310,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "c7db81b5a379e34cca116e6e00d9b34aaa7ccd97",
+        "changeset": "89df3c2ca07b95182d4f9c24e20798f31623fb795144f98c5624afda324e53a6",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 8,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 260
+    },
+    {
+      "at_ms": 1792913213393,
+      "event": {
+        "changeset": "89df3c2ca07b95182d4f9c24e20798f31623fb795144f98c5624afda324e53a6",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 261
+    },
+    {
+      "at_ms": 1792913216961,
+      "event": {
+        "changeset": {
+          "base": "c7db81b5a379e34cca116e6e00d9b34aaa7ccd97",
+          "ops": 1,
+          "target": "10e07cb31e94bc8193aada6fa2f579e474c8b605"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "2a3fecf683e4dd6e88ded9ee49480cb5364ba63a998c265b660ea8bd953e3ef8",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 314
+    },
+    {
+      "at_ms": 1792913217878,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "10e07cb31e94bc8193aada6fa2f579e474c8b605",
+        "changeset": "2a3fecf683e4dd6e88ded9ee49480cb5364ba63a998c265b660ea8bd953e3ef8",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 350
+    },
+    {
+      "at_ms": 1792913217924,
+      "event": {
+        "changeset": "2a3fecf683e4dd6e88ded9ee49480cb5364ba63a998c265b660ea8bd953e3ef8",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 351
+    },
+    {
+      "at_ms": 1792913221287,
+      "event": {
+        "changeset": {
+          "base": "10e07cb31e94bc8193aada6fa2f579e474c8b605",
+          "ops": 1,
+          "target": "02026388fc04429f0ecd46790afef1a67bcfb60d"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "07b4b5fa153097ba739cd4e2a3ca9ed9bc56aa4dbf4785d249effbb9082cb656",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 408
+    },
+    {
+      "at_ms": 1792913222125,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "02026388fc04429f0ecd46790afef1a67bcfb60d",
+        "changeset": "07b4b5fa153097ba739cd4e2a3ca9ed9bc56aa4dbf4785d249effbb9082cb656",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 5,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 440
+    },
+    {
+      "at_ms": 1792913222159,
+      "event": {
+        "changeset": "07b4b5fa153097ba739cd4e2a3ca9ed9bc56aa4dbf4785d249effbb9082cb656",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 441
+    },
+    {
+      "at_ms": 1792913224467,
+      "event": {
+        "changeset": {
+          "base": "02026388fc04429f0ecd46790afef1a67bcfb60d",
+          "ops": 1,
+          "target": "5c9321b006d39c5197ce8da4e439790d128e2bdf"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "05b18a8b455bafda969ba4f3388e5a201b3f67540bce754af394d9e6a4c03a61",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 496
+    },
+    {
+      "at_ms": 1792913226887,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "5c9321b006d39c5197ce8da4e439790d128e2bdf",
+        "changeset": "05b18a8b455bafda969ba4f3388e5a201b3f67540bce754af394d9e6a4c03a61",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 530
+    },
+    {
+      "at_ms": 1792913226923,
+      "event": {
+        "changeset": "05b18a8b455bafda969ba4f3388e5a201b3f67540bce754af394d9e6a4c03a61",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 531
+    },
+    {
+      "at_ms": 1792913231518,
+      "event": {
+        "changeset": {
+          "base": "5c9321b006d39c5197ce8da4e439790d128e2bdf",
+          "ops": 1,
+          "target": "7f8fb4c3a1857a792d68c3f608f13b4497727260"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "0e6c7ac78655b378e599702cce05342015180697b2c2710572d243c377248815",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 589
+    },
+    {
+      "at_ms": 1792913232392,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "7f8fb4c3a1857a792d68c3f608f13b4497727260",
+        "changeset": "0e6c7ac78655b378e599702cce05342015180697b2c2710572d243c377248815",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 619
+    },
+    {
+      "at_ms": 1792913232423,
+      "event": {
+        "changeset": "0e6c7ac78655b378e599702cce05342015180697b2c2710572d243c377248815",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 621
+    },
+    {
+      "at_ms": 1792913235875,
+      "event": {
+        "changeset": {
+          "base": "7f8fb4c3a1857a792d68c3f608f13b4497727260",
+          "ops": 1,
+          "target": "27cad01d3cf9ff30ed4c9e2fcce4d0ecb0cc7734"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "a379595c0033e1b8af195631bd3db341fd24a50aee30e00a50457e174ccdf848",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 679
+    },
+    {
+      "at_ms": 1792913237139,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "27cad01d3cf9ff30ed4c9e2fcce4d0ecb0cc7734",
+        "changeset": "a379595c0033e1b8af195631bd3db341fd24a50aee30e00a50457e174ccdf848",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 710
+    },
+    {
+      "at_ms": 1792913237168,
+      "event": {
+        "changeset": "a379595c0033e1b8af195631bd3db341fd24a50aee30e00a50457e174ccdf848",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 711
+    },
+    {
+      "at_ms": 1792913241333,
+      "event": {
+        "changeset": {
+          "base": "27cad01d3cf9ff30ed4c9e2fcce4d0ecb0cc7734",
+          "ops": 1,
+          "target": "f393b75d0ce8b9963cc4b0744150f5bc3970ff1f"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "b5ab234f7b2e6bcb7780c582941fb4bf043f775f870e2f18b6fbfa658dc059e2",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 770
+    },
+    {
+      "at_ms": 1792913242697,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "f393b75d0ce8b9963cc4b0744150f5bc3970ff1f",
+        "changeset": "b5ab234f7b2e6bcb7780c582941fb4bf043f775f870e2f18b6fbfa658dc059e2",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 802
+    },
+    {
+      "at_ms": 1792913242745,
+      "event": {
+        "changeset": "b5ab234f7b2e6bcb7780c582941fb4bf043f775f870e2f18b6fbfa658dc059e2",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 803
+    },
+    {
+      "at_ms": 1792913246661,
+      "event": {
+        "changeset": {
+          "base": "f393b75d0ce8b9963cc4b0744150f5bc3970ff1f",
+          "ops": 1,
+          "target": "d83e57a607b4f6479d03a11d1348a7417f5d7cab"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "b78bde800585b0f0d5e071cb10c94577012d59bb50faabf9d38017d0af436d54",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 864
+    },
+    {
+      "at_ms": 1792913247415,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "d83e57a607b4f6479d03a11d1348a7417f5d7cab",
+        "changeset": "b78bde800585b0f0d5e071cb10c94577012d59bb50faabf9d38017d0af436d54",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 892
+    },
+    {
+      "at_ms": 1792913247466,
+      "event": {
+        "changeset": "b78bde800585b0f0d5e071cb10c94577012d59bb50faabf9d38017d0af436d54",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 893
+    },
+    {
+      "at_ms": 1792913251518,
+      "event": {
+        "changeset": {
+          "base": "d83e57a607b4f6479d03a11d1348a7417f5d7cab",
+          "ops": 1,
+          "target": "418f828b0472a0dbdab8b7d3a40bab8b36aedf4d"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "4fa9af684547187711c2d44279b5240403a3ab6230491f70daf8d29f85bd7c6d",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 948
+    },
+    {
+      "at_ms": 1792913252773,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "418f828b0472a0dbdab8b7d3a40bab8b36aedf4d",
+        "changeset": "4fa9af684547187711c2d44279b5240403a3ab6230491f70daf8d29f85bd7c6d",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 5,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 982
+    },
+    {
+      "at_ms": 1792913252812,
+      "event": {
+        "changeset": "4fa9af684547187711c2d44279b5240403a3ab6230491f70daf8d29f85bd7c6d",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 983
+    },
+    {
+      "at_ms": 1792913259318,
+      "event": {
+        "changeset": {
+          "base": "418f828b0472a0dbdab8b7d3a40bab8b36aedf4d",
+          "ops": 1,
+          "target": "b19ffe1de741755fabacacd7857cdb18b121bbd0"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "3b376a369761f70ac92c027003a714090a1ba88e90e97eeb47e7198b18894589",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1038
+    },
+    {
+      "at_ms": 1792913260792,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "b19ffe1de741755fabacacd7857cdb18b121bbd0",
+        "changeset": "3b376a369761f70ac92c027003a714090a1ba88e90e97eeb47e7198b18894589",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1072
+    },
+    {
+      "at_ms": 1792913260825,
+      "event": {
+        "changeset": "3b376a369761f70ac92c027003a714090a1ba88e90e97eeb47e7198b18894589",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1073
+    },
+    {
+      "at_ms": 1792913269734,
+      "event": {
+        "changeset": {
+          "base": "b19ffe1de741755fabacacd7857cdb18b121bbd0",
+          "ops": 1,
+          "target": "5736e8d3ec29abf73562dc6cacc078b04cbd1181"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "dfa7513bac67a1edecdb4d0eb7fcfeb6da9047b99cdea6c767dc9736b7413402",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1134
+    },
+    {
+      "at_ms": 1792913273839,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "5736e8d3ec29abf73562dc6cacc078b04cbd1181",
+        "changeset": "dfa7513bac67a1edecdb4d0eb7fcfeb6da9047b99cdea6c767dc9736b7413402",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1174
+    },
+    {
+      "at_ms": 1792913273869,
+      "event": {
+        "changeset": "dfa7513bac67a1edecdb4d0eb7fcfeb6da9047b99cdea6c767dc9736b7413402",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1175
+    },
+    {
+      "at_ms": 1792913280490,
+      "event": {
+        "changeset": {
+          "base": "5736e8d3ec29abf73562dc6cacc078b04cbd1181",
+          "ops": 1,
+          "target": "a5e46dea37e87e61f34719b3fac4c3a6f79b577c"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "43d87b8c52aba389178bdb8fed135ef62c5adaf7c4bd033ac081eea7b18b874a",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1220
+    },
+    {
+      "at_ms": 1792913283665,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "a5e46dea37e87e61f34719b3fac4c3a6f79b577c",
+        "changeset": "43d87b8c52aba389178bdb8fed135ef62c5adaf7c4bd033ac081eea7b18b874a",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1258
+    },
+    {
+      "at_ms": 1792913283706,
+      "event": {
+        "changeset": "43d87b8c52aba389178bdb8fed135ef62c5adaf7c4bd033ac081eea7b18b874a",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1259
+    },
+    {
+      "at_ms": 1792913291565,
+      "event": {
+        "changeset": {
+          "base": "a5e46dea37e87e61f34719b3fac4c3a6f79b577c",
+          "ops": 1,
+          "target": "f21c9e575bf47c676c46f94a547e5984ec7e3454"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "5615d8a9cccda35200f7f8bbadcd04248dd6ffd4dd9fb1e80c5fb3311b059fc0",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1306
+    },
+    {
+      "at_ms": 1792913292671,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "f21c9e575bf47c676c46f94a547e5984ec7e3454",
+        "changeset": "5615d8a9cccda35200f7f8bbadcd04248dd6ffd4dd9fb1e80c5fb3311b059fc0",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1340
+    },
+    {
+      "at_ms": 1792913292716,
+      "event": {
+        "changeset": "5615d8a9cccda35200f7f8bbadcd04248dd6ffd4dd9fb1e80c5fb3311b059fc0",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1341
+    },
+    {
+      "at_ms": 1792913298814,
+      "event": {
+        "changeset": {
+          "base": "f21c9e575bf47c676c46f94a547e5984ec7e3454",
+          "ops": 1,
+          "target": "cee405d23c1704d1e732b833821e09f0a3816d67"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "be5c48b9f8d59cf770cfa535ff43ff9ef965752aab5bc6a99719c6d68098cb19",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1404
+    },
+    {
+      "at_ms": 1792913302830,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "cee405d23c1704d1e732b833821e09f0a3816d67",
+        "changeset": "be5c48b9f8d59cf770cfa535ff43ff9ef965752aab5bc6a99719c6d68098cb19",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1434
+    },
+    {
+      "at_ms": 1792913302870,
+      "event": {
+        "changeset": "be5c48b9f8d59cf770cfa535ff43ff9ef965752aab5bc6a99719c6d68098cb19",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1435
+    },
+    {
+      "at_ms": 1792913308175,
+      "event": {
+        "changeset": {
+          "base": "cee405d23c1704d1e732b833821e09f0a3816d67",
+          "ops": 1,
+          "target": "a17547bd6fdfb65247aff30cd3aa3f9ce1bc24bb"
+        },
+        "event": "draft_published",
+        "fork": "load-03",
+        "id": "19477d0de87df07c9e216f7e2eaf52b1493c423ae0c1c567ed983744b32b6dc0",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1487
+    },
+    {
+      "at_ms": 1792913310205,
+      "event": {
+        "base": "c3f0016f6aa4684cf5dea5a7de24cd39bc1301bc",
+        "candidate": "a17547bd6fdfb65247aff30cd3aa3f9ce1bc24bb",
+        "changeset": "19477d0de87df07c9e216f7e2eaf52b1493c423ae0c1c567ed983744b32b6dc0",
+        "checks": [
+          {
+            "argv": [
+              "/bin/test",
+              "-s",
+              "README.md"
+            ],
+            "duration_ms": 6,
+            "exit_code": 0,
+            "name": "scratch-readme",
+            "status": "passed",
+            "timeout_secs": 1800
+          }
+        ],
+        "event": "verify_recorded",
+        "fork": "load-03",
+        "manifest": {
+          "oid": "ad7b94f448a7db68036893e5f2c9a1b68331c40e",
+          "sha256": "3796ef17a51193b5c78b538aa1f10b48cc81a68b873eb1c8dc749003e1ace11c"
+        },
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1520
+    },
+    {
+      "at_ms": 1792913310242,
+      "event": {
+        "changeset": "19477d0de87df07c9e216f7e2eaf52b1493c423ae0c1c567ed983744b32b6dc0",
+        "event": "landing_intent",
+        "fork": "load-03",
+        "writer": {
+          "epoch": 1,
+          "holder": {
+            "node": "dogfoodlocalnode",
+            "principal": "load-03"
+          }
+        }
+      },
+      "offset": 1521
+    }
+  ]
+}

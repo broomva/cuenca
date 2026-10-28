@@ -9,7 +9,8 @@ One Ubuntu 24.04 host on the tailnet runs the Cuenca authority (`cuenca serve`) 
 | `cuenca.service.in` | The authority's systemd unit, run as `cuenca:cuenca` |
 | `smbd-cuenca.conf` | A drop-in for Ubuntu's `smbd.service`: start only once `tailscale0` has its address |
 | `smb.conf.in` | Samba's configuration: tailnet only, one account, server-side modes, `fruit` + `streams_xattr` |
-| `wait-tailnet` | Waits for `tailscale0`'s IPv4 address (both units run it before starting) |
+| `tailnet-addr.sh` | Sourced by both scripts: an `--allow` / `hosts allow` address must be one tailnet address, written canonically |
+| `wait-tailnet` | Waits for `tailscale0`'s IPv4 address and, when the node has one, its IPv6 address (both units run it before starting) |
 | `test-container.sh` | CI: install twice in `ubuntu:24.04`, check that nothing moved, and check that `check.sh` catches each planted fault |
 | `test-systemd.sh` | Before changing the units: the real binary under Ubuntu's systemd in a privileged container, with a dummy `tailscale0`. It runs the full `check.sh`, shows that Samba refuses the host's own address (with a control that logs in as `cuenca-owner` and finds `main/` read-only), restarts after a kill, and shows that `smbd` waits for `tailscale0` |
 
@@ -19,7 +20,8 @@ One Ubuntu 24.04 host on the tailnet runs the Cuenca authority (`cuenca serve`) 
 |---|---|---|
 | `/usr/local/bin/cuenca` | root, 0755 | The binary (`cuenca serve` is the authority) |
 | `/var/lib/cuenca/state/` | cuenca, 0700 | The log, blobs, keys file and landing's git repositories |
-| `/var/lib/cuenca/` | cuenca, 0750 | The authority user's home (`gh`'s login lives under it) |
+| `/var/lib/cuenca/` | cuenca, 0750 | The authority user's home |
+| `/etc/cuenca/gh.env` | root:cuenca, 0640 | Landing's token, `GH_TOKEN=<token>` (step 5); written by the operator, never by `install.sh` |
 | `/srv/cuenca/volume/` | cuenca:cuenca, 2750 | The volume: `main/<location>/` and `forks/<fork>/` read-only, `forks/owner-*/` writable by `cuenca-owner` |
 | `/run/cuenca/admin.sock` | cuenca, dir 0700 | Owner acts (`cuenca admin`) |
 | `/etc/cuenca/cuenca.env` | root:cuenca, 0640 | `CUENCA_STATE`, `CUENCA_BIND` (tailnet address, port 7419), `CUENCA_VOLUME` |
@@ -39,12 +41,14 @@ There are two accounts, and neither has a shell. `cuenca` runs the authority. `c
    ```bash
    sudo bash deploy/install.sh --binary ./cuenca --allow <mac ipv4> --allow <mac ipv6> --allow <iphone ipv4> --allow <iphone ipv6>
    ```
-   The script installs `samba`, `samba-vfs-modules` (which holds `fruit` and `streams_xattr`), `git`, `gh` and `curl` from Ubuntu's archive, holding their services until Cuenca's `smb.conf` is in place, creates the accounts and directories, renders the unit and `smb.conf` (it checks `smb.conf` with `testparm` first, and keeps Ubuntu's own file once as `smb.conf.pre-cuenca`). The host's `smb.conf` becomes Cuenca's alone: any other share on it is dropped, so use a host that serves nothing else over SMB, masks `nmbd`, and starts `smbd` and `cuenca`. On a host that still runs spike C, add `--retire-spike` to remove the `cuenca-spike` container, which holds `:445`.
+   The script installs `samba`, `samba-vfs-modules` (which holds `fruit` and `streams_xattr`), `git`, `gh` and `curl` from Ubuntu's archive, holding their services until Cuenca's `smb.conf` is in place, creates the accounts and directories, renders the unit and `smb.conf` (it checks `smb.conf` with `testparm` first, and keeps Ubuntu's own file once as `smb.conf.pre-cuenca`), masks `nmbd`, and starts `smbd` and `cuenca`. The host's `smb.conf` becomes Cuenca's alone: any other share on it is dropped, so use a host that serves nothing else over SMB. Each `--allow` address must be written canonically (as `tailscale ip` prints it), and `--volume` must be a new directory outside `/var/lib/cuenca`. On a host that still runs spike C, add `--retire-spike` to remove the `cuenca-spike` container, which holds `:445`.
 4. Hand the owner the Samba password, out of band. The script generates it once and never prints it. It is in `/root/cuenca-owner.smbpass` (root only). Read it on the host, store it in the owner's password manager, then `sudo rm /root/cuenca-owner.smbpass`.
-5. Log the authority's `gh` in for landing (the shared login, for now; spec rev 2.2 §6):
+5. Give the authority its own copy of the token landing uses (the shared `gh` login, for now; spec rev 2.2 §6). It is one line, `GH_TOKEN=<token>`, in `/etc/cuenca/gh.env`, which only root writes and only the `cuenca` group reads; the unit loads it, and `gh` and git's credential helper read `GH_TOKEN`:
    ```bash
-   sudo -u cuenca -H gh auth login --with-token < token-file
+   { printf 'GH_TOKEN='; cat token-file; } | sudo install -o root -g cuenca -m 0640 /dev/stdin /etc/cuenca/gh.env
+   sudo systemctl restart cuenca
    ```
+   Re-running `install.sh` keeps the file. To replace the token, write the file again the same way and restart `cuenca`.
 6. Check it: `sudo bash deploy/check.sh` (all lines `ok`). Then, from outside the host:
    ```bash
    nc -z -w 3 <tailnet ip> 445 && echo open        # from an enrolled device: open
@@ -53,6 +57,18 @@ There are two accounts, and neither has a shell. `cuenca` runs the authority. `c
    In Finder, Go → Connect to Server → `smb://<tailnet ip>/cuenca`, as `cuenca-owner`.
 
 Re-running `install.sh` with the same arguments changes nothing except restarting both services. Without `--binary` it keeps the installed binary.
+
+## A host without `tailscale0` (WSL2, mirrored networking)
+
+On Windows with WSL2 in mirrored networking mode, Windows' Tailscale owns the node: its tailnet addresses show up inside WSL on an `ethN` interface whose name changes between boots (the NUC had `eth4` on one boot, `eth0` and `eth5` on others), and there is no `tailscale0`. Bind by address instead. Give the host's own two tailnet addresses (Windows' `tailscale ip -4` / `-6`, or `ip -o addr` inside WSL):
+
+```bash
+sudo bash deploy/install.sh --binary ./cuenca --tailnet-addr 100.112.149.32 --tailnet-addr fd7a:115c:a1e0::9237:9520 --allow <mac ipv4> --allow <mac ipv6> ...
+```
+
+Then smb.conf binds `interfaces = <ipv4>/32 <ipv6>/128`, the agent API defaults to `<ipv4>:7419`, `/etc/cuenca/cuenca.env` records `CUENCA_TAILNET_ADDRS`, and both units' `wait-tailnet` waits until each address is on some interface. `check.sh` checks the listeners against those addresses. `--bind` must be that IPv4 address. A re-run without `--tailnet-addr` keeps the recorded addresses; `--no-tailnet-addr` returns the host to `tailscale0`. `check.sh` validates `CUENCA_TAILNET_ADDRS` and `CUENCA_BIND` themselves (canonical tailnet addresses, the bind on the host's IPv4 one) and fails if a `tailscale0` appears. It sees Linux sockets only: on the NUC, Windows' own SMB server is kept off `:445` separately (`LanmanServer` disabled; workspace runbook `docs/references/nuc-wsl-cuenca-host.md`, W6).
+
+The authority still needs a `tailscale` CLI on the host to name each request's node (`tailscale whois`). With WSL interop off, Windows' CLI cannot be reached from Linux. So run a second, whois-only Tailscale node inside WSL from Tailscale's own apt repository, in userspace mode so it adds no interface or route: `/etc/default/tailscaled` holds `FLAGS="--tun=userspace-networking"` before the package's first start, then `sudo tailscale up --hostname=<host>-cuenca --accept-dns=false --accept-routes=false --shields-up --ssh=false`. The owner approves the node and turns off its key expiry. Requests still arrive through Windows' Tailscale with the peer's own tailnet source address, and the WSL node's netmap names that peer. Agents on the same host reach the authority from Windows' address, which whois names as the Windows node.
 
 ## Operate
 
@@ -72,3 +88,31 @@ Re-running `install.sh` with the same arguments changes nothing except restartin
 - **After a reboot:** both units are enabled and come back on their own. `check.sh` confirms it.
 - **The volume looks wrong:** the volume is derived from the log. Stop `cuenca`, move the volume aside, and start `cuenca`. It rebuilds `main/` and every agent fork. Owner forks are written from Finder, so move them back from the old volume before deleting it, and the next snapshot picks them up.
 - **Lost state:** restore the log and blobs from backup (BRO-3258).
+
+## Local backup/restore fixture (BRO-3258)
+
+Build `cargo build -p cuenca-server --bin cuenca-backup`, then run
+`bash deploy/restore-drill.sh` on the SSD. The drill generates **TEST ONLY** age and
+signing keys under `/Volumes/Broomva/scratch/bro-3258`, kills backup subprocesses
+at each publication boundary, restores and verifies every reachable historical
+blob, opens the owner's fork and resumes an intent once. Its last line reports
+fixture path; keys and plaintext stay there, never in a PR. Remove that disposable
+fixture after retaining the nonsecret receipt. The caller may set
+`CUENCA_DRILL_SCRATCH`, `CARGO_TARGET_DIR`, or `CUENCA_BACKUP_BIN`.
+
+For a stopped throwaway authority, `bash deploy/backup.sh --source <state/store>
+--objects <fixture> --recipient <public-recipient-file> --signing-key <seed-file>`.
+Restore with `cuenca-backup restore --objects <fixture> --destination <new-store>
+--identity <owner-mediated-identity-file> --trust-key <independently-pinned-public-key>`.
+The destination parent must exist; an existing destination is refused. Do not take
+trust from the backup itself. The CLI must not open a running authority's redb
+store. The library exports one consistent read snapshot through its live handle.
+After independent provisioning and credential minting, use the restored directory
+as the authority's `state/store`; cached Git exports and volume projections rebuild.
+
+See [local format ADR](../docs/adr/2026-10-25-local-backup-fixture.md) for format,
+resource limits and external custody. Mutation slice:
+`CUENCA_MUT_TMPDIR=/Volumes/Broomva/scratch/b3258m bash
+cuenca-server/scripts/mutation-check.sh --restore-only` (keep the run path ≤64 bytes).
+
+node stays incomplete on R2/RPO by owner choice: local fixture only for now, R2 deferred; NUC RPO timer waits on BRO-3461
