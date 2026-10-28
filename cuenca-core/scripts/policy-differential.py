@@ -424,6 +424,7 @@ FIXED = [
     # Round 12: Unicode case-folding parity vs Python .lower()
     "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, 'doc[!ſ]/*']\n",
     "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, 'docs/??.md']\n",
+    "\ufeffauto_merge:\n  \"rules\":\n    - path_touched: |\n",
 ]
 
 ODD_SCALARS = [

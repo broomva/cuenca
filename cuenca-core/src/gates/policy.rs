@@ -441,8 +441,8 @@ impl Policy {
                 let branch = string(rule.get("branch_pattern"), &format!("{key}.branch_pattern"))?;
                 let path = string(rule.get("path_touched"), &format!("{key}.path_touched"))?;
                 let path = match (
-                    branch.filter(|b| !b.is_empty()),
-                    path.filter(|p| !p.is_empty()),
+                    branch.filter(|b| !b.trim().is_empty()),
+                    path.filter(|p| !p.trim().is_empty()),
                 ) {
                     (Some(_), Some(_)) => {
                         return Err(format!("{key} sets both branch_pattern and path_touched"));
@@ -1595,6 +1595,18 @@ cuenca:
 
     /// p9's rule defaults: a rule without an action is `notify`, and only
     /// `require_human` rules protect a path.
+    /// A rule whose path or branch pattern is empty or resolves to an empty scalar
+    /// (e.g. `path_touched: |`) is refused, as p9 refuses it.
+    #[test]
+    fn an_empty_rule_target_is_refused() {
+        let text = "\u{feff}auto_merge:\n  \"rules\":\n    - path_touched: |\n";
+        let err = Policy::parse(text.as_bytes()).unwrap_err();
+        assert_eq!(
+            err,
+            "auto_merge.rules[0] sets neither branch_pattern nor path_touched"
+        );
+    }
+
     #[test]
     fn rules_follow_p9() {
         let p = Policy::parse(
