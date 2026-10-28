@@ -22,6 +22,8 @@ const SAMPLE_PATHS: &[&str] = &[
     "docs/ADR-001.md",
     "docs/a.md",
     "docs/ab.md",
+    "docs/İ.md",
+    "docs/ſ.md",
     "0",
     "-",
     "a",
@@ -29,9 +31,15 @@ const SAMPLE_PATHS: &[&str] = &[
     "z",
     "[",
     "]",
+    "İ",
+    "ſ",
 ];
 
 fn main() {
+    if std::env::args().nth(1).as_deref() == Some("--sample-paths") {
+        println!("{}", serde_json::to_string(&SAMPLE_PATHS).unwrap());
+        return;
+    }
     let builtin = Policy::default().secret_paths.len();
     for file in std::env::args().skip(1) {
         let bytes = std::fs::read(&file).unwrap_or_else(|e| panic!("{file}: {e}"));

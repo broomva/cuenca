@@ -367,7 +367,8 @@ mutate src/gates/policy.rs '                if key
                     && (matches!(' --lib
 mutate src/gates/policy.rs 'if !matches!(Yaml::from_str(v), Yaml::String(_))' 'if false' --lib
 mutate src/gates/builtin.rs 'let mut k = 1;' 'let mut k = 0;' --lib
-mutate src/gates/builtin.rs 'if chunks[m - 1].last() <= Some(&'"'"'@'"'"') && chunk.first() >= Some(&'"'"'['"'"') {' 'if false {' --lib
+mutate src/gates/builtin.rs 'String::from("(?s)^")' 'String::from("(?is)^")' --lib
+mutate src/gates/policy.rs 'let lower = path.to_lowercase();' 'let lower = path;' --lib
 mutate src/gates/builtin.rs 'pattern.to_lowercase()' 'pattern' --lib
 mutate src/store.rs '        let bytes = if matches!(entry, Entry::Symlink(_)) {' '        let bytes = if false {' --lib
 

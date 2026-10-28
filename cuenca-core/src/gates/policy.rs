@@ -245,9 +245,10 @@ impl Governance {
     /// Whether `path` matches any of the tier's globs, as the `governance_rate` gate
     /// matches it.
     pub fn matches(&self, path: &str) -> bool {
+        let lower = path.to_lowercase();
         self.paths
             .iter()
-            .any(|p| super::builtin::glob(p).is_match(path))
+            .any(|p| super::builtin::glob(p).is_match(&lower))
     }
 }
 
@@ -315,8 +316,19 @@ impl Policy {
             ));
         }
         prescan(text)?;
-        let docs = yaml_rust2::YamlLoader::load_from_str(text)
-            .map_err(|e| format!("{POLICY_PATH} is not valid YAML: {e}"))?;
+        let docs = yaml_rust2::YamlLoader::load_from_str(text).map_err(|e| {
+            let msg = if e.info().ends_with(": duplicated key in mapping") {
+                format!(
+                    "duplicate key in mapping at byte {} line {} column {}",
+                    e.marker().index(),
+                    e.marker().line(),
+                    e.marker().col() + 1
+                )
+            } else {
+                e.to_string()
+            };
+            format!("{POLICY_PATH} is not valid YAML: {msg}")
+        })?;
         let mut policy = Self::default();
         let root = match docs.as_slice() {
             [] => return Ok(policy),
@@ -1131,6 +1143,43 @@ cuenca:
     }
 
     #[test]
+    fn duplicate_key_names_by_position_and_redacts_content() {
+        let secretish = "PRODUCTION_SECRET_KEY_12345";
+        let text = format!("auto_merge:\n  {secretish}: 1\n  {secretish}: 2\n");
+        let err = Policy::parse(text.as_bytes()).unwrap_err();
+        assert!(!err.contains("PRODUCTION"), "{err}");
+        assert!(err.contains("duplicate key in mapping"), "{err}");
+        assert!(err.contains("line 3 column 3"), "{err}");
+    }
+
+    #[test]
+    fn sample_paths_stay_identical() {
+        let proj = include_str!("../../examples/policy_projection.rs");
+        let diff = include_str!("../../scripts/policy-differential.py");
+
+        fn extract_paths(src: &str) -> Vec<String> {
+            let start = src.find("SAMPLE_PATHS").expect("SAMPLE_PATHS marker");
+            let rest = &src[start..];
+            let eq = rest.find('=').expect("equals sign after SAMPLE_PATHS");
+            let after_eq = &rest[eq + 1..];
+            let open = after_eq.find(['[', '(']).expect("open bracket");
+            let close = after_eq[open..].find([']', ')']).expect("close bracket") + open;
+            after_eq[open + 1..close]
+                .split(',')
+                .map(|s| s.trim().trim_matches('"').trim_matches('\'').to_string())
+                .filter(|s| !s.is_empty())
+                .collect()
+        }
+
+        let proj_paths = extract_paths(proj);
+        let diff_paths = extract_paths(diff);
+        assert_eq!(
+            proj_paths, diff_paths,
+            "SAMPLE_PATHS divergence between policy_projection.rs and policy-differential.py"
+        );
+    }
+
+    #[test]
     fn a_line_break_only_pyyaml_sees_is_refused() {
         // PyYAML breaks lines at U+0085, U+2028 and U+2029; yaml-rust2 does not, so the
         // rules below were one string under `note:` and the engine protected nothing (r9, B).
@@ -1559,6 +1608,14 @@ cuenca:
         assert_eq!(max.governance.unwrap().window_ms, 2_592_000_000);
         let at = Policy::parse(b"cuenca:\n  gates:\n    max_file_bytes: 10485760\n").unwrap();
         assert_eq!(at.max_file_bytes, DEFAULT_MAX_FILE_BYTES);
+
+        let custom = Policy::parse(
+            "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, 'docs/??.md', 'doc[!\u{017f}]/*']\n".as_bytes(),
+        )
+        .unwrap();
+        let gov = custom.governance.unwrap();
+        assert!(gov.matches("docs/\u{0130}.md"));
+        assert!(gov.matches("docs/a.md"));
     }
 
     /// A pattern is never quoted back, and the number of patterns is capped.

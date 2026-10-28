@@ -98,7 +98,8 @@ def load_p9(path: Path):
 SAMPLE_PATHS = (
     "CLAUDE.md", "claude.md", "x/CLAUDE.md", "AGENTS.md", "METALAYER.md",
     ".control/policy.yaml", ".control/rcs-parameters.toml", "docs/charter.md",
-    "docs/ADR-001.md", "docs/a.md", "docs/ab.md", "0", "-", "a", "b", "z", "[", "]",
+    "docs/ADR-001.md", "docs/a.md", "docs/ab.md", "docs/İ.md", "docs/ſ.md",
+    "0", "-", "a", "b", "z", "[", "]", "İ", "ſ",
 )
 
 
@@ -420,6 +421,9 @@ FIXED = [
     "permissions:\n  ? \n  : first\n  ~: second\nauto_merge: {rules: [{path_touched: x, action: require_human}]}\n",
     "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '[--a]', '[-a]', '[a-]', '[a-c-e]']\n",
     "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, '[Z-a]']\n",
+    # Round 12: Unicode case-folding parity vs Python .lower()
+    "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, 'doc[!ſ]/*']\n",
+    "auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml, 'docs/??.md']\n",
 ]
 
 ODD_SCALARS = [
@@ -558,6 +562,14 @@ def main() -> int:
     ap.add_argument("--show", type=int, default=40, help="print at most this many")
     ap.add_argument("--keep", type=Path, help="write the inputs here and keep them")
     args = ap.parse_args()
+
+    engine_samples = tuple(
+        json.loads(subprocess.check_output([str(args.engine), "--sample-paths"]))
+    )
+    if SAMPLE_PATHS != engine_samples:
+        raise SystemExit(
+            f"SAMPLE_PATHS divergence: Python has {SAMPLE_PATHS}, engine has {engine_samples}"
+        )
 
     if args.p9 is None:
         args.p9 = fetch_p9(Path(tempfile.mkdtemp()) / "p9.py")

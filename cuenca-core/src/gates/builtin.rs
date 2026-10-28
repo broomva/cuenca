@@ -107,10 +107,11 @@ impl FileGate for SecretPath {
         if file.after.is_none() {
             return vec![];
         }
+        let lower = file.path.as_str().to_lowercase();
         self.0
             .iter()
             .enumerate()
-            .filter(|(_, re)| re.is_match(file.path.as_str()))
+            .filter(|(_, re)| re.is_match(&lower))
             .map(|(i, _)| format!("the path matches secret-file pattern {i} (0 is the built-in)"))
             .collect()
     }
@@ -187,7 +188,10 @@ struct GovernanceRate {
 
 impl GovernanceRate {
     fn touches<'p>(&self, mut paths: impl Iterator<Item = &'p str>) -> bool {
-        paths.any(|p| self.paths.iter().any(|(_, re)| re.is_match(p)))
+        paths.any(|p| {
+            let lower = p.to_lowercase();
+            self.paths.iter().any(|(_, re)| re.is_match(&lower))
+        })
     }
 }
 
@@ -319,8 +323,8 @@ pub(super) fn inside(w: &Window, at_ms: u64) -> bool {
 }
 
 /// A shell glob as Python's `fnmatch` reads it (p9 matches governance paths with it),
-/// case-folded: `*` is any run of characters, `/` included; `?` one character;
-/// `[...]` a class, `[!...]` its complement; anything else literal.
+/// matched against lowercased paths: `*` is any run of characters, `/` included;
+/// `?` one character; `[...]` a class, `[!...]` its complement; anything else literal.
 pub(super) fn glob(pattern: &str) -> Regex {
     try_glob(pattern).unwrap_or_else(|_| Regex::new("$^").expect("never matches"))
 }
@@ -328,7 +332,7 @@ pub(super) fn glob(pattern: &str) -> Regex {
 /// [`glob`], or the error of a class the regex engine refuses (`[z-ab]`, which
 /// `fnmatch` reads differently); a compiled policy has none ([`super::policy`]).
 pub(super) fn try_glob(pattern: &str) -> Result<Regex, regex::Error> {
-    let mut re = String::from("(?is)^");
+    let mut re = String::from("(?s)^");
     // p9 lowercases `pat` before `fnmatch` translates its character classes.
     let chars: Vec<char> = pattern.to_lowercase().chars().collect();
     let mut i = 0;
@@ -375,12 +379,6 @@ pub(super) fn try_glob(pattern: &str) -> Result<Regex, regex::Error> {
                     }
                     for (m, chunk) in chunks.iter().enumerate() {
                         if m > 0 {
-                            // p9 runs `fnmatch` on `path.lower()` without `(?i)`, so a
-                            // range across `A..=Z` (`[--a]`) never sees `A..=Z` there;
-                            // under `(?i)` it would also match `a..=z`.
-                            if chunks[m - 1].last() <= Some(&'@') && chunk.first() >= Some(&'[') {
-                                re.push_str("-@\\[");
-                            }
                             re.push('-');
                         }
                         for c in *chunk {
@@ -431,9 +429,15 @@ mod tests {
             ("[]a]", "]", true),
             ("[", "[", true),
             (".control/policy.yaml", ".control/policyxyaml", false),
+            ("docs/??.md", "docs/İ.md", true),
+            ("doc[!ſ]/*", "docs/a.md", true),
         ];
         for (pattern, path, want) in cases {
-            assert_eq!(glob(pattern).is_match(path), *want, "{pattern} vs {path}");
+            assert_eq!(
+                glob(pattern).is_match(&path.to_lowercase()),
+                *want,
+                "{pattern} vs {path}"
+            );
         }
     }
 
