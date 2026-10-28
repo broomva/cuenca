@@ -31,7 +31,11 @@ target=${CARGO_TARGET_DIR:-$(cargo metadata --format-version 1 --no-deps | pytho
 engine=$target/debug/examples/policy_projection
 
 differential() {
-  bounded cargo build -q -p cuenca-core --example policy_projection --locked >"$backup/build" 2>&1 || return 3
+  bounded cargo build -q -p cuenca-core --example policy_projection --locked >"$backup/build" 2>&1 || {
+    local s=$?
+    [ "$s" -ge 128 ] && return "$s"
+    return 3
+  }
   bounded python3 scripts/policy-differential.py --engine "$engine" --cases 5000 --show 1 "$@" >"$backup/log" 2>&1
 }
 
