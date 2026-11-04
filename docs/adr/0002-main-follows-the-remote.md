@@ -1,7 +1,8 @@
 # ADR 0002: A remote-backed location's main follows its remote
 
-Date: 2026-11-04, revision 2. Status: proposed (BRO-3601, part 2 of BRO-3517). Design
-only; no code lands until this ADR passes review and its owner decisions are taken.
+Date: 2026-11-04, revision 3. Status: proposed (BRO-3601, part 2 of BRO-3517). Design
+only. Owner decisions D1 and D2 are accepted (2026-11-04); no code lands until this ADR
+passes review.
 
 ## Context
 
@@ -37,74 +38,94 @@ Following has two kinds of work.
   **not bounded** by the deadline. A stalled disk stalls following the same way it
   stalls landing.
 
-**Owner decision D1:** accept that the bound covers the git and network work only, and
-that local store work has no bound, as is true for every authority path today.
-Recommended: accept. Bounding redb and disk I/O would need a separate writer process
-with a watchdog, and that is a different and larger change.
+**Owner decision D1, accepted 2026-11-04:** the bound covers the git and network work
+only, and local store work has no bound, as is true for every authority path today.
+Bounding redb and disk I/O would need a separate writer process with a watchdog, a
+different and larger change.
 
 ## Requirements
 
 1. **Bounded git work.** As above: one deadline per follow operation, and no git
    child outlives it. Process-group termination makes that true, below.
-2. **Bounded resources.** A stalled or killed call leaks no processes, threads, file
-   descriptors or buffers, however many times it recurs.
-3. **No unsafe lock removal.** A ref lock is removed only when the lander can prove
-   that the process that took it is dead. Otherwise following fails safely and shows
-   the lock.
-4. **Every allowed blob follows, and progress survives retries.** A blob up to the
-   per-blob cap (256 MiB) follows. An update of any total size eventually follows.
-   Work already done is never repeated, so a run of timeouts cannot starve progress.
-5. **Gate history.** `MainFollowed` is part of main's history (`gates::History`) for
-   the revert and governance gates.
+2. **Bounded resources.** A stalled or killed call leaks no processes (except
+   `setsid` escapes, below), threads or file descriptors, however many times it
+   recurs, and the output it captures is bounded by a per-call cap.
+3. **No lock removal.** A ref lock is never removed automatically. A lock fails the
+   follow safely, and the location shows it.
+4. **Allowed blobs follow, and done work is kept.** A blob up to the per-blob cap
+   (256 MiB) follows when its batch fits in the deadline. Committed batches are never
+   read again. A follow that does not fit fails visibly; it does not loop silently.
+5. **Gate history.** Every main move (`MainAdvanced` and `MainFollowed`) is part of
+   main's history (`gates::History`) for the revert and governance gates, with all
+   the paths and blobs it changed.
 6. **Gate freshness.** A landing intent is never recorded against a main that moved
    (by a landing or a follow) between gate evaluation and the append.
 
 ## Decision
 
-- **Process-group termination; no detached readers.** Every git or gh child is spawned
+- **Process-group termination, with bounded output.** Every git or gh child is spawned
   in its own process group (`CommandExt::process_group(0)`). At its deadline the
   lander kills the group (`killpg`, SIGKILL) and reaps the direct child. Every holder
   of the pipes is in the group, so the reader threads then see EOF and are joined.
   The same applies when the direct child exits normally while a descendant still holds
-  a pipe: the group is killed after the deadline, and readers are joined.
-  - **Covers:** the landing path, which was BRO-3599 and becomes a prerequisite of this
-    build. It also covers the `cuenca_tree::git::Repo` runner and batch reader
-    (stdin writer, stdout and stderr readers), which take a deadline.
-  - **Limit:** a descendant that calls `setsid` leaves the group and is not killed.
-    git's own helpers do not do that. An ssh ControlMaster can, and that case is
-    documented as unsupported for remotes.
-- **Locks are removed only after the lander killed their writer.** The lander records,
-  in memory, every ref it was updating when it killed a call's group and reaped it. At
-  the start of the next fetch of that ref, a lock present there is removed. That is
-  proven safe: the group is dead, and `Lander::spawn` holds an exclusive `flock` on
-  `<repos>/.lander.lock` for its lifetime, so no other lander writes there. Any other
-  lock is left alone. Following then fails for that location with an error naming the
-  lock, shown in the location status, until an operator removes it. Lock age is not
-  used.
-- **Ingest by size, resumable.**
+  a pipe: the group is killed after the deadline, and readers are joined. Captured
+  output is bounded too:
+  - each call declares a stdout cap: about 4 KiB for `rev-parse`, 1 MiB for
+    `ls-remote`, 128 MiB for the parent search log, 256 MiB for `ls-tree`, and
+    64 MiB for `cat-file --batch-check`;
+  - stderr keeps only its last 64 KiB;
+  - a reader that passes its cap kills the group, and the call fails naming the cap.
+
+  This covers the landing path, which was BRO-3599 and becomes a prerequisite of this
+  build. It also covers the `cuenca_tree::git::Repo` runner and batch reader (stdin
+  writer, stdout and stderr readers), which take a deadline and caps. The batch reader
+  streams each blob into its batch buffer, which is bounded by the batch size below.
+  A descendant that calls `setsid` leaves the group and is not killed. git's own
+  helpers do not do that. An ssh ControlMaster can, and that case is documented as
+  unsupported for remotes.
+- **Ref locks are never removed automatically.** No lander can prove that the process
+  which took a `refs/cuenca/*.lock` is dead: a killed call may never have touched the
+  ref, and another git process may hold the lock. So a fetch that finds a lock, or
+  fails on one, fails that location's follow with an error naming the lock. The error
+  is shown in the location's status and logged, and following retries on later rounds.
+  The documented recovery, after checking that no git process works in
+  `<repos>/<location>.git`, is to remove the lock file. #46's automatic removal and
+  revision 2's killed-writer rule are both dropped.
+- **Ingest by size, keeping what is done.**
   1. Read the tree structure with `ls-tree` (tree objects are still verified byte by
      byte, as in `read_tree`). The blobs the store lacks are listed, and their sizes
      come from `cat-file --batch-check`.
   2. Missing blobs are grouped greedily into batches of at most 64 MiB. A blob bigger
      than 64 MiB, up to the 256 MiB cap, forms a batch of its own.
-  3. Each batch is read with `read_blobs`, checked against its ids, ingested and
-     committed before the next.
-  4. Every committed batch is durable, so a later follow skips it. Under the deadline
-     an update of any size therefore completes over as many rounds as it needs.
-  5. `MainFollowed` is recorded only when every blob is present.
-  6. Content-rule checks (symlinks, `.gitattributes`) run on the ruled blobs before
-     they are ingested. Rule checking stays in one place: `read_tree_known`'s rule
-     logic moves to a function used here.
-- **History.** `main_history` replays the log in order, tracking each location's
-  current main tree:
-  - `LocationAdded` sets it.
-  - `MainAdvanced` applies its changeset. This replaces today's deferred collection,
-    so log order is preserved.
-  - `MainFollowed` diffs the current tree against the followed tree, then sets it.
+  3. Each batch is read, checked against its ids, ingested and committed before the
+     next. A batch that completes is kept, and a later follow skips its blobs.
+  4. `MainFollowed` is recorded only when every blob is present.
+  5. Content-rule checks (symlinks, `.gitattributes`) run on the ruled blobs before
+     they are ingested, in the one rule-checking function `read_tree_known` uses.
 
-  `held` gains every `(path, blob)` of the followed tree. `moves` gains
-  `(at, paths)`, where `paths` covers additions, deletions, blob changes and mode
-  changes. `history_tags` selects `main_followed`.
+  **No eventual-progress guarantee.** A follow completes when its fetch, listing, size
+  discovery and at least its next batch fit in `T` at the host's throughput. A
+  single-blob batch must fit in `T` on its own. A follow that cannot fit fails with
+  the step it reached, the time it took and the bytes left. That is shown in the
+  location's status, and main does not move. The remedy is a larger `follow_timeout`
+  for the host, a configuration value, not a code change. Every fetch, listing and
+  size discovery is repeated on each round, by design, because they are cheap
+  relative to blob transfer for the repositories this workspace holds.
+- **History, by tree diff for every move.** `main_history` replays the log in order,
+  tracking each location's current main tree. Each kind of record moves it:
+  - `LocationAdded` sets the tree.
+  - `MainAdvanced` loads the actual new main, the landed fork's head tree, which is
+    the head changeset's target and is stored. It does not apply the head changeset
+    to the previous main, because a fork landed after several drafts has a head
+    changeset whose base is an earlier draft, not main.
+  - `MainFollowed` loads the followed tree.
+
+  For each move, `held` gains every `(path, blob)` of the new tree. `moves` gains
+  `(at, paths)`, where `paths` is the diff of the previous tree against the new one:
+  additions, deletions, blob changes and mode changes. `history_tags` selects
+  `main_followed`. This also fixes BRO-3603: today `main_history` records only the
+  head changeset's ops for `MainAdvanced`, so the earlier drafts of a multi-draft
+  landing are missing from `held` and `moves`.
 - **Fence on every move, by log offset.** Gate evaluation records the location's
   *move key*: the offset of its last `MainAdvanced` (`main_moved.offset`, which exists
   today) together with the offset of its last `MainFollowed`, stored as
@@ -148,10 +169,10 @@ their group is killed; this is the `setsid` limit above.
   one round per cycle, not indefinitely. A location that itself keeps failing does not
   move, and shows its error.
 
-**Owner decision D2:** accept these bounds with `T = 60 s` and one follow per round.
-For about 10 locations and an idle 30 s poll, that is about 5 minutes of lag at worst
-on a healthy fleet. Recommended: accept. A per-location interval or concurrent
-following can come later, if lag matters.
+**Owner decision D2, accepted 2026-11-04:** these bounds, with `T = 60 s` and one
+follow per round. For about 10 locations and an idle 30 s poll, that is about 5 minutes
+of lag at worst on a healthy fleet. A per-location interval or concurrent following can
+come later, if lag matters.
 
 ## Tests the build must carry
 
@@ -162,20 +183,22 @@ following can come later, if lag matters.
   - the same, repeated 50 times, with no growth;
   - a normal exit with an inherited pipe;
   - blocked stdin on the batch reader.
-- **Locks:**
-  - a lock the lander created by a killed fetch is removed;
-  - an old lock it did not create is left, and the location shows the error;
-  - a second `Lander::spawn` on the same repos fails;
-  - a lock left by a crash and restart is not removed automatically.
+- **Locks:** a lock present at a fetch, or created by a killed fetch, is left in
+  place. The location shows the error, retries continue, and following resumes after
+  the lock is removed.
+- **Output caps:** a git wrapper printing past a call's stdout cap is killed and fails
+  naming the cap; stderr keeps only its tail.
 - **Ingest:**
   - a 100 MiB blob, between the batch size and the per-blob cap, follows;
-  - an update over the total read cap follows across rounds;
-  - repeated timeouts before the first batch still make progress once a round is
-    long enough;
+  - an update over the total read cap follows across rounds when each batch fits in
+    `T`;
+  - a follow that cannot fit fails with its step, time and bytes left, and main
+    stays;
   - ruled blobs are still checked.
 - **History:**
   - all three event kinds, interleaved across two locations, give `held` and `moves`
     in log order;
+  - a fork landed after three drafts records draft 1's paths and blobs (BRO-3603);
   - the revert gate catches a blob that was followed away and then restored;
   - `governance_rate` counts a followed governance change at its time, at the window's
     edges;
