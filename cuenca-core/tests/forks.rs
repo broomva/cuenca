@@ -899,3 +899,57 @@ fn a_fork_at_a_main_that_moved_is_refused() {
         .create_fork_at(&fork("g"), &loc("l"), cs.target, &agent())
         .unwrap();
 }
+
+/// BRO-3517: every fork of a line knows the main the line started from, derived from
+/// the forks the log keeps. A fork of a fork and a sibling reach it through `from` and
+/// `parent`; when main moves, the forks that exist keep it and the next fork starts from
+/// the new main.
+#[test]
+fn a_line_of_forks_keeps_the_main_it_started_from() {
+    let (_d, store, main) = forked();
+    let root = main.git_tree_id();
+    assert_eq!(store.root_main(&fork("f")).unwrap(), root);
+
+    // A draft, then a fork of the fork: its base is f's head, its root is still main.
+    let one = write(&store, &main, &[("a", b"2")]);
+    let id = store.publish_draft(&fork("f"), &w1(), &one).unwrap().id;
+    store.branch_fork(&fork("g"), &fork("f"), &agent()).unwrap();
+    let g = store.fork(&fork("g")).unwrap().unwrap();
+    assert_ne!(g.base, root);
+    assert_eq!(store.root_main(&fork("g")).unwrap(), root);
+
+    // The owner lands f, so main moves (a location without a remote).
+    verify(&store, &fork("f"), &w1(), id);
+    ask_landing(&store, &fork("f"), &w1(), id).unwrap();
+    store.advance_main(&fork("f"), id).unwrap();
+    let moved = store.location(&loc("l")).unwrap().unwrap().main;
+    assert_ne!(moved, root);
+    assert_eq!(
+        store.root_main(&fork("g")).unwrap(),
+        root,
+        "g keeps its root"
+    );
+    store.create_fork(&fork("h"), &loc("l"), &agent()).unwrap();
+    assert_eq!(store.root_main(&fork("h")).unwrap(), moved);
+
+    // A stale-epoch draft lands in a sibling of g, which keeps g's root.
+    store.take_over(&fork("g"), 1, &owner()).unwrap();
+    let two = write(
+        &store,
+        &store.fork_head(&fork("g")).unwrap(),
+        &[("c", b"3")],
+    );
+    let p = store.publish_draft(&fork("g"), &w1(), &two).unwrap();
+    assert!(p.fenced);
+    assert_eq!(store.root_main(&p.fork).unwrap(), root);
+}
+
+/// An unknown fork has no root.
+#[test]
+fn an_unknown_fork_has_no_root() {
+    let (_d, store, _main) = forked();
+    assert!(matches!(
+        store.root_main(&fork("nobody")),
+        Err(CoreError::UnknownFork(_))
+    ));
+}
