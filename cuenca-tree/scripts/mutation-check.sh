@@ -106,4 +106,24 @@ mutate src/oid.rs 'Sha1::builder().safe_hash(false).build()' 'Sha1::builder().sa
 mutate src/path.rs 'pub const MAX_PATH_BYTES: usize = 1023;' 'pub const MAX_PATH_BYTES: usize = 4096;' --lib
 mutate src/oid.rs 'CollisionResult::Mitigated(_) | CollisionResult::Collision(_) => None,' 'CollisionResult::Mitigated(d) | CollisionResult::Collision(d) => Some(d.into()),' --lib
 
+# Process groups and output caps (ADR 0002, BRO-3599): kill the group, not the child.
+mutate src/bounded.rs 'kill_process_group(self.pid, Signal::KILL)' 'kill_process(self.pid, Signal::KILL)' --test bounded
+mutate src/bounded.rs '.process_group(0)' '' --test bounded
+mutate src/bounded.rs '        self.kill_group();
+        self.stdin = None;' '        self.stdin = None;' --test bounded without_the_pipes
+mutate src/bounded.rs 'self.remaining().is_some_and(|left| left.is_zero())' 'false' --test bounded a_hung_wrapper
+mutate src/bounded.rs '                if !exited {' '                if true {' --test bounded a_normal_exit_with_an_inherited_pipe
+mutate src/bounded.rs '            if open || self.stdin.is_some() {' '            if open {' --lib input_is_written_after_the_outputs_close
+mutate src/bounded.rs 'if reached > self.limits.stdout_cap {' 'if false {' --test bounded past_its_cap
+mutate src/bounded.rs 'self.err.drain(..over);' '' --lib stderr_keeps_only_its_tail
+
+mutate src/bounded.rs '                    self.err.drain(..over);
+                    return Ok(());' '                    self.err.drain(..over);' --lib one_pump
+mutate src/bounded.rs '                        self.stdin = None;
+                    }
+                    break;' '                        self.stdin = None;
+                        break;
+                    }' --lib one_pump
+mutate src/bounded.rs 'self.carry = window[window.len().saturating_sub(keep)..].to_vec();' 'self.carry = Vec::new();' --lib a_watched_pattern
+
 exit $survived

@@ -36,14 +36,18 @@
 //! that fork is the failed changeset again. A failing fsck has no owner-side fix
 //! yet (BRO-3484).
 //!
+//! Every git and gh call runs in its own process group, within [`LandConfig::timeout`]
+//! and the stdout cap its kind of call has ([`OutputCaps`]); at either limit the whole
+//! group is killed, helpers included, and the step is retried with an error naming the
+//! limit ([`cuenca_tree::bounded`], ADR 0002, BRO-3599).
+//!
 //! Identity: `gh` with the token already on the authority host (spec section 0, "the
 //! shared gh login at first"; the GitHub App is BRO-3305), as git's credential helper
 //! for `https://github.com` remotes too. Only GitHub remotes land through a PR.
 
 use std::collections::HashMap;
-use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
@@ -54,6 +58,7 @@ use cuenca_core::{
     export_branch,
 };
 use cuenca_tree::GitOid;
+use cuenca_tree::bounded::{self, Limits, RunError};
 use cuenca_tree::git::{Blobs, REDIRECTING_ENV, Repo};
 
 use crate::authority::Authority;
@@ -78,9 +83,11 @@ pub struct LandConfig {
     pub git_config: Vec<String>,
     /// How long the lander sleeps when nothing wakes it.
     pub poll: Duration,
-    /// The longest one git or gh call may take; past it the call is killed and the
-    /// step retried on the next round.
+    /// The longest one git or gh call may take; past it the call's whole process group
+    /// is killed and the step retried on the next round.
     pub timeout: Duration,
+    /// The most each kind of git or gh call may print on stdout.
+    pub caps: OutputCaps,
     /// Called at each point a crash test kills the authority: `export_intent`,
     /// `pushed`, `review_intent`, `pr_opened`.
     pub fault: Option<Fault>,
@@ -95,7 +102,51 @@ impl LandConfig {
             git_config: Vec::new(),
             poll: Duration::from_secs(30),
             timeout: Duration::from_secs(600),
+            caps: OutputCaps::default(),
             fault: None,
+        }
+    }
+}
+
+/// The most stdout one git or gh call may print, by kind of call (ADR 0002). Past its cap
+/// a call's process group is killed and the step retried, with an error naming the cap
+/// and the field that sets it. stderr keeps only its last
+/// [`bounded::STDERR_TAIL`] bytes whatever the call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OutputCaps {
+    /// A call that prints an id or nothing: `rev-parse`, `rev-list -n 1`, `cat-file -t`,
+    /// `commit-tree`, `init`, `config`, `fetch --quiet`, `push --quiet`. 4 KiB.
+    pub small: u64,
+    /// `ls-remote`, `gh pr list` and `gh pr create`. 1 MiB.
+    pub listing: u64,
+    /// The parent search's first-parent `log` of up to 1,000 commits. 128 MiB.
+    pub parent_log: u64,
+}
+
+impl Default for OutputCaps {
+    fn default() -> Self {
+        Self {
+            small: 4 * 1024,
+            listing: 1024 * 1024,
+            parent_log: 128 * 1024 * 1024,
+        }
+    }
+}
+
+/// Which of [`OutputCaps`] a call is held to.
+#[derive(Clone, Copy, Debug)]
+enum Cap {
+    Small,
+    Listing,
+    ParentLog,
+}
+
+impl Cap {
+    fn of(self, caps: &OutputCaps) -> (u64, &'static str) {
+        match self {
+            Self::Small => (caps.small, "LandConfig::caps.small"),
+            Self::Listing => (caps.listing, "LandConfig::caps.listing"),
+            Self::ParentLog => (caps.parent_log, "LandConfig::caps.parent_log"),
         }
     }
 }
@@ -394,9 +445,8 @@ impl Worker {
         export: &Export,
     ) -> Step<(u64, String)> {
         let gh = Gh {
-            bin: &self.config.gh,
+            config: &self.config,
             slug,
-            timeout: self.config.timeout,
         };
         if let Some(found) = gh.find(export)? {
             return Ok(found);
@@ -491,15 +541,18 @@ pub fn github_slug(remote: &str) -> Option<String> {
 /// fails `transfer.fsckObjects` (a legacy `badDate`, say). The same commit pushed or
 /// fetched again meets the same refusal.
 fn refused_for_good(stderr: &str) -> bool {
-    const MARKERS: [&str; 5] = [
-        "error: GH001:",
-        "error: GH013:",
-        "push declined due to repository rule violations",
-        "to create or update workflow",
-        "fsck error",
-    ];
-    MARKERS.iter().any(|m| stderr.contains(m))
+    REFUSALS.iter().any(|m| stderr.contains(m))
 }
+
+/// The messages [`refused_for_good`] looks for, watched for in a git call's stderr as it
+/// streams, so one is found however much output comes after it.
+const REFUSALS: [&str; 5] = [
+    "error: GH001:",
+    "error: GH013:",
+    "push declined due to repository rule violations",
+    "to create or update workflow",
+    "fsck error",
+];
 
 /// git, run on the location's bare repository with a clean environment.
 struct Git<'c> {
@@ -515,8 +568,16 @@ impl<'c> Git<'c> {
         if !git.dir.join("HEAD").exists() {
             let tmp = config.repos.join(format!(".{}.git.tmp", location.name));
             let _ = std::fs::remove_dir_all(&tmp);
-            git.run_in(None, &["init", "--bare", "-q", &tmp.to_string_lossy()], b"")?;
-            git.run_in(Some(&tmp), &["config", "transfer.fsckObjects", "true"], b"")?;
+            git.run_in(
+                None,
+                &["init", "--bare", "-q", &tmp.to_string_lossy()],
+                Cap::Small,
+            )?;
+            git.run_in(
+                Some(&tmp),
+                &["config", "transfer.fsckObjects", "true"],
+                Cap::Small,
+            )?;
             std::fs::rename(&tmp, &git.dir).map_err(|e| LandError::Retry(e.to_string()))?;
         }
         Ok(git)
@@ -553,9 +614,16 @@ impl<'c> Git<'c> {
         cmd
     }
 
-    fn run_in(&self, dir: Option<&Path>, args: &[&str], input: &[u8]) -> Step<String> {
+    fn run_in(&self, dir: Option<&Path>, args: &[&str], cap: Cap) -> Step<String> {
         let what = format!("git {}", args.first().copied().unwrap_or(""));
-        let out = output_within(self.command(dir, args), input, self.config.timeout, &what)?;
+        let out = output_within(
+            self.command(dir, args),
+            b"",
+            self.config,
+            cap,
+            &what,
+            &REFUSALS,
+        )?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let message = format!(
@@ -563,7 +631,10 @@ impl<'c> Git<'c> {
                 args.first().copied().unwrap_or(""),
                 stderr.trim()
             );
-            return Err(if refused_for_good(&stderr) {
+            // The tail is what is shown; a refusal is found wherever git printed it, as
+            // stderr streamed ([`REFUSALS`]).
+            let refused = out.stderr_seen.iter().any(|seen| *seen) || refused_for_good(&stderr);
+            return Err(if refused {
                 LandError::Fail(message)
             } else {
                 LandError::Retry(message)
@@ -573,13 +644,16 @@ impl<'c> Git<'c> {
             .map_err(|_| LandError::Retry(format!("git {args:?} printed non-UTF-8")))
     }
 
-    fn run(&self, args: &[&str]) -> Step<String> {
-        self.run_in(Some(&self.dir), args, b"")
+    fn run(&self, args: &[&str], cap: Cap) -> Step<String> {
+        self.run_in(Some(&self.dir), args, cap)
     }
 
     /// The remote's default branch, from its `HEAD`.
     fn default_branch(&self, remote: &str) -> Step<String> {
-        let out = self.run(&["ls-remote", "--symref", "--", remote, "HEAD"])?;
+        let out = self.run(
+            &["ls-remote", "--symref", "--", remote, "HEAD"],
+            Cap::Listing,
+        )?;
         out.lines()
             .find_map(|l| {
                 l.strip_prefix("ref: refs/heads/")
@@ -591,28 +665,34 @@ impl<'c> Git<'c> {
 
     /// Fetch `what` from the remote into `refs/cuenca/fetched`.
     fn fetch(&self, remote: &str, what: &str) -> Step {
-        self.run(&[
-            "fetch",
-            "--quiet",
-            "--no-tags",
-            "--no-write-fetch-head",
-            "--",
-            remote,
-            &format!("+{what}:refs/cuenca/fetched"),
-        ])?;
+        self.run(
+            &[
+                "fetch",
+                "--quiet",
+                "--no-tags",
+                "--no-write-fetch-head",
+                "--",
+                remote,
+                &format!("+{what}:refs/cuenca/fetched"),
+            ],
+            Cap::Small,
+        )?;
         Ok(())
     }
 
     /// The newest first-parent commit of what was fetched whose tree is `tree`.
     fn commit_with_tree(&self, tree: GitOid) -> Step<Option<GitOid>> {
-        let out = self.run(&[
-            "log",
-            "--first-parent",
-            "--format=%H %T",
-            "-n",
-            &PARENT_SEARCH.to_string(),
-            "refs/cuenca/fetched",
-        ])?;
+        let out = self.run(
+            &[
+                "log",
+                "--first-parent",
+                "--format=%H %T",
+                "-n",
+                &PARENT_SEARCH.to_string(),
+                "refs/cuenca/fetched",
+            ],
+            Cap::ParentLog,
+        )?;
         for line in out.lines() {
             if let Some((commit, t)) = line.split_once(' ')
                 && t == tree.to_hex()
@@ -644,10 +724,13 @@ impl<'c> Git<'c> {
             .ok_or_else(|| LandError::Fail(format!("no changeset {id}")))?;
         let branch = export_branch(id);
         self.fetch(remote, &format!("refs/heads/{branch}"))?;
-        let line = self.run(&["rev-list", "--parents", "-n", "1", &at.to_hex()])?;
+        let line = self.run(
+            &["rev-list", "--parents", "-n", "1", &at.to_hex()],
+            Cap::Small,
+        )?;
         let ids: Vec<&str> = line.split_whitespace().collect();
         let tree_of = |rev: &str| {
-            self.run(&["rev-parse", &format!("{rev}^{{tree}}")])
+            self.run(&["rev-parse", &format!("{rev}^{{tree}}")], Cap::Small)
                 .map(|t| t.trim().to_string())
         };
         let ours = ids.len() == 2
@@ -665,47 +748,40 @@ impl<'c> Git<'c> {
     }
 
     fn has_commit(&self, commit: GitOid) -> Step<bool> {
-        let out = self
-            .command(Some(&self.dir), &["cat-file", "-t", &commit.to_hex()])
-            .stderr(Stdio::null())
-            .output()
-            .map_err(|e| LandError::Retry(format!("running git: {e}")))?;
+        let cmd = self.command(Some(&self.dir), &["cat-file", "-t", &commit.to_hex()]);
+        let out = output_within(cmd, b"", self.config, Cap::Small, "git cat-file", &[])?;
         Ok(out.status.success() && out.stdout == b"commit\n")
     }
 
     /// Commit `tree` onto `parent`: the same inputs give the same id.
     fn commit(&self, tree: GitOid, parent: GitOid, at_secs: u64, message: &str) -> Step<GitOid> {
         let date = format!("{at_secs} +0000");
-        let out = self
-            .command(
-                Some(&self.dir),
-                &[
-                    "commit-tree",
-                    "--no-gpg-sign",
-                    &tree.to_hex(),
-                    "-p",
-                    &parent.to_hex(),
-                    "-F",
-                    "-",
-                ],
-            )
-            .env("GIT_AUTHOR_NAME", "Cuenca")
+        let mut cmd = self.command(
+            Some(&self.dir),
+            &[
+                "commit-tree",
+                "--no-gpg-sign",
+                &tree.to_hex(),
+                "-p",
+                &parent.to_hex(),
+                "-F",
+                "-",
+            ],
+        );
+        cmd.env("GIT_AUTHOR_NAME", "Cuenca")
             .env("GIT_AUTHOR_EMAIL", "authority@cuenca.invalid")
             .env("GIT_AUTHOR_DATE", &date)
             .env("GIT_COMMITTER_NAME", "Cuenca")
             .env("GIT_COMMITTER_EMAIL", "authority@cuenca.invalid")
-            .env("GIT_COMMITTER_DATE", &date)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                if let Some(mut stdin) = child.stdin.take() {
-                    stdin.write_all(message.as_bytes())?;
-                }
-                child.wait_with_output()
-            })
-            .map_err(|e| LandError::Retry(format!("running git commit-tree: {e}")))?;
+            .env("GIT_COMMITTER_DATE", &date);
+        let out = output_within(
+            cmd,
+            message.as_bytes(),
+            self.config,
+            Cap::Small,
+            "git commit-tree",
+            &[],
+        )?;
         if !out.status.success() {
             return Err(LandError::Retry(format!(
                 "git commit-tree failed: {}",
@@ -719,7 +795,7 @@ impl<'c> Git<'c> {
     /// Where the remote's `branch` is, if it exists.
     fn remote_branch(&self, remote: &str, branch: &str) -> Step<Option<GitOid>> {
         let refname = format!("refs/heads/{branch}");
-        let out = self.run(&["ls-remote", "--", remote, &refname])?;
+        let out = self.run(&["ls-remote", "--", remote, &refname], Cap::Listing)?;
         for line in out.lines() {
             if let Some((sha, name)) = line.split_once('\t')
                 && name == refname
@@ -746,29 +822,31 @@ impl<'c> Git<'c> {
             None => {}
         }
         let refname = format!("refs/heads/{}", export.branch);
-        self.run(&[
-            "push",
-            "--quiet",
-            "--no-verify",
-            &format!("--force-with-lease={refname}:"),
-            "--",
-            remote,
-            &format!("{}:{refname}", export.commit),
-        ])?;
+        self.run(
+            &[
+                "push",
+                "--quiet",
+                "--no-verify",
+                &format!("--force-with-lease={refname}:"),
+                "--",
+                remote,
+                &format!("{}:{refname}", export.commit),
+            ],
+            Cap::Small,
+        )?;
         Ok(())
     }
 }
 
 /// `gh`, for one repository.
 struct Gh<'a> {
-    bin: &'a Path,
+    config: &'a LandConfig,
     slug: &'a str,
-    timeout: Duration,
 }
 
 impl Gh<'_> {
     fn run(&self, args: &[&str], input: &[u8]) -> Step<String> {
-        let mut cmd = Command::new(self.bin);
+        let mut cmd = Command::new(&self.config.gh);
         cmd.args(args)
             .env("GH_PROMPT_DISABLED", "1")
             .env("NO_COLOR", "1");
@@ -776,7 +854,7 @@ impl Gh<'_> {
             "gh {}",
             args.iter().take(2).copied().collect::<Vec<_>>().join(" ")
         );
-        let out = output_within(cmd, input, self.timeout, &what)?;
+        let out = output_within(cmd, input, self.config, Cap::Listing, &what, &[])?;
         if !out.status.success() {
             return Err(LandError::Retry(format!(
                 "gh {} failed: {}",
@@ -855,60 +933,43 @@ impl Gh<'_> {
     }
 }
 
-/// Run `cmd` with `input` on its stdin, killing it if it has not ended within
-/// `timeout` (a hung network call must not stall every landing behind it).
+/// Run `cmd` with `input` on its stdin in its own process group, within the call
+/// timeout and its stdout cap ([`bounded::run`]): a hung network call must not stall
+/// every landing behind it, nor leave a helper running with its pipes.
 fn output_within(
-    mut cmd: Command,
+    cmd: Command,
     input: &[u8],
-    timeout: Duration,
+    config: &LandConfig,
+    cap: Cap,
     what: &str,
-) -> Step<std::process::Output> {
-    let mut child = cmd
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|e| LandError::Retry(format!("running {what}: {e}")))?;
-    let mut stdin = child.stdin.take();
-    let input = input.to_vec();
-    let writer = std::thread::spawn(move || {
-        if let Some(s) = stdin.as_mut() {
-            let _ = s.write_all(&input);
-        }
-    });
-    let read = |pipe: Option<Box<dyn std::io::Read + Send>>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            if let Some(mut p) = pipe {
-                let _ = p.read_to_end(&mut buf);
-            }
-            buf
+    watch: &[&str],
+) -> Step<bounded::Output> {
+    let (stdout_cap, field) = cap.of(&config.caps);
+    let limits = Limits::within(config.timeout, stdout_cap);
+    let out = bounded::run_watched(cmd, input, what, limits, watch).map_err(|e| {
+        LandError::Retry(match e {
+            RunError::TimedOut { .. } => format!(
+                "{what} did not end within {} s and was killed",
+                config.timeout.as_secs()
+            ),
+            RunError::Capped { cap, reached, .. } => format!(
+                "{what} printed at least {reached} bytes, past its {cap}-byte output cap, and was \
+                 killed; the cap is set by {field}"
+            ),
+            e => e.to_string(),
         })
-    };
-    let stdout = read(child.stdout.take().map(|p| Box::new(p) as _));
-    let stderr = read(child.stderr.take().map(|p| Box::new(p) as _));
-    let deadline = std::time::Instant::now() + timeout;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if std::time::Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(LandError::Retry(format!(
-                    "{what} did not end within {} s and was killed",
-                    timeout.as_secs()
-                )));
-            }
-            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
-            Err(e) => return Err(LandError::Retry(format!("waiting for {what}: {e}"))),
-        }
-    };
-    let _ = writer.join();
-    Ok(std::process::Output {
-        status,
-        stdout: stdout.join().unwrap_or_default(),
-        stderr: stderr.join().unwrap_or_default(),
-    })
+    })?;
+    // A call that succeeded without taking all its input (a commit message, a pull
+    // request body) acted on less than it was given; a failed call's own error says
+    // more, so it is the one reported.
+    if out.status.success()
+        && let Some(e) = &out.stdin_error
+    {
+        return Err(LandError::Retry(format!(
+            "{what} did not take all its input: {e}"
+        )));
+    }
+    Ok(out)
 }
 
 /// The last error each fork's landing hit, for `GET /v1/forks/{fork}/landing`.
@@ -939,7 +1000,58 @@ impl LandingErrors {
 
 #[cfg(test)]
 mod tests {
-    use super::{github_slug, refused_for_good};
+    use super::{Cap, Git, LandConfig, LandError, github_slug, output_within, refused_for_good};
+
+    /// A refusal git prints between more stderr than the kept tail and before more
+    /// output still fails the landing for good, rather than retrying it forever.
+    #[test]
+    fn a_refusal_buried_in_stderr_fails_for_good() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("git");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nhead -c 40000 /dev/zero >&2\n\
+             echo 'remote: error: GH013: Repository rule violations found' >&2\n\
+             head -c 200000 /dev/zero >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let mut config = LandConfig::new(tmp.path().join("repos"), "gh".into());
+        config.git = fake;
+        let git = Git {
+            config: &config,
+            dir: tmp.path().to_path_buf(),
+        };
+        match git.run(&["push"], Cap::Small) {
+            Err(LandError::Fail(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A call that exits 0 without reading all its input is retried, not taken as done.
+    #[test]
+    fn a_call_that_drops_its_input_is_retried() {
+        let config = LandConfig::new("/nonexistent".into(), "gh".into());
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exec 0<&-; exit 0"]);
+        match output_within(
+            cmd,
+            &vec![b'x'; 1 << 20],
+            &config,
+            Cap::Listing,
+            "gh pr create",
+            &[],
+        ) {
+            Err(LandError::Retry(e)) => {
+                assert!(
+                    e.starts_with("gh pr create did not take all its input"),
+                    "{e}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn github_refusals_and_fsck_errors_are_for_good() {

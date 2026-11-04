@@ -38,6 +38,7 @@
 //! and implicit directories. Submodules, empty directories, SHA-256 object ids and
 //! non-UTF-8 paths are refused.
 
+pub mod bounded;
 mod changeset;
 mod entry;
 mod error;
