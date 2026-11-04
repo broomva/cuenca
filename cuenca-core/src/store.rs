@@ -920,6 +920,32 @@ impl Store {
         ))
     }
 
+    /// The main `fork`'s line started from (BRO-3517): the base of the fork of the
+    /// location at the top of its line, reached through `from` (a fork of a fork) and
+    /// `parent` (a sibling). It is derived from the forks the log keeps, so every fork has
+    /// one, whenever it was recorded. It is the location's main when the line began. The
+    /// remote holds it whenever that main came from the remote; a location registered from
+    /// a tree its remote never had has no commit to land onto, and its landings fail
+    /// saying so. A landing is committed onto it, so the pull request holds only the
+    /// line's changes, even once main has moved past it.
+    pub fn root_main(&self, fork: &ForkName) -> Result<GitOid> {
+        let mut name = fork.clone();
+        // Each step goes to a fork recorded earlier, so the walk ends; the bound only
+        // turns a corrupt projection into an error instead of a loop.
+        for _ in 0..100_000 {
+            let f = self
+                .fork(&name)?
+                .ok_or_else(|| CoreError::UnknownFork(name.to_string()))?;
+            match (f.from, f.parent) {
+                (Some(next), _) | (None, Some(next)) => name = next,
+                (None, None) => return Ok(f.base),
+            }
+        }
+        Err(CoreError::Inconsistent(format!(
+            "the line of {fork:?} does not reach a fork of its location"
+        )))
+    }
+
     /// The owner lands `id` on a location without a git remote: main moves by `id`, the
     /// fork's head and its holder's live landing request, as a compare-and-swap (the
     /// changeset must start from the main the location has now). Advancing by the

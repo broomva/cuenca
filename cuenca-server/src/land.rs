@@ -247,6 +247,8 @@ impl Worker {
                     "remote {remote:?} is not a GitHub repository; only GitHub remotes land through a pull request"
                 ))
             })?;
+            // The main this fork's line started from; the landing is committed onto it.
+            let root = self.a.store.root_main(&fork.name)?;
             let git = Git::new(&self.config, &location)?;
             match &landing.step {
                 LandingStep::Requested => {
@@ -257,8 +259,8 @@ impl Worker {
                     // is not: the remote's main has a newer commit with the same tree,
                     // or the old parent fell out of the search.
                     let export = match git.remote_branch(&remote, &export_branch(id))? {
-                        Some(at) => git.adopt(&remote, &self.a.store, id, landing.main, at)?,
-                        None => self.build(&git, &remote, &landing, None)?,
+                        Some(at) => git.adopt(&remote, &self.a.store, id, root, at)?,
+                        None => self.build(&git, &remote, &landing, root, None)?,
                     };
                     self.a.store.record_export_intent(name, id, &export)?;
                     self.fault("export_intent");
@@ -268,7 +270,7 @@ impl Worker {
                     if !pushed && !git.has_commit(export.commit)? {
                         // Lost with the crash, or never fsynced: build it again, onto
                         // the parent the intent names; it must come out the same.
-                        let again = self.build(&git, &remote, &landing, Some(export))?;
+                        let again = self.build(&git, &remote, &landing, root, Some(export))?;
                         if again.commit != export.commit {
                             return Err(LandError::Fail(format!(
                                 "the export rebuilt as {}, not {}, the commit its intent names",
@@ -304,22 +306,27 @@ impl Worker {
 
     /// The export of the landing: the target tree written into the location's bare
     /// repository and committed onto `parent`, or onto the newest first-parent commit
-    /// of the remote's default branch whose tree is the main the request's verify judged.
+    /// of the remote's default branch whose tree is `root`, the main the fork's line
+    /// started from ([`cuenca_core::Store::root_main`]).
     fn build(
         &self,
         git: &Git,
         remote: &str,
         landing: &Landing,
+        root: GitOid,
         intent: Option<&Export>,
     ) -> Step<Export> {
         let store = &self.a.store;
         let changeset = store
             .changeset(landing.changeset)?
             .ok_or_else(|| LandError::Fail(format!("no changeset {}", landing.changeset)))?;
-        // The main the verify judged the head against: the export is the head's tree onto
-        // the remote's commit of that main. (Drafts chain, so the head changeset's own
-        // base is the previous draft's tree, which the remote has never seen.)
-        let main = landing.main;
+        // The main the fork's line started from: the export is the head's tree onto the
+        // remote's commit of that main, so the pull request holds this line's changes
+        // and nothing else, even once main has moved past it (BRO-3517). Today main moves
+        // only by a landing on a location without a remote, so this is the main the
+        // verify judged. (Drafts chain, so the head changeset's own base is the previous
+        // draft's tree, which the remote has never seen.)
+        let main = root;
         let (parent, base_ref) = match intent {
             Some(e) => {
                 git.fetch(remote, &e.parent.to_hex())?;
@@ -620,8 +627,10 @@ impl<'c> Git<'c> {
 
     /// Take the export already at `at` on the remote's branch for `id` as this
     /// landing's: one commit whose tree is the changeset's target, onto one parent whose
-    /// tree is `main`, the main its verify judged. Anything else at that branch is
-    /// someone else's.
+    /// tree is `main`, the main the fork's line started from ([`Store::root_main`]).
+    /// Until main can move on a location with a remote, that is the main the verify
+    /// judged, so an export pushed earlier is adopted too. Anything else at that branch
+    /// is someone else's.
     fn adopt(
         &self,
         remote: &str,
