@@ -1,6 +1,6 @@
 # ADR 0002: A remote-backed location's main follows its remote
 
-Date: 2026-11-04, revision 3. Status: proposed (BRO-3601, part 2 of BRO-3517). Design
+Date: 2026-11-04, revision 4. Status: proposed (BRO-3601, part 2 of BRO-3517). Design
 only. Owner decisions D1 and D2 are accepted (2026-11-04); no code lands until this ADR
 passes review.
 
@@ -71,10 +71,26 @@ different and larger change.
   a pipe: the group is killed after the deadline, and readers are joined. Captured
   output is bounded too:
   - each call declares a stdout cap: about 4 KiB for `rev-parse`, 1 MiB for
-    `ls-remote`, 128 MiB for the parent search log, 256 MiB for `ls-tree`, and
-    64 MiB for `cat-file --batch-check`;
+    `ls-remote`, 128 MiB for the parent search log (1,000,001 lines at about 82 bytes
+    is about 78 MiB), 256 MiB for `ls-tree`, and 64 MiB for
+    `cat-file --batch-check`;
   - stderr keeps only its last 64 KiB;
-  - a reader that passes its cap kills the group, and the call fails naming the cap.
+  - a reader that passes its cap kills the group, and the call fails naming the cap;
+  - **the `cat-file --batch` protocol is bounded field by field.** Each header line is
+    read with a limit of 256 bytes; git's `<oid> <type> <size>\n` is under 100. An
+    unterminated or longer header kills the group and fails the call. Each body is read
+    to exactly its declared size, which must be at most the per-blob cap and, for a
+    blob, equal to the size `--batch-check` reported. For a tree object, it must equal
+    the length of the canonical body cuenca computed. Raw batch stdout therefore
+    never exceeds the sum of the declared sizes plus one header per object.
+
+  **The caps are hard limits, and they are independent of the deadline.** A valid
+  tree too large for the `ls-tree` or `--batch-check` cap does not follow, however
+  long the timeout. The follow fails naming the cap, the bytes reached, and the
+  `LandConfig` field that sets it. The supported recovery is to raise that field
+  within the host's memory, the same trade as registration's existing 1 GiB tree
+  limit. A repository that outgrows any setting the host can hold is out of scope for
+  following, as it already is for `location add`.
 
   This covers the landing path, which was BRO-3599 and becomes a prerequisite of this
   build. It also covers the `cuenca_tree::git::Repo` runner and batch reader (stdin
@@ -107,20 +123,23 @@ different and larger change.
   discovery and at least its next batch fit in `T` at the host's throughput. A
   single-blob batch must fit in `T` on its own. A follow that cannot fit fails with
   the step it reached, the time it took and the bytes left. That is shown in the
-  location's status, and main does not move. The remedy is a larger `follow_timeout`
-  for the host, a configuration value, not a code change. Every fetch, listing and
+  location's status, and main does not move. For a time failure the remedy is a larger
+  `follow_timeout` for the host, a configuration value, not a code change. A cap
+  failure (above) has its own error and its own remedy; time does not cure it. Every fetch, listing and
   size discovery is repeated on each round, by design, because they are cheap
   relative to blob transfer for the repositories this workspace holds.
 - **History, by tree diff for every move.** `main_history` replays the log in order,
   tracking each location's current main tree. Each kind of record moves it:
-  - `LocationAdded` sets the tree.
+  - `LocationAdded` sets the tree, and `held` gains every `(path, blob)` of it, as it
+    does today. A registered blob that the first follow replaces is therefore still in
+    `held`, and restoring it is a revert.
   - `MainAdvanced` loads the actual new main, the landed fork's head tree, which is
     the head changeset's target and is stored. It does not apply the head changeset
     to the previous main, because a fork landed after several drafts has a head
     changeset whose base is an earlier draft, not main.
   - `MainFollowed` loads the followed tree.
 
-  For each move, `held` gains every `(path, blob)` of the new tree. `moves` gains
+  For each move, too, `held` gains every `(path, blob)` of the new tree. `moves` gains
   `(at, paths)`, where `paths` is the diff of the previous tree against the new one:
   additions, deletions, blob changes and mode changes. `history_tags` selects
   `main_followed`. This also fixes BRO-3603: today `main_history` records only the
@@ -186,8 +205,14 @@ come later, if lag matters.
 - **Locks:** a lock present at a fetch, or created by a killed fetch, is left in
   place. The location shows the error, retries continue, and following resumes after
   the lock is removed.
-- **Output caps:** a git wrapper printing past a call's stdout cap is killed and fails
-  naming the cap; stderr keeps only its tail.
+- **Output caps:**
+  - a git wrapper printing past a call's stdout cap is killed and fails naming the
+    cap and the `LandConfig` field;
+  - stderr keeps only its tail;
+  - a `cat-file --batch` wrapper emitting an overlong or unterminated header, or a
+    body size different from `--batch-check`'s, is killed and fails;
+  - a tree listing past the `ls-tree` cap fails as a cap failure, not a timeout, and
+    follows once the cap is raised.
 - **Ingest:**
   - a 100 MiB blob, between the batch size and the per-blob cap, follows;
   - an update over the total read cap follows across rounds when each batch fits in
@@ -199,6 +224,8 @@ come later, if lag matters.
   - all three event kinds, interleaved across two locations, give `held` and `moves`
     in log order;
   - a fork landed after three drafts records draft 1's paths and blobs (BRO-3603);
+  - a registered blob that the first follow replaces, then restored by a draft, is
+    caught by the revert gate;
   - the revert gate catches a blob that was followed away and then restored;
   - `governance_rate` counts a followed governance change at its time, at the window's
     edges;
