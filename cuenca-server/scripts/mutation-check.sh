@@ -445,4 +445,6 @@ mutate src/land.rs '    if out.status.success()
         && let Some(e) = &out.stdin_error' '    if false
         && let Some(e) = &out.stdin_error' --lib a_call_that_drops_its_input
 
+mutate src/land.rs 'let refused = out.stderr_seen.iter().any(|seen| *seen) || refused_for_good(&stderr);' 'let refused = refused_for_good(&stderr);' --lib a_refusal_buried
+
 exit $survived

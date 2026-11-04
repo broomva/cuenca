@@ -34,9 +34,6 @@ use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 
 /// How much of a child's stderr is kept: its last 64 KiB.
 pub const STDERR_TAIL: usize = 64 * 1024;
-/// How much of the start of a child's stderr is kept too, for a caller that classifies
-/// a failure by a message git prints before more output: its first 16 KiB.
-pub const STDERR_HEAD: usize = 16 * 1024;
 
 /// The longest one `poll` waits before the direct child's exit and the deadline are
 /// checked again.
@@ -45,6 +42,9 @@ const SLICE: Duration = Duration::from_millis(20);
 /// How long the pipes are still read after the group is killed at the deadline, for
 /// what its members printed before they died.
 const GRACE: Duration = Duration::from_millis(200);
+
+/// The most one pump writes to stdin.
+const WRITE_CHUNK: usize = 16 * 1024;
 
 /// What one call may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -93,8 +93,10 @@ pub struct Output {
     pub stdout: Vec<u8>,
     /// The last [`STDERR_TAIL`] bytes of stderr.
     pub stderr: Vec<u8>,
-    /// The first [`STDERR_HEAD`] bytes of stderr.
-    pub stderr_head: Vec<u8>,
+    /// For each pattern given to [`run_watched`], whether stderr printed it anywhere,
+    /// however much came after it: a caller classifies a failure by it while only the
+    /// tail is kept.
+    pub stderr_seen: Vec<bool>,
     /// Why not all of the input was written, if it was not (the child closed its stdin,
     /// say). The child's own failure usually explains it, so it is reported only when
     /// the child succeeded.
@@ -103,7 +105,21 @@ pub struct Output {
 
 /// Run `cmd` with `input` on its stdin, within `limits`. `what` names the call in errors.
 pub fn run(cmd: Command, input: &[u8], what: &str, limits: Limits) -> Result<Output, RunError> {
+    run_watched(cmd, input, what, limits, &[])
+}
+
+/// [`run`], also watching stderr for each of `watch` as it streams
+/// ([`Output::stderr_seen`]).
+pub fn run_watched(
+    cmd: Command,
+    input: &[u8],
+    what: &str,
+    limits: Limits,
+    watch: &[&str],
+) -> Result<Output, RunError> {
     let mut child = Running::spawn(cmd, what, limits)?;
+    child.watch = watch.iter().map(|w| w.as_bytes().to_vec()).collect();
+    child.seen = vec![false; watch.len()];
     child.input = input.to_vec();
     child.finish()
 }
@@ -123,7 +139,11 @@ pub struct Running {
     stderr: Option<ChildStderr>,
     out: Vec<u8>,
     err: VecDeque<u8>,
-    err_head: Vec<u8>,
+    /// The stderr patterns watched for, whether each was seen, and the end of what was
+    /// read so far, so a pattern split across two reads is still found.
+    watch: Vec<Vec<u8>>,
+    seen: Vec<bool>,
+    carry: Vec<u8>,
     /// Set once the group has been killed and the child reaped.
     status: Option<ExitStatus>,
 }
@@ -156,7 +176,9 @@ impl Running {
             stderr: None,
             out: Vec::new(),
             err: VecDeque::new(),
-            err_head: Vec::new(),
+            watch: Vec::new(),
+            seen: Vec::new(),
+            carry: Vec::new(),
             status: None,
         };
         let (stdin, stdout, stderr) = (
@@ -232,7 +254,7 @@ impl Running {
             status,
             stdout: std::mem::take(&mut self.out),
             stderr: self.err.drain(..).collect(),
-            stderr_head: std::mem::take(&mut self.err_head),
+            stderr_seen: std::mem::take(&mut self.seen),
             stdin_error: self.stdin_error.take(),
         })
     }
@@ -360,17 +382,20 @@ impl Running {
         Ok(ready_out)
     }
 
+    /// One write of at most [`WRITE_CHUNK`] bytes: a child that takes its input as fast
+    /// as it comes still has the deadline checked between writes.
     fn write_stdin(&mut self) {
         let Some(pipe) = &mut self.stdin else { return };
         loop {
-            match pipe.write(&self.input[self.written..]) {
+            let end = self.input.len().min(self.written + WRITE_CHUNK);
+            match pipe.write(&self.input[self.written..end]) {
                 Ok(0) => break,
                 Ok(n) => {
                     self.written += n;
                     if self.written == self.input.len() {
                         self.stdin = None;
-                        break;
                     }
+                    break;
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -398,8 +423,17 @@ impl Running {
                     return Ok(());
                 }
                 Ok(n) => {
-                    let room = STDERR_HEAD.saturating_sub(self.err_head.len()).min(n);
-                    self.err_head.extend_from_slice(&buf[..room]);
+                    if !self.watch.is_empty() {
+                        let mut window = std::mem::take(&mut self.carry);
+                        window.extend_from_slice(&buf[..n]);
+                        for (pattern, seen) in self.watch.iter().zip(self.seen.iter_mut()) {
+                            if !*seen && window.windows(pattern.len()).any(|w| w == pattern) {
+                                *seen = true;
+                            }
+                        }
+                        let keep = self.watch.iter().map(Vec::len).max().unwrap_or(1) - 1;
+                        self.carry = window[window.len().saturating_sub(keep)..].to_vec();
+                    }
                     self.err.extend(&buf[..n]);
                     let over = self.err.len().saturating_sub(STDERR_TAIL);
                     self.err.drain(..over);
@@ -538,17 +572,64 @@ mod tests {
     }
 
     #[test]
-    fn stderr_keeps_its_head_too() {
-        let out = run(
-            sh("printf 'error: GH013: refused\\n' >&2; head -c 300000 /dev/zero >&2"),
+    fn a_watched_pattern_is_seen_wherever_it_is_and_across_reads() {
+        let out = run_watched(
+            sh(
+                "head -c 40000 /dev/zero >&2; printf 'error: GH0' >&2; sleep 0.2; \
+                printf '13: refused\\n' >&2; head -c 300000 /dev/zero >&2",
+            ),
             b"",
             "push",
             Limits::within(Duration::from_secs(30), 16),
+            &["error: GH013:", "never printed"],
         )
         .unwrap();
-        assert!(out.stderr_head.starts_with(b"error: GH013: refused\n"));
-        assert_eq!(out.stderr_head.len(), STDERR_HEAD);
+        assert_eq!(out.stderr_seen, [true, false]);
         assert!(!out.stderr.windows(6).any(|w| w == b"GH013:"));
+    }
+
+    /// One pump does a bounded amount of work, whatever the child keeps ready: one
+    /// stderr read and one stdin write, so the deadline is checked between them.
+    #[test]
+    fn one_pump_reads_and_writes_at_most_one_chunk() {
+        let mut child = Running::spawn(
+            sh("cat >/dev/null & yes >&2"),
+            "pump",
+            Limits::within(Duration::from_secs(30), 16),
+        )
+        .unwrap();
+        child.input = vec![0u8; 4 << 20];
+        // stderr's pipe fills up meanwhile.
+        std::thread::sleep(Duration::from_millis(200));
+        child.pump(false, Duration::from_millis(20)).unwrap();
+        assert!(
+            !child.err.is_empty() && child.err.len() <= 16 * 1024,
+            "{}",
+            child.err.len()
+        );
+        assert!(
+            child.written > 0 && child.written <= WRITE_CHUNK,
+            "{}",
+            child.written
+        );
+    }
+
+    #[test]
+    fn sustained_input_still_ends_at_the_deadline() {
+        let start = Instant::now();
+        let e = run(
+            sh("cat >/dev/null"),
+            &vec![0u8; 256 << 20],
+            "cat",
+            Limits::within(Duration::from_millis(5), 16),
+        )
+        .unwrap_err();
+        assert!(matches!(e, RunError::TimedOut { .. }), "{e}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
     }
 
     #[test]

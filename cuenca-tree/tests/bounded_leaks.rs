@@ -17,9 +17,16 @@ fn threads() -> usize {
     std::fs::read_dir("/proc/self/task").unwrap().count()
 }
 
+/// macOS: `ps -M` prints a header and one line per thread of the process.
 #[cfg(not(target_os = "linux"))]
 fn threads() -> usize {
-    0
+    let out = Command::new("ps")
+        .args(["-M", "-p", &std::process::id().to_string()])
+        .output()
+        .unwrap();
+    let lines = String::from_utf8_lossy(&out.stdout).lines().count();
+    assert!(lines > 1, "ps -M listed no threads");
+    lines - 1
 }
 
 /// Processes whose command line carries `marker`.

@@ -117,4 +117,13 @@ mutate src/bounded.rs '            if open || self.stdin.is_some() {' '         
 mutate src/bounded.rs 'if reached > self.limits.stdout_cap {' 'if false {' --test bounded past_its_cap
 mutate src/bounded.rs 'self.err.drain(..over);' '' --lib stderr_keeps_only_its_tail
 
+mutate src/bounded.rs '                    self.err.drain(..over);
+                    return Ok(());' '                    self.err.drain(..over);' --lib one_pump
+mutate src/bounded.rs '                        self.stdin = None;
+                    }
+                    break;' '                        self.stdin = None;
+                        break;
+                    }' --lib one_pump
+mutate src/bounded.rs 'self.carry = window[window.len().saturating_sub(keep)..].to_vec();' 'self.carry = Vec::new();' --lib a_watched_pattern
+
 exit $survived

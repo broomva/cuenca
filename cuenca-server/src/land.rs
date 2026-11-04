@@ -541,15 +541,18 @@ pub fn github_slug(remote: &str) -> Option<String> {
 /// fails `transfer.fsckObjects` (a legacy `badDate`, say). The same commit pushed or
 /// fetched again meets the same refusal.
 fn refused_for_good(stderr: &str) -> bool {
-    const MARKERS: [&str; 5] = [
-        "error: GH001:",
-        "error: GH013:",
-        "push declined due to repository rule violations",
-        "to create or update workflow",
-        "fsck error",
-    ];
-    MARKERS.iter().any(|m| stderr.contains(m))
+    REFUSALS.iter().any(|m| stderr.contains(m))
 }
+
+/// The messages [`refused_for_good`] looks for, watched for in a git call's stderr as it
+/// streams, so one is found however much output comes after it.
+const REFUSALS: [&str; 5] = [
+    "error: GH001:",
+    "error: GH013:",
+    "push declined due to repository rule violations",
+    "to create or update workflow",
+    "fsck error",
+];
 
 /// git, run on the location's bare repository with a clean environment.
 struct Git<'c> {
@@ -613,7 +616,14 @@ impl<'c> Git<'c> {
 
     fn run_in(&self, dir: Option<&Path>, args: &[&str], cap: Cap) -> Step<String> {
         let what = format!("git {}", args.first().copied().unwrap_or(""));
-        let out = output_within(self.command(dir, args), b"", self.config, cap, &what)?;
+        let out = output_within(
+            self.command(dir, args),
+            b"",
+            self.config,
+            cap,
+            &what,
+            &REFUSALS,
+        )?;
         if !out.status.success() {
             let stderr = String::from_utf8_lossy(&out.stderr);
             let message = format!(
@@ -621,10 +631,9 @@ impl<'c> Git<'c> {
                 args.first().copied().unwrap_or(""),
                 stderr.trim()
             );
-            // The tail is what is shown; a refusal git printed before more output than
-            // the tail holds is still in the head.
-            let refused = refused_for_good(&stderr)
-                || refused_for_good(&String::from_utf8_lossy(&out.stderr_head));
+            // The tail is what is shown; a refusal is found wherever git printed it, as
+            // stderr streamed ([`REFUSALS`]).
+            let refused = out.stderr_seen.iter().any(|seen| *seen) || refused_for_good(&stderr);
             return Err(if refused {
                 LandError::Fail(message)
             } else {
@@ -740,7 +749,7 @@ impl<'c> Git<'c> {
 
     fn has_commit(&self, commit: GitOid) -> Step<bool> {
         let cmd = self.command(Some(&self.dir), &["cat-file", "-t", &commit.to_hex()]);
-        let out = output_within(cmd, b"", self.config, Cap::Small, "git cat-file")?;
+        let out = output_within(cmd, b"", self.config, Cap::Small, "git cat-file", &[])?;
         Ok(out.status.success() && out.stdout == b"commit\n")
     }
 
@@ -771,6 +780,7 @@ impl<'c> Git<'c> {
             self.config,
             Cap::Small,
             "git commit-tree",
+            &[],
         )?;
         if !out.status.success() {
             return Err(LandError::Retry(format!(
@@ -844,7 +854,7 @@ impl Gh<'_> {
             "gh {}",
             args.iter().take(2).copied().collect::<Vec<_>>().join(" ")
         );
-        let out = output_within(cmd, input, self.config, Cap::Listing, &what)?;
+        let out = output_within(cmd, input, self.config, Cap::Listing, &what, &[])?;
         if !out.status.success() {
             return Err(LandError::Retry(format!(
                 "gh {} failed: {}",
@@ -932,9 +942,11 @@ fn output_within(
     config: &LandConfig,
     cap: Cap,
     what: &str,
+    watch: &[&str],
 ) -> Step<bounded::Output> {
     let (stdout_cap, field) = cap.of(&config.caps);
-    let out = bounded::run(cmd, input, what, Limits::within(config.timeout, stdout_cap)).map_err(|e| {
+    let limits = Limits::within(config.timeout, stdout_cap);
+    let out = bounded::run_watched(cmd, input, what, limits, watch).map_err(|e| {
         LandError::Retry(match e {
             RunError::TimedOut { .. } => format!(
                 "{what} did not end within {} s and was killed",
@@ -988,7 +1000,34 @@ impl LandingErrors {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cap, LandConfig, LandError, github_slug, output_within, refused_for_good};
+    use super::{Cap, Git, LandConfig, LandError, github_slug, output_within, refused_for_good};
+
+    /// A refusal git prints between more stderr than the kept tail and before more
+    /// output still fails the landing for good, rather than retrying it forever.
+    #[test]
+    fn a_refusal_buried_in_stderr_fails_for_good() {
+        let tmp = tempfile::tempdir().unwrap();
+        let fake = tmp.path().join("git");
+        std::fs::write(
+            &fake,
+            "#!/bin/sh\nhead -c 40000 /dev/zero >&2\n\
+             echo 'remote: error: GH013: Repository rule violations found' >&2\n\
+             head -c 200000 /dev/zero >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755))
+            .unwrap();
+        let mut config = LandConfig::new(tmp.path().join("repos"), "gh".into());
+        config.git = fake;
+        let git = Git {
+            config: &config,
+            dir: tmp.path().to_path_buf(),
+        };
+        match git.run(&["push"], Cap::Small) {
+            Err(LandError::Fail(_)) => {}
+            other => panic!("{other:?}"),
+        }
+    }
 
     /// A call that exits 0 without reading all its input is retried, not taken as done.
     #[test]
@@ -1002,6 +1041,7 @@ mod tests {
             &config,
             Cap::Listing,
             "gh pr create",
+            &[],
         ) {
             Err(LandError::Retry(e)) => {
                 assert!(
