@@ -2,9 +2,12 @@
 //!
 //! Every child is spawned in its own process group (`process_group(0)`), so the whole
 //! group, not only the direct child, is killed (`killpg`, SIGKILL) when the call ends:
-//! at its deadline, when its stdout passes its cap, or when the direct child exits.
-//! The last of those means a helper, transport or hook wrapper that the child left
-//! behind does not outlive the call, holding its pipes open.
+//! at its deadline, when its stdout passes its cap, or once the direct child has exited
+//! and the pipes have closed. A helper, transport or hook wrapper that the direct child
+//! left behind holding a pipe is read from until the pipes close or the deadline
+//! passes, whichever is first; then the group is killed and the call ends with the
+//! direct child's status and what was printed (ADR 0002). No such process outlives the
+//! call.
 //!
 //! The pipes are driven by the calling thread alone with `poll(2)` on non-blocking file
 //! descriptors: stdin is written, stdout is gathered up to its cap, and stderr keeps only
@@ -31,10 +34,17 @@ use rustix::process::{Pid, Signal, WaitId, WaitIdOptions};
 
 /// How much of a child's stderr is kept: its last 64 KiB.
 pub const STDERR_TAIL: usize = 64 * 1024;
+/// How much of the start of a child's stderr is kept too, for a caller that classifies
+/// a failure by a message git prints before more output: its first 16 KiB.
+pub const STDERR_HEAD: usize = 16 * 1024;
 
 /// The longest one `poll` waits before the direct child's exit and the deadline are
 /// checked again.
 const SLICE: Duration = Duration::from_millis(20);
+
+/// How long the pipes are still read after the group is killed at the deadline, for
+/// what its members printed before they died.
+const GRACE: Duration = Duration::from_millis(200);
 
 /// What one call may take.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -83,6 +93,8 @@ pub struct Output {
     pub stdout: Vec<u8>,
     /// The last [`STDERR_TAIL`] bytes of stderr.
     pub stderr: Vec<u8>,
+    /// The first [`STDERR_HEAD`] bytes of stderr.
+    pub stderr_head: Vec<u8>,
     /// Why not all of the input was written, if it was not (the child closed its stdin,
     /// say). The child's own failure usually explains it, so it is reported only when
     /// the child succeeded.
@@ -111,6 +123,7 @@ pub struct Running {
     stderr: Option<ChildStderr>,
     out: Vec<u8>,
     err: VecDeque<u8>,
+    err_head: Vec<u8>,
     /// Set once the group has been killed and the child reaped.
     status: Option<ExitStatus>,
 }
@@ -143,6 +156,7 @@ impl Running {
             stderr: None,
             out: Vec::new(),
             err: VecDeque::new(),
+            err_head: Vec::new(),
             status: None,
         };
         let (stdin, stdout, stderr) = (
@@ -165,28 +179,49 @@ impl Running {
         Ok(running)
     }
 
-    /// Drive the pipes until stdout and stderr are closed and the child has exited,
-    /// then kill what is left of its group.
+    /// Drive the pipes until stdout and stderr are closed, the input is written (or
+    /// refused) and the direct child has exited; then kill what is left of its group.
+    /// If the direct child has exited but a descendant still holds a pipe at the
+    /// deadline, the group is killed then and the call ends with the direct child's
+    /// status; if the direct child itself has not exited by then, the call times out.
     pub fn finish(mut self) -> Result<Output, RunError> {
-        while self.stdout.is_some() || self.stderr.is_some() {
-            self.check_deadline()?;
-            // The direct child is done: whatever of its group is left (a helper holding a
-            // pipe) goes now, so the pipes close.
-            if self.exited()? {
-                self.kill_group();
+        loop {
+            let open = self.stdout.is_some() || self.stderr.is_some();
+            let exited = self.exited()?;
+            if !open && exited {
+                break;
             }
-            self.pump(true)?;
-        }
-        while !self.exited()? {
-            self.check_deadline()?;
-            std::thread::sleep(SLICE.min(self.remaining().unwrap_or(SLICE)));
+            if self.past_deadline() {
+                if !exited {
+                    let _ = self.reap();
+                    return Err(self.timed_out());
+                }
+                // The direct child is done and a descendant holds a pipe: the group goes
+                // now, and what it printed before dying is still read.
+                self.kill_group();
+                let grace = Instant::now() + GRACE;
+                while (self.stdout.is_some() || self.stderr.is_some()) && Instant::now() < grace {
+                    if self.pump(true, grace.saturating_duration_since(Instant::now()))? {
+                        self.read_stdout()?;
+                    }
+                }
+                break;
+            }
+            let wait = self.remaining().map_or(SLICE, |left| left.min(SLICE));
+            if open || self.stdin.is_some() {
+                if self.pump(true, wait)? {
+                    self.read_stdout()?;
+                }
+            } else {
+                std::thread::sleep(wait);
+            }
         }
         let status = self.reap()?;
         if self.stdin_error.is_none() && self.written < self.input.len() {
             self.stdin_error = Some(io::Error::new(
                 io::ErrorKind::BrokenPipe,
                 format!(
-                    "{} closed its output having read {} of {} input bytes",
+                    "{} ended having read {} of {} input bytes",
                     self.what,
                     self.written,
                     self.input.len()
@@ -197,27 +232,26 @@ impl Running {
             status,
             stdout: std::mem::take(&mut self.out),
             stderr: self.err.drain(..).collect(),
+            stderr_head: std::mem::take(&mut self.err_head),
             stdin_error: self.stdin_error.take(),
         })
+    }
+
+    fn past_deadline(&self) -> bool {
+        self.remaining().is_some_and(|left| left.is_zero())
+    }
+
+    fn timed_out(&self) -> RunError {
+        RunError::TimedOut {
+            what: self.what.clone(),
+            elapsed: self.started.elapsed(),
+        }
     }
 
     fn remaining(&self) -> Option<Duration> {
         self.limits
             .deadline
             .map(|d| d.saturating_duration_since(Instant::now()))
-    }
-
-    fn check_deadline(&mut self) -> Result<(), RunError> {
-        match self.remaining() {
-            Some(left) if left.is_zero() => {
-                let _ = self.reap();
-                Err(RunError::TimedOut {
-                    what: self.what.clone(),
-                    elapsed: self.started.elapsed(),
-                })
-            }
-            _ => Ok(()),
-        }
     }
 
     /// Whether the direct child has exited, without reaping it: its pid, and so its
@@ -279,14 +313,15 @@ impl Running {
         }
     }
 
-    /// Wait up to one slice for any pipe to be ready, then write what stdin takes and
-    /// read what stderr and (when `read_stdout`) stdout have.
-    fn pump(&mut self, read_stdout: bool) -> Result<(), RunError> {
+    /// Wait up to `wait` (one slice at most) for any pipe to be ready, then write what
+    /// stdin takes and read what stderr has: whether stdout (watched when
+    /// `watch_stdout`) is ready to read.
+    fn pump(&mut self, watch_stdout: bool, wait: Duration) -> Result<bool, RunError> {
         if self.stdin.is_some() && self.written == self.input.len() {
             // All written: closing stdin is the child's end of input.
             self.stdin = None;
         }
-        let wait = self.remaining().map_or(SLICE, |left| left.min(SLICE));
+        let wait = wait.min(SLICE);
         let timeout = rustix::event::Timespec {
             tv_sec: 0,
             tv_nsec: wait.subsec_nanos().into(),
@@ -298,7 +333,7 @@ impl Running {
                 slots[0] = Some(fds.len());
                 fds.push(PollFd::new(p, PollFlags::OUT));
             }
-            if read_stdout && let Some(p) = &self.stdout {
+            if watch_stdout && let Some(p) = &self.stdout {
                 slots[1] = Some(fds.len());
                 fds.push(PollFd::new(p, PollFlags::IN));
             }
@@ -322,10 +357,7 @@ impl Running {
         if ready_err {
             self.read_stderr()?;
         }
-        if ready_out {
-            self.read_stdout()?;
-        }
-        Ok(())
+        Ok(ready_out)
     }
 
     fn write_stdin(&mut self) {
@@ -352,6 +384,8 @@ impl Running {
         }
     }
 
+    /// One read of stderr: a child that writes it without end still has the deadline
+    /// checked between reads.
     fn read_stderr(&mut self) -> Result<(), RunError> {
         let Some(pipe) = &mut self.stderr else {
             return Ok(());
@@ -364,9 +398,12 @@ impl Running {
                     return Ok(());
                 }
                 Ok(n) => {
+                    let room = STDERR_HEAD.saturating_sub(self.err_head.len()).min(n);
+                    self.err_head.extend_from_slice(&buf[..room]);
                     self.err.extend(&buf[..n]);
                     let over = self.err.len().saturating_sub(STDERR_TAIL);
                     self.err.drain(..over);
+                    return Ok(());
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -375,6 +412,7 @@ impl Running {
         }
     }
 
+    /// One read of stdout, for the same reason as [`Running::read_stderr`].
     fn read_stdout(&mut self) -> Result<(), RunError> {
         let Some(pipe) = &mut self.stdout else {
             return Ok(());
@@ -397,6 +435,7 @@ impl Running {
                         });
                     }
                     self.out.extend_from_slice(&buf[..n]);
+                    return Ok(());
                 }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => return Ok(()),
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
@@ -496,6 +535,70 @@ mod tests {
         .unwrap();
         assert_eq!(out.stderr.len(), STDERR_TAIL);
         assert!(out.stderr.ends_with(b"\0end"));
+    }
+
+    #[test]
+    fn stderr_keeps_its_head_too() {
+        let out = run(
+            sh("printf 'error: GH013: refused\\n' >&2; head -c 300000 /dev/zero >&2"),
+            b"",
+            "push",
+            Limits::within(Duration::from_secs(30), 16),
+        )
+        .unwrap();
+        assert!(out.stderr_head.starts_with(b"error: GH013: refused\n"));
+        assert_eq!(out.stderr_head.len(), STDERR_HEAD);
+        assert!(!out.stderr.windows(6).any(|w| w == b"GH013:"));
+    }
+
+    #[test]
+    fn endless_stderr_still_ends_at_the_deadline() {
+        let start = Instant::now();
+        let e = run(
+            sh("yes >&2"),
+            b"",
+            "noisy",
+            Limits::within(Duration::from_secs(1), 16),
+        )
+        .unwrap_err();
+        assert!(matches!(e, RunError::TimedOut { .. }), "{e}");
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn many_writers_flooding_stderr_still_end_at_the_deadline() {
+        let start = Instant::now();
+        let e = run(
+            sh("yes >&2 & yes >&2 & yes >&2 & yes >&2 & wait"),
+            b"",
+            "noisy",
+            Limits::within(Duration::from_millis(300), 16),
+        )
+        .unwrap_err();
+        assert!(matches!(e, RunError::TimedOut { .. }), "{e}");
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            start.elapsed()
+        );
+    }
+
+    #[test]
+    fn input_is_written_after_the_outputs_close() {
+        let input = vec![b'x'; 1 << 20];
+        let out = run(
+            sh("exec 1>&- 2>&-; sleep 0.1; cat >/dev/null"),
+            &input,
+            "cat",
+            Limits::within(Duration::from_secs(30), 16),
+        )
+        .unwrap();
+        assert!(out.status.success());
+        assert!(out.stdin_error.is_none(), "{:?}", out.stdin_error);
     }
 
     #[test]

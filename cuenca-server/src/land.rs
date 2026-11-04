@@ -621,7 +621,11 @@ impl<'c> Git<'c> {
                 args.first().copied().unwrap_or(""),
                 stderr.trim()
             );
-            return Err(if refused_for_good(&stderr) {
+            // The tail is what is shown; a refusal git printed before more output than
+            // the tail holds is still in the head.
+            let refused = refused_for_good(&stderr)
+                || refused_for_good(&String::from_utf8_lossy(&out.stderr_head));
+            return Err(if refused {
                 LandError::Fail(message)
             } else {
                 LandError::Retry(message)
@@ -930,7 +934,7 @@ fn output_within(
     what: &str,
 ) -> Step<bounded::Output> {
     let (stdout_cap, field) = cap.of(&config.caps);
-    bounded::run(cmd, input, what, Limits::within(config.timeout, stdout_cap)).map_err(|e| {
+    let out = bounded::run(cmd, input, what, Limits::within(config.timeout, stdout_cap)).map_err(|e| {
         LandError::Retry(match e {
             RunError::TimedOut { .. } => format!(
                 "{what} did not end within {} s and was killed",
@@ -942,7 +946,18 @@ fn output_within(
             ),
             e => e.to_string(),
         })
-    })
+    })?;
+    // A call that succeeded without taking all its input (a commit message, a pull
+    // request body) acted on less than it was given; a failed call's own error says
+    // more, so it is the one reported.
+    if out.status.success()
+        && let Some(e) = &out.stdin_error
+    {
+        return Err(LandError::Retry(format!(
+            "{what} did not take all its input: {e}"
+        )));
+    }
+    Ok(out)
 }
 
 /// The last error each fork's landing hit, for `GET /v1/forks/{fork}/landing`.
@@ -973,7 +988,30 @@ impl LandingErrors {
 
 #[cfg(test)]
 mod tests {
-    use super::{github_slug, refused_for_good};
+    use super::{Cap, LandConfig, LandError, github_slug, output_within, refused_for_good};
+
+    /// A call that exits 0 without reading all its input is retried, not taken as done.
+    #[test]
+    fn a_call_that_drops_its_input_is_retried() {
+        let config = LandConfig::new("/nonexistent".into(), "gh".into());
+        let mut cmd = std::process::Command::new("sh");
+        cmd.args(["-c", "exec 0<&-; exit 0"]);
+        match output_within(
+            cmd,
+            &vec![b'x'; 1 << 20],
+            &config,
+            Cap::Listing,
+            "gh pr create",
+        ) {
+            Err(LandError::Retry(e)) => {
+                assert!(
+                    e.starts_with("gh pr create did not take all its input"),
+                    "{e}"
+                )
+            }
+            other => panic!("{other:?}"),
+        }
+    }
 
     #[test]
     fn github_refusals_and_fsck_errors_are_for_good() {

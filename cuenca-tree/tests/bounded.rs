@@ -17,7 +17,7 @@ fn wrapper(pidfile: &Path, then: &str) -> Command {
     let mut cmd = Command::new("sh");
     cmd.args([
         "-c",
-        &format!("sleep 600 & echo $! > '{}'; {then}", pidfile.display()),
+        &format!("sleep 60 & echo $! > '{}'; {then}", pidfile.display()),
     ]);
     cmd
 }
@@ -70,11 +70,14 @@ fn a_hung_wrapper_and_its_grandchild_are_killed_at_the_deadline() {
     );
 }
 
+/// The direct child exits while its grandchild still holds the pipes: they are read
+/// until the deadline, then the group is killed and the call ends with the direct
+/// child's status and output (ADR 0002).
 #[test]
-fn a_normal_exit_with_an_inherited_pipe_ends_and_kills_the_holder() {
+fn a_normal_exit_with_an_inherited_pipe_ends_at_the_deadline_and_kills_the_holder() {
     let tmp = tempfile::tempdir().unwrap();
     let pidfile = tmp.path().join("pid");
-    let timeout = Duration::from_secs(30);
+    let timeout = Duration::from_secs(2);
     let start = Instant::now();
     let out = run(
         wrapper(&pidfile, "echo answered"),
@@ -83,12 +86,9 @@ fn a_normal_exit_with_an_inherited_pipe_ends_and_kills_the_holder() {
         Limits::within(timeout, 1 << 20),
     )
     .unwrap();
-    // Not held until the deadline: the holder goes once the direct child exits.
-    assert!(
-        start.elapsed() < Duration::from_secs(10),
-        "{:?}",
-        start.elapsed()
-    );
+    let took = start.elapsed();
+    assert!(took >= timeout - Duration::from_millis(100), "{took:?}");
+    assert!(took < timeout + Duration::from_secs(2), "{took:?}");
     assert!(out.status.success());
     assert_eq!(out.stdout, b"answered\n");
     let pid = std::fs::read_to_string(&pidfile).unwrap();
@@ -97,6 +97,57 @@ fn a_normal_exit_with_an_inherited_pipe_ends_and_kills_the_holder() {
         "the grandchild {} outlived the call",
         pid.trim()
     );
+}
+
+/// A descendant left behind without the pipes does not hold the call open, and is
+/// killed with the group when the call ends.
+#[test]
+fn a_descendant_without_the_pipes_is_killed_when_the_call_ends() {
+    let tmp = tempfile::tempdir().unwrap();
+    let pidfile = tmp.path().join("pid");
+    let mut cmd = Command::new("sh");
+    cmd.args([
+        "-c",
+        &format!(
+            "sleep 60 </dev/null >/dev/null 2>&1 & echo $! > '{}'; echo done",
+            pidfile.display()
+        ),
+    ]);
+    let start = Instant::now();
+    let out = run(
+        cmd,
+        b"",
+        "git gc",
+        Limits::within(Duration::from_secs(20), 4096),
+    )
+    .unwrap();
+    assert!(start.elapsed() < Duration::from_secs(10));
+    assert_eq!(out.stdout, b"done\n");
+    let pid = std::fs::read_to_string(&pidfile).unwrap();
+    assert!(
+        gone(pid.trim()),
+        "the descendant {} outlived the call",
+        pid.trim()
+    );
+}
+
+/// What a descendant prints after the direct child exits, before the deadline, is
+/// kept, and the call ends when the pipes close, not at the deadline.
+#[test]
+fn a_descendants_later_output_is_kept() {
+    let mut cmd = Command::new("sh");
+    cmd.args(["-c", "(sleep 0.2; printf completed-output) & exit 0"]);
+    let start = Instant::now();
+    let out = run(
+        cmd,
+        b"",
+        "git fetch",
+        Limits::within(Duration::from_secs(20), 4096),
+    )
+    .unwrap();
+    assert!(out.status.success());
+    assert_eq!(out.stdout, b"completed-output");
+    assert!(start.elapsed() < Duration::from_secs(10));
 }
 
 #[test]

@@ -441,4 +441,8 @@ mutate src/materialise.rs '        added.map_err(|e| match (&blob.content, e) {'
 mutate src/land.rs 'Limits::within(config.timeout, stdout_cap)' 'Limits::within(config.timeout, u64::MAX)' --test land past_its_output_cap
 mutate src/land.rs 'let out = self.run(&["ls-remote", "--", remote, &refname], Cap::Listing)?;' 'let out = self.run(&["ls-remote", "--", remote, &refname], Cap::ParentLog)?;' --test land past_its_output_cap
 
+mutate src/land.rs '    if out.status.success()
+        && let Some(e) = &out.stdin_error' '    if false
+        && let Some(e) = &out.stdin_error' --lib a_call_that_drops_its_input
+
 exit $survived
