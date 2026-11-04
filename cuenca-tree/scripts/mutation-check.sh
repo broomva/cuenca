@@ -106,4 +106,14 @@ mutate src/oid.rs 'Sha1::builder().safe_hash(false).build()' 'Sha1::builder().sa
 mutate src/path.rs 'pub const MAX_PATH_BYTES: usize = 1023;' 'pub const MAX_PATH_BYTES: usize = 4096;' --lib
 mutate src/oid.rs 'CollisionResult::Mitigated(_) | CollisionResult::Collision(_) => None,' 'CollisionResult::Mitigated(d) | CollisionResult::Collision(d) => Some(d.into()),' --lib
 
+# Process groups and output caps (ADR 0002, BRO-3599): kill the group, not the child.
+mutate src/bounded.rs 'kill_process_group(self.pid, Signal::KILL)' 'kill_process(self.pid, Signal::KILL)' --test bounded
+mutate src/bounded.rs '.process_group(0)' '' --test bounded
+mutate src/bounded.rs '            if self.exited()? {
+                self.kill_group();
+            }' '' --test bounded a_normal_exit_with_an_inherited_pipe
+mutate src/bounded.rs 'Some(left) if left.is_zero() => {' 'Some(_) if false => {' --test bounded a_hung_wrapper
+mutate src/bounded.rs 'if reached > self.limits.stdout_cap {' 'if false {' --test bounded past_its_cap
+mutate src/bounded.rs 'self.err.drain(..over);' '' --lib stderr_keeps_only_its_tail
+
 exit $survived

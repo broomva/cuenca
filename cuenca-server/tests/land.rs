@@ -511,6 +511,112 @@ fn a_hung_call_is_killed_and_retried() {
     assert_eq!(up.creates().len(), 1);
 }
 
+/// A git wrapper at `dir/name` that runs `when_flagged` for a call whose arguments
+/// include ` <verb> ` while `dir/flag` exists, and the real git otherwise.
+fn git_wrapper(dir: &Path, name: &str, verb: &str, when_flagged: &str) -> PathBuf {
+    let path = dir.join(name);
+    std::fs::write(
+        &path,
+        format!(
+            "#!/bin/sh\nif [ -f '{flag}' ]; then case \" $* \" in *' {verb} '*) {when_flagged} ;; esac; fi\nexec git \"$@\"\n",
+            flag = dir.join("flag").display(),
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    std::fs::write(dir.join("flag"), "").unwrap();
+    path
+}
+
+/// The landing's retry error, once there is one.
+fn landing_error(s: &Server, token: &str) -> String {
+    let start = Instant::now();
+    loop {
+        let v: Value = s.get(token, "/v1/forks/f1/landing").json().unwrap();
+        if let Some(e) = v["error"].as_str() {
+            return e.to_string();
+        }
+        assert!(start.elapsed() < Duration::from_secs(60), "{v}");
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// A git call that prints past its stdout cap is killed, and the step retried with an
+/// error naming the cap and the `LandConfig` field that sets it (ADR 0002, BRO-3599);
+/// once the output fits, the landing goes on.
+#[test]
+fn a_git_call_past_its_output_cap_is_killed_and_names_its_field() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (a1, _id) = requested(&s, &up, Some(&up.url));
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.git = git_wrapper(tmp.path(), "git-floods", "ls-remote", "exec yes");
+    config.caps.listing = 64 * 1024;
+    let _lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    let error = landing_error(&s, &a1);
+    assert!(
+        error.starts_with("git ls-remote printed at least ")
+            && error.contains("past its 65536-byte output cap")
+            && error.ends_with("set by LandConfig::caps.listing"),
+        "{error}"
+    );
+    std::fs::remove_file(tmp.path().join("flag")).unwrap();
+    wait_for(s.authority.store(), &f1(), in_review);
+    assert_eq!(up.creates().len(), 1);
+}
+
+/// A hung git call whose grandchild holds its stdout is killed at the timeout, the
+/// grandchild with it, and retried (ADR 0002, BRO-3599): no process outlives the call.
+#[test]
+fn a_hung_git_call_and_its_grandchild_are_killed() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (a1, _id) = requested(&s, &up, Some(&up.url));
+    let pids = tmp.path().join("pids");
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.git = git_wrapper(
+        tmp.path(),
+        "git-hangs",
+        "fetch",
+        &format!(
+            "sleep 600 & echo $! >> '{}'; exec sleep 600",
+            pids.display()
+        ),
+    );
+    config.timeout = Duration::from_secs(3);
+    let _lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    let start = Instant::now();
+    let error = landing_error(&s, &a1);
+    assert_eq!(error, "git fetch did not end within 3 s and was killed");
+    // The first fetch is the export's, after the quick ls-remote calls.
+    assert!(
+        start.elapsed() < Duration::from_secs(20),
+        "{:?}",
+        start.elapsed()
+    );
+    std::fs::remove_file(tmp.path().join("flag")).unwrap();
+    wait_for(s.authority.store(), &f1(), in_review);
+    let pids = std::fs::read_to_string(&pids).unwrap();
+    assert!(!pids.trim().is_empty());
+    for pid in pids.split_whitespace() {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let alive = || {
+            let out = Command::new("ps")
+                .args(["-o", "stat=", "-p", pid])
+                .output()
+                .unwrap();
+            let stat = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            !stat.is_empty() && !stat.starts_with('Z')
+        };
+        while alive() && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(!alive(), "grandchild {pid} outlived its git call");
+    }
+}
+
 /// A fork with several drafts lands its head onto main: the export carries every
 /// draft's files, not only the last one's.
 #[test]
