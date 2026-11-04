@@ -583,8 +583,12 @@ impl<'c> Git<'c> {
         Ok(git)
     }
 
+    /// The bare repository through the git bridge, run as the configured git, every
+    /// call of the operation it starts ending within the call timeout from now.
     fn repo(&self) -> Repo {
         Repo::open(&self.dir)
+            .with_git(&self.config.git)
+            .with_deadline(std::time::Instant::now() + self.config.timeout)
     }
 
     fn command(&self, dir: Option<&Path>, args: &[&str]) -> Command {
@@ -1023,9 +1027,18 @@ mod tests {
             config: &config,
             dir: tmp.path().to_path_buf(),
         };
-        match git.run(&["push"], Cap::Small) {
-            Err(LandError::Fail(_)) => {}
-            other => panic!("{other:?}"),
+        // A script just written can be busy for a moment (ETXTBSY) when another test
+        // thread forks while it is open; that is a retry, not this test's answer.
+        let mut tries = 0;
+        loop {
+            match git.run(&["push"], Cap::Small) {
+                Err(LandError::Fail(_)) => break,
+                Err(LandError::Retry(e)) if e.contains("Text file busy") && tries < 20 => {
+                    tries += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(50));
+                }
+                other => panic!("{other:?}"),
+            }
         }
     }
 

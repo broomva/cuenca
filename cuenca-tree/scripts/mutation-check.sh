@@ -125,5 +125,11 @@ mutate src/bounded.rs '                        self.stdin = None;
                         break;
                     }' --lib one_pump
 mutate src/bounded.rs 'self.carry = window[window.len().saturating_sub(keep)..].to_vec();' 'self.carry = Vec::new();' --lib a_watched_pattern
+# The git bridge's deadline and field-bounded batch protocol (ADR 0002, BRO-3601).
+mutate src/git.rs '            deadline: self.deadline,' '            deadline: None,' --test git_bounds one_deadline
+mutate src/git.rs 'Self::LsTree => (caps.ls_tree, "ls_tree"),' 'Self::LsTree => (u64::MAX, "ls_tree"),' --test git_bounds past_its_cap
+mutate src/git.rs '                        if declared != expected {' '                        if false {' --test git_bounds batch_size_other
+mutate src/git.rs '                if line.len() >= MAX_BATCH_HEADER {' '                if false {' --test git_bounds overlong
+mutate src/git.rs '.filter(|oid| ruled.contains_key(oid) || !known(*oid)),' '.filter(|oid| !known(*oid)),' --test git_bounds read_tree_known
 
 exit $survived
