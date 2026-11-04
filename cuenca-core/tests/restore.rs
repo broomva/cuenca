@@ -254,3 +254,39 @@ fn held_snapshot_exports_the_original_cut_after_later_writes_commit() {
     assert_eq!(frozen.records.len() + 1, latest.records.len());
     assert_ne!(frozen.records, latest.records);
 }
+
+/// ADR 0002: a main the location followed from its remote is in the backup with its
+/// blobs, even when no fork was made from it, so the restored location's main is whole
+/// and its follow, offset included, is derived again.
+#[test]
+fn a_followed_main_round_trips_with_its_blobs() {
+    let dir = tempfile::tempdir().unwrap();
+    let source = Store::open(dir.path()).unwrap();
+    let main = tree(&source, &[("a", b"1")]);
+    source
+        .add_location(&loc("l"), Some("https://github.com/o/r"), &main)
+        .unwrap();
+    let followed = tree(&source, &[("a", b"1"), ("merged", b"only on the remote")]);
+    let commit = GitOid::for_blob(b"stand-in commit");
+    let offset = source
+        .follow_main(&loc("l"), &followed, commit)
+        .unwrap()
+        .unwrap();
+    let prefix = source.export_prefix().unwrap();
+    assert!(prefix.trees.contains_key(&followed.git_tree_id()));
+    let merged = followed.get("merged").unwrap().oid();
+    assert!(prefix.reachable_blobs().unwrap().contains(&merged));
+
+    let (_d, target) = target(&source);
+    target.import_prefix(&prefix).unwrap();
+    let restored = target.location(&loc("l")).unwrap().unwrap();
+    assert_eq!(restored.main, followed.git_tree_id());
+    let follow = restored.followed.unwrap();
+    assert_eq!((follow.commit, follow.offset), (commit, offset));
+    assert_eq!(
+        target.main_tree(&loc("l")).unwrap().git_tree_id(),
+        followed.git_tree_id()
+    );
+    assert_eq!(target.read_blob(merged).unwrap(), b"only on the remote");
+    target.replay_check().unwrap();
+}

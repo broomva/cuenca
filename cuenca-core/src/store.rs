@@ -687,7 +687,12 @@ impl Store {
                     let loc = t
                         .location(&location)?
                         .ok_or_else(|| CoreError::UnknownLocation(location.to_string()))?;
-                    if loc.main_moved.is_some_and(|m| m.offset >= seen) {
+                    // Every move of main (a landing or a follow) writes a record at a new
+                    // offset, so a move since the evaluation read the log, even away and
+                    // back, is seen here (ADR 0002).
+                    if loc.main_moved.is_some_and(|m| m.offset >= seen)
+                        || loc.followed.is_some_and(|f| f.offset >= seen)
+                    {
                         return Err(CoreError::MainMoved);
                     }
                     Ok(event)
@@ -962,6 +967,37 @@ impl Store {
             changeset: id,
         };
         Ok(self.record(event, |_| Ok(()))?.0)
+    }
+
+    /// Make `main`, the tree of the remote's default branch at `commit`, the main of
+    /// `location`, a location with a git remote (ADR 0002). Every blob of `main` must
+    /// already be in the store. `None` when main is already that tree: nothing is
+    /// recorded. The earlier main stays in the log; forks keep the base they started
+    /// from.
+    pub fn follow_main(
+        &self,
+        location: &LocationName,
+        main: &Tree,
+        commit: GitOid,
+    ) -> Result<Option<u64>> {
+        let loc = self
+            .location(location)?
+            .ok_or_else(|| CoreError::UnknownLocation(location.to_string()))?;
+        if loc.remote.is_none() {
+            return Err(CoreError::NoRemote(location.to_string()));
+        }
+        if loc.main == main.git_tree_id() {
+            return Ok(None);
+        }
+        self.check_entries(main.entries())?;
+        let event = Event::MainFollowed {
+            location: location.clone(),
+            main: main.git_tree_id(),
+            commit,
+        };
+        let (offset, _) =
+            self.record(event, |txn| store_tree(&mut txn.open_table(TREES)?, main))?;
+        Ok(Some(offset))
     }
 
     /// Record the authority's intent to push `export` for the landing of `id` (before
@@ -1442,7 +1478,7 @@ fn prefix_roots(records: &[Record]) -> std::collections::BTreeSet<GitOid> {
     records
         .iter()
         .flat_map(|r| match &r.event {
-            Event::LocationAdded { main, .. } => vec![*main],
+            Event::LocationAdded { main, .. } | Event::MainFollowed { main, .. } => vec![*main],
             Event::ForkCreated { base, .. } | Event::ForkBranched { base, .. } => vec![*base],
             Event::DraftPublished { changeset, .. } | Event::DraftFenced { changeset, .. } => {
                 vec![changeset.base, changeset.target]
@@ -1569,12 +1605,20 @@ fn base_read(found: &FoundFile) -> BaseRead<'_> {
 fn history_tags() -> &'static regex::bytes::Regex {
     static TAGS: std::sync::OnceLock<regex::bytes::Regex> = std::sync::OnceLock::new();
     TAGS.get_or_init(|| {
-        regex::bytes::Regex::new(r#""event":"(?:location_added|main_advanced)""#).expect("literal")
+        regex::bytes::Regex::new(r#""event":"(?:location_added|main_advanced|main_followed)""#)
+            .expect("literal")
     })
 }
 
 /// Main's history for `location`: every `(path, blob)` its main has held, and each
 /// move with its time and the paths it touched.
+///
+/// Every move is derived from trees (ADR 0002): the log is replayed in order, tracking
+/// main's tree. `LocationAdded` sets it; `MainAdvanced` moves it to the landed
+/// changeset's target, the fork's head and so the whole of its drafts (not the head
+/// changeset's ops, whose base is the previous draft: BRO-3603); `MainFollowed` moves it
+/// to the followed tree. Each tree main takes adds all its `(path, blob)` pairs to
+/// `held`, and each move records the paths whose entry differs between the two trees.
 fn main_history(
     log: &impl ReadableTable<u64, Bytes>,
     index: &impl ReadableTable<Bytes, u64>,
@@ -1582,47 +1626,66 @@ fn main_history(
     location: &LocationName,
 ) -> Result<History> {
     let mut history = History::default();
-    let mut moved: Vec<(u64, ChangesetId)> = Vec::new();
+    let mut main: Option<Tree> = None;
     for item in log.iter()? {
         let (k, v) = item?;
-        // Only two kinds of record matter; the rest (drafts and intents, the bulk of
+        // Only three kinds of record matter; the rest (drafts and intents, the bulk of
         // the log) are skipped on a byte search instead of being decoded. A false
-        // match is decoded and ignored below, and every record of the two kinds
+        // match is decoded and ignored below, and every record of the three kinds
         // carries its tag (`history_tags_match_the_records_they_select`).
         if !history_tags().is_match(v.value()) {
             continue;
         }
         let record = decode_record(k.value(), v.value())?;
-        match record.event {
+        let tree = match record.event {
             Event::LocationAdded {
                 location: l, main, ..
-            } if l == *location => {
-                for (path, entry) in load_tree(trees, main)?.entries() {
-                    history.held.insert((path.clone(), entry.oid()));
-                }
-            }
+            } if l == *location => main,
             Event::MainAdvanced {
                 location: l,
                 changeset,
                 ..
-            } if l == *location => moved.push((record.at_ms, changeset)),
-            _ => {}
-        }
-    }
-    for (at, id) in moved {
-        let changeset = indexed_changeset(index, log, id)?
-            .ok_or_else(|| CoreError::UnknownChangeset(id.to_hex()))?;
-        for op in &changeset.ops {
-            if let Op::Put { path, entry } = op {
-                history.held.insert((path.clone(), entry.oid()));
+            } if l == *location => {
+                indexed_changeset(index, log, changeset)?
+                    .ok_or_else(|| CoreError::UnknownChangeset(changeset.to_hex()))?
+                    .target
             }
+            Event::MainFollowed {
+                location: l, main, ..
+            } if l == *location => main,
+            _ => continue,
+        };
+        let tree = load_tree(trees, tree)?;
+        for (path, entry) in tree.entries() {
+            history.held.insert((path.clone(), entry.oid()));
         }
-        history.moves.push((
-            at,
-            changeset.ops.iter().map(|op| op.path().clone()).collect(),
-        ));
+        if let Some(before) = &main {
+            history
+                .moves
+                .push((record.at_ms, changed_paths(before, &tree)));
+        }
+        main = Some(tree);
     }
     Ok(history)
+}
+
+/// The paths whose entry differs between `before` and `after`: added, deleted, or with
+/// another blob or mode.
+fn changed_paths(before: &Tree, after: &Tree) -> Vec<RepoPath> {
+    let old: BTreeMap<&RepoPath, &Entry> = before.entries().collect();
+    let new: BTreeMap<&RepoPath, &Entry> = after.entries().collect();
+    let mut paths: Vec<RepoPath> = new
+        .iter()
+        .filter(|(path, entry)| old.get(*path) != Some(*entry))
+        .map(|(path, _)| (*path).clone())
+        .collect();
+    paths.extend(
+        old.keys()
+            .filter(|path| !new.contains_key(*path))
+            .map(|path| (*path).clone()),
+    );
+    paths.sort();
+    paths
 }
 
 /// Rebuild the tree `root` from its stored objects, and check that it hashes back to
@@ -1654,6 +1717,7 @@ fn load_tree(trees: &impl ReadableTable<Bytes, Bytes>, root: GitOid) -> Result<T
 mod tests {
     use super::*;
     use crate::owner::NodeId;
+    use crate::state::MainFollow;
 
     fn agent() -> Holder {
         Holder::new(
@@ -2424,12 +2488,24 @@ mod tests {
         let (_dir, store, cs) = setup();
         let (_, f) = ids();
         land_now(&store, &f, ChangesetId::of(&cs));
+        let r = LocationName::new("r").unwrap();
+        store
+            .add_location(&r, Some(REMOTE), &files(&store, &[("a", b"1")]))
+            .unwrap();
+        follow(&store, &r, &files(&store, &[("a", b"2")]));
         let records = store.records(0, 100).unwrap();
+        assert!(
+            records
+                .iter()
+                .any(|r| matches!(r.event, Event::MainFollowed { .. }))
+        );
         for record in records {
             let bytes = to_json(&record);
             let wanted = matches!(
                 record.event,
-                Event::LocationAdded { .. } | Event::MainAdvanced { .. }
+                Event::LocationAdded { .. }
+                    | Event::MainAdvanced { .. }
+                    | Event::MainFollowed { .. }
             );
             assert_eq!(history_tags().is_match(&bytes), wanted, "{record:?}");
         }
@@ -2473,5 +2549,383 @@ mod tests {
             .map(|r| r.gate.as_str())
             .collect();
         assert_eq!(failed, ["policy"]);
+    }
+
+    const REMOTE: &str = "https://github.com/o/r";
+
+    /// A tree of `(path, content)` files, every blob ingested.
+    fn files(store: &Store, files: &[(&str, &[u8])]) -> Tree {
+        Tree::from_entries(files.iter().map(|(path, content)| {
+            let oid = GitOid::for_blob(content);
+            store
+                .ingest_blob(oid, content.len() as u64, *content)
+                .unwrap();
+            (RepoPath::new(*path).unwrap(), Entry::File(oid))
+        }))
+        .unwrap()
+    }
+
+    /// Follow `location`'s remote to `tree`: the record's offset.
+    fn follow(store: &Store, location: &LocationName, tree: &Tree) -> u64 {
+        let commit = GitOid::for_blob(tree.git_tree_id().as_bytes());
+        store.follow_main(location, tree, commit).unwrap().unwrap()
+    }
+
+    /// Publish one draft of `files` onto `fork`'s head: its id.
+    fn draft(store: &Store, fork: &ForkName, files: &[(&str, &[u8])]) -> ChangesetId {
+        let head = store.fork_head(fork).unwrap();
+        let ops = files
+            .iter()
+            .map(|(path, content)| {
+                let oid = GitOid::for_blob(content);
+                store
+                    .ingest_blob(oid, content.len() as u64, *content)
+                    .unwrap();
+                Op::put(RepoPath::new(*path).unwrap(), Entry::File(oid))
+            })
+            .collect();
+        let cs = Changeset::new(&head, ops).unwrap();
+        store.publish_draft(fork, &w1(), &cs).unwrap().id
+    }
+
+    /// Main's history for `location`, as an evaluation reads it.
+    fn history(store: &Store, location: &LocationName) -> History {
+        let txn = store.db.begin_read().unwrap();
+        main_history(
+            &txn.open_table(LOG).unwrap(),
+            &txn.open_table(CHANGESETS).unwrap(),
+            &txn.open_table(TREES).unwrap(),
+            location,
+        )
+        .unwrap()
+    }
+
+    fn paths(names: &[&str]) -> Vec<RepoPath> {
+        names.iter().map(|p| RepoPath::new(*p).unwrap()).collect()
+    }
+
+    fn held(store: &Store, location: &LocationName, path: &str, content: &[u8]) -> bool {
+        history(store, location)
+            .held
+            .contains(&(RepoPath::new(path).unwrap(), GitOid::for_blob(content)))
+    }
+
+    /// The gates `id`, the head of `fork`, fails, evaluated as an agent's request now.
+    fn failing(store: &Store, fork: &ForkName, id: ChangesetId) -> Vec<String> {
+        use crate::gates::{AuthorKind, LandingRequest};
+        store
+            .evaluate_at(fork, id, &LandingRequest::new(AuthorKind::Agent), now_ms())
+            .unwrap()
+            .results
+            .into_iter()
+            .filter(|r| !r.passed())
+            .map(|r| r.gate)
+            .collect()
+    }
+
+    /// ADR 0002: main follows only a location with a remote, records nothing when main
+    /// is already the tree, needs every blob in the store, and is derived again by a
+    /// replay, followed offset included.
+    #[test]
+    fn main_follows_only_a_remote_and_only_to_a_new_tree() {
+        let (_dir, store, _cs) = setup();
+        let (l, _) = ids();
+        let other = files(&store, &[("a", b"elsewhere")]);
+        assert!(matches!(
+            store.follow_main(&l, &other, GitOid::for_blob(b"c")),
+            Err(CoreError::NoRemote(_))
+        ));
+        let r = LocationName::new("r").unwrap();
+        let main = files(&store, &[("a", b"1")]);
+        store.add_location(&r, Some(REMOTE), &main).unwrap();
+        assert_eq!(
+            store
+                .follow_main(&r, &main, GitOid::for_blob(b"c"))
+                .unwrap(),
+            None
+        );
+        let lacking = Tree::from_entries([(
+            RepoPath::new("a").unwrap(),
+            Entry::File(GitOid::for_blob(b"not in the store")),
+        )])
+        .unwrap();
+        assert!(
+            store
+                .follow_main(&r, &lacking, GitOid::for_blob(b"c"))
+                .is_err()
+        );
+        let len = store.len().unwrap();
+        let next = files(&store, &[("a", b"2")]);
+        let commit = GitOid::for_blob(b"c");
+        let offset = store.follow_main(&r, &next, commit).unwrap().unwrap();
+        assert_eq!(offset, len);
+        let loc = store.location(&r).unwrap().unwrap();
+        assert_eq!(loc.main, next.git_tree_id());
+        assert_eq!(loc.followed, Some(MainFollow { commit, offset }));
+        assert_eq!(loc.main_moved, None);
+        assert_eq!(
+            store.main_tree(&r).unwrap().git_tree_id(),
+            next.git_tree_id()
+        );
+        store.replay_check().unwrap();
+    }
+
+    /// ADR 0002: landings and follows, interleaved across two locations, each give their
+    /// own location's `held` and `moves`, in log order, by tree diff.
+    #[test]
+    fn every_kind_of_move_is_in_main_history_in_log_order() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let l = LocationName::new("l").unwrap();
+        let r = LocationName::new("r").unwrap();
+        store
+            .add_location(&l, None, &files(&store, &[("a", b"1")]))
+            .unwrap();
+        store
+            .add_location(
+                &r,
+                Some(REMOTE),
+                &files(&store, &[("a", b"1"), ("b", b"1")]),
+            )
+            .unwrap();
+        let f = ForkName::new("f").unwrap();
+        store.create_fork(&f, &l, &agent()).unwrap();
+        let id = draft(&store, &f, &[("a", b"2")]);
+        land_now(&store, &f, id);
+        follow(
+            &store,
+            &r,
+            &files(&store, &[("a", b"1"), ("b", b"2"), ("c", b"1")]),
+        );
+        let g = ForkName::new("g").unwrap();
+        store.create_fork(&g, &l, &agent()).unwrap();
+        let head = store.fork_head(&g).unwrap();
+        let z = files(&store, &[("z", b"1")]);
+        let cs = Changeset::new(
+            &head,
+            vec![
+                Op::Delete {
+                    path: RepoPath::new("a").unwrap(),
+                },
+                Op::put(RepoPath::new("z").unwrap(), *z.get("z").unwrap()),
+            ],
+        )
+        .unwrap();
+        let id = store.publish_draft(&g, &w1(), &cs).unwrap().id;
+        land_now(&store, &g, id);
+        follow(&store, &r, &files(&store, &[("b", b"2"), ("c", b"1")]));
+
+        let times = |kind: fn(&Event, &LocationName) -> bool, at: &LocationName| -> Vec<u64> {
+            store
+                .records(0, usize::MAX)
+                .unwrap()
+                .iter()
+                .filter(|rec| kind(&rec.event, at))
+                .map(|rec| rec.at_ms)
+                .collect()
+        };
+        let moved = |e: &Event, at: &LocationName| match e {
+            Event::MainAdvanced { location, .. } | Event::MainFollowed { location, .. } => {
+                location == at
+            }
+            _ => false,
+        };
+        let hl = history(&store, &l);
+        assert_eq!(
+            hl.moves,
+            times(moved, &l)
+                .into_iter()
+                .zip([paths(&["a"]), paths(&["a", "z"])])
+                .collect::<Vec<_>>()
+        );
+        let hr = history(&store, &r);
+        assert_eq!(
+            hr.moves,
+            times(moved, &r)
+                .into_iter()
+                .zip([paths(&["b", "c"]), paths(&["a"])])
+                .collect::<Vec<_>>()
+        );
+        for (path, content) in [("a", &b"1"[..]), ("a", b"2"), ("z", b"1")] {
+            assert!(held(&store, &l, path, content), "l held {path}={content:?}");
+        }
+        for (path, content) in [("a", &b"1"[..]), ("b", b"1"), ("b", b"2"), ("c", b"1")] {
+            assert!(held(&store, &r, path, content), "r held {path}={content:?}");
+        }
+        assert!(
+            !held(&store, &r, "a", b"2"),
+            "l's landing is not r's history"
+        );
+        assert!(
+            !held(&store, &l, "b", b"1"),
+            "r's follow is not l's history"
+        );
+        store.replay_check().unwrap();
+    }
+
+    /// BRO-3603: a fork landed after three drafts records what its first draft put and
+    /// later drafts kept, not only the head changeset's ops; the revert gate then sees
+    /// that blob, and `moves` the first draft's governance path.
+    #[test]
+    fn a_landing_after_three_drafts_records_its_first_drafts_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let l = LocationName::new("l").unwrap();
+        store
+            .add_location(&l, None, &files(&store, &[("a", b"1")]))
+            .unwrap();
+        let f = ForkName::new("f").unwrap();
+        store.create_fork(&f, &l, &agent()).unwrap();
+        draft(&store, &f, &[("x", b"draft one"), ("AGENTS.md", b"rules")]);
+        draft(&store, &f, &[("y", b"draft two")]);
+        let head = draft(&store, &f, &[("z", b"draft three")]);
+        land_now(&store, &f, head);
+        let h = history(&store, &l);
+        assert_eq!(h.moves.len(), 1);
+        assert_eq!(h.moves[0].1, paths(&["AGENTS.md", "x", "y", "z"]));
+        assert!(held(&store, &l, "x", b"draft one"));
+
+        // x changes on main, and a later draft puts draft one's blob back.
+        let g = ForkName::new("g").unwrap();
+        store.create_fork(&g, &l, &agent()).unwrap();
+        let id = draft(&store, &g, &[("x", b"changed")]);
+        land_now(&store, &g, id);
+        let k = ForkName::new("k").unwrap();
+        store.create_fork(&k, &l, &agent()).unwrap();
+        let back = draft(&store, &k, &[("x", b"draft one")]);
+        assert!(failing(&store, &k, back).contains(&"revert".to_string()));
+    }
+
+    /// ADR 0002: a blob main was registered with, which the first follow replaced, is
+    /// held: a draft that puts it back is a revert.
+    #[test]
+    fn a_registered_blob_a_follow_replaced_is_a_revert_when_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let r = LocationName::new("r").unwrap();
+        store
+            .add_location(&r, Some(REMOTE), &files(&store, &[("a", b"registered")]))
+            .unwrap();
+        follow(&store, &r, &files(&store, &[("a", b"followed")]));
+        let f = ForkName::new("f").unwrap();
+        store.create_fork(&f, &r, &agent()).unwrap();
+        let id = draft(&store, &f, &[("a", b"registered")]);
+        assert!(failing(&store, &f, id).contains(&"revert".to_string()));
+    }
+
+    /// ADR 0002: a blob a follow brought and a later follow replaced is held: a draft
+    /// that puts it back is a revert.
+    #[test]
+    fn a_blob_followed_away_is_a_revert_when_restored() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let r = LocationName::new("r").unwrap();
+        store
+            .add_location(&r, Some(REMOTE), &files(&store, &[("a", b"1")]))
+            .unwrap();
+        follow(&store, &r, &files(&store, &[("a", b"2")]));
+        follow(&store, &r, &files(&store, &[("a", b"3")]));
+        let f = ForkName::new("f").unwrap();
+        store.create_fork(&f, &r, &agent()).unwrap();
+        let fine = draft(&store, &f, &[("a", b"4")]);
+        assert!(!failing(&store, &f, fine).contains(&"revert".to_string()));
+        let back = draft(&store, &f, &[("a", b"2")]);
+        assert!(failing(&store, &f, back).contains(&"revert".to_string()));
+    }
+
+    /// ADR 0002: a followed governance change counts against `governance_rate` at the
+    /// time it was followed, up to the window's edge and not past it.
+    #[test]
+    fn a_followed_governance_change_counts_at_its_time() {
+        use crate::gates::{AuthorKind, LandingRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let r = LocationName::new("r").unwrap();
+        let policy: &[u8] = b"auto_merge:\n  gates:\n    governance:\n      paths: [CLAUDE.md, AGENTS.md, METALAYER.md, .control/policy.yaml, .control/rcs-parameters.toml]\n";
+        let main = |agents: &[u8]| {
+            files(
+                &store,
+                &[(".control/policy.yaml", policy), ("AGENTS.md", agents)],
+            )
+        };
+        store.add_location(&r, Some(REMOTE), &main(b"0")).unwrap();
+        let offset = follow(&store, &r, &main(b"1"));
+        let moved_at = store.records(offset, 1).unwrap()[0].at_ms;
+        let f = ForkName::new("f").unwrap();
+        store.create_fork(&f, &r, &agent()).unwrap();
+        let id = draft(&store, &f, &[("AGENTS.md", b"2")]);
+        let fails = |at: u64| -> Vec<String> {
+            store
+                .evaluate_at(&f, id, &LandingRequest::new(AuthorKind::Agent), at)
+                .unwrap()
+                .results
+                .into_iter()
+                .filter(|r| !r.passed())
+                .map(|r| r.gate)
+                .collect()
+        };
+        assert_eq!(fails(moved_at), ["governance_rate"]);
+        assert_eq!(fails(moved_at + 86_400_000), ["governance_rate"]);
+        assert!(fails(moved_at + 86_400_001).is_empty());
+    }
+
+    /// ADR 0002: a follow between a landing request's evaluation and its append fails
+    /// the append, and the request is evaluated again against the followed main; a
+    /// follow away and back to the same tree is a move too.
+    #[test]
+    fn a_follow_under_a_landing_request_re_evaluates_it() {
+        use crate::gates::{AuthorKind, LandingRequest};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let r = LocationName::new("r").unwrap();
+        let first = files(&store, &[("a", b"1")]);
+        store.add_location(&r, Some(REMOTE), &first).unwrap();
+        let request = LandingRequest::new(AuthorKind::Agent);
+
+        // Away and back: main is the tree the evaluation read, but it moved twice.
+        let f = ForkName::new("f").unwrap();
+        store.create_fork(&f, &r, &agent()).unwrap();
+        let id = draft(&store, &f, &[("b", b"1")]);
+        verify_now(&store, &f, id);
+        let away = files(&store, &[("a", b"away")]);
+        let mut calls = 0;
+        let mut back = 0;
+        let landed = store
+            .record_landing_with(&f, &w1(), id, |s| {
+                calls += 1;
+                let eval = s.evaluate_at(&f, id, &request, 0)?;
+                if calls == 1 {
+                    follow(s, &r, &away);
+                    back = follow(s, &r, &first);
+                }
+                Ok(eval)
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+        assert!(landed.gates.log_len > back, "evaluated after the follows");
+        assert_eq!(landed.gates.base, first.git_tree_id());
+
+        // Away only: the agent verifies against the followed main, and the verdict
+        // journaled is against that main.
+        let g = ForkName::new("g").unwrap();
+        store.create_fork(&g, &r, &agent()).unwrap();
+        let id = draft(&store, &g, &[("c", b"1")]);
+        verify_now(&store, &g, id);
+        let moved = files(&store, &[("a", b"moved")]);
+        let mut calls = 0;
+        let landed = store
+            .record_landing_with(&g, &w1(), id, |s| {
+                calls += 1;
+                let eval = s.evaluate_at(&g, id, &request, 0)?;
+                if calls == 1 {
+                    follow(s, &r, &moved);
+                    verify_now(s, &g, id);
+                }
+                Ok(eval)
+            })
+            .unwrap();
+        assert_eq!(calls, 2);
+        assert_eq!(landed.gates.base, moved.git_tree_id());
+        store.replay_check().unwrap();
     }
 }

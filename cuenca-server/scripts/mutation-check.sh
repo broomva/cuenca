@@ -374,9 +374,9 @@ mutate ../cuenca-core/src/gates/builtin.rs 'if change.from == change.main {' 'if
 mutate ../cuenca-core/src/gates/builtin.rs 'if self.0.iter().any(|w| inside(w, cx.at_ms)) {' 'if true {' --test gate_log
 mutate ../cuenca-core/src/gates/mod.rs 'if let Some(error) = &self.policy_error {' 'if let Some(error) = None::<&String> {' --test gate_log
 mutate ../cuenca-core/src/store.rs 'let policy = self.base_file(&base, POLICY_PATH);' 'let policy = self.base_file(&self.tree(changeset.target)?, POLICY_PATH);' --test gate_log
-mutate ../cuenca-core/src/store.rs '                for (path, entry) in load_tree(trees, main)?.entries() {
-                    history.held.insert((path.clone(), entry.oid()));
-                }' '' --test gate_log
+mutate ../cuenca-core/src/store.rs '        for (path, entry) in tree.entries() {
+            history.held.insert((path.clone(), entry.oid()));' '        for (path, entry) in tree.entries().take(0) {
+            history.held.insert((path.clone(), entry.oid()));' --test gate_log
 mutate src/http.rs 'PrincipalKind::OwnerDevice => AuthorKind::Human,' 'PrincipalKind::OwnerDevice => AuthorKind::Agent,' --test gate_log
 mutate src/http.rs '        let gates = a.store.evaluate_landing(&name, &writer, id, &request)?;' '        let gates = a.store.evaluate_landing(&name, &writer, id, &LandingRequest::new(AuthorKind::Agent))?;' --test gate_log
 
@@ -385,9 +385,6 @@ mutate ../cuenca-core/src/store.rs '            return Ok(self.journaled_landing
 
 # P20 r1 (B): the check manifest is the base's; main's history includes landed content; the history search skips nothing it needs; declarations are bounded in bytes.
 mutate ../cuenca-core/src/store.rs 'let checks = self.base_file(&base, CHECKS_PATH);' 'let checks = self.base_file(&self.tree(changeset.target)?, CHECKS_PATH);' --test gate_log
-mutate ../cuenca-core/src/store.rs '            if let Op::Put { path, entry } = op {
-                history.held.insert((path.clone(), entry.oid()));
-            }' '' --test gate_log
 mutate ../cuenca-core/src/store.rs 'if !history_tags().is_match(v.value()) {' 'if true {' --test gate_log
 mutate ../cuenca-core/src/gates/mod.rs 'if bytes > MAX_DECLARATION_BYTES {' 'if false {' --test gate_log
 

@@ -329,7 +329,9 @@ mutate src/store.rs 'txn.set_durability(Durability::Immediate);' 'txn.set_durabi
 # Gate engine (BRO-3313): the intent is journaled against the main it was recorded
 # on, the writer is checked before any gate runs, the governance window and size limit
 # have edges, findings are capped, and the policy compiler refuses what it must.
-mutate src/store.rs 'if loc.main_moved.is_some_and(|m| m.offset >= seen) {' 'if false {' --lib
+mutate src/store.rs 'if loc.main_moved.is_some_and(|m| m.offset >= seen)
+                        ||' 'if false
+                        ||' --lib
 mutate src/store.rs '            if let Some(offset) = check_landing(&view, fork, writer, id)? {
                 return self.journaled_landing(offset);
             }' '' --test forks
@@ -482,5 +484,17 @@ mutate src/state.rs '            if *base != source.head {' '            if fals
 mutate src/state.rs '    new_fork(view, name, holder)?;
     fork(view, from)' '    fork(view, from)' --test forks rules_of_a_new_fork
 mutate src/state.rs '                from: Some(from.clone()),' '                from: None,' --test forks fork_of_a_fork
+
+# Following and gate history by tree diff (ADR 0002, BRO-3601, BRO-3603).
+mutate src/store.rs '                        || loc.followed.is_some_and(|f| f.offset >= seen)
+' '' --lib a_follow_under_a_landing_request
+mutate src/store.rs '                    .target
+' '                    .base
+' --lib a_landing_after_three_drafts
+mutate src/store.rs 'main_advanced|main_followed)' 'main_advanced)' --lib history_tags
+mutate src/store.rs '            .filter(|path| !new.contains_key(*path))' '            .filter(|_| false)' --lib every_kind_of_move
+mutate src/store.rs '        for (path, entry) in tree.entries() {
+            history.held.insert((path.clone(), entry.oid()));' '        for (path, entry) in tree.entries().take(0) {
+            history.held.insert((path.clone(), entry.oid()));' --lib a_blob_followed_away
 
 exit $survived
