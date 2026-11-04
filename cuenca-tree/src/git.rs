@@ -250,6 +250,19 @@ impl Repo {
     /// Read the tree `treeish` names, hashing every blob from its bytes, and check that
     /// the tree id cuenca computes for it is the one git holds.
     pub fn read_tree(&self, treeish: &str) -> Result<Tree, GitError> {
+        self.read_tree_known(treeish, |_| false)
+    }
+
+    /// [`Repo::read_tree`], but a blob `known` accepts is not read: the caller already
+    /// holds it, checked against its id, so hashing git's copy again proves nothing. Every
+    /// blob a content rule applies to is still read and checked, and every tree object is
+    /// still compared byte for byte, so the tree is validated exactly as before. A store
+    /// that follows a remote reads only what changed (BRO-3517).
+    pub fn read_tree_known(
+        &self,
+        treeish: &str,
+        known: impl Fn(GitOid) -> bool,
+    ) -> Result<Tree, GitError> {
         self.check_repository()?;
         let root = self.resolve_tree_checked(treeish)?;
         let listing = self.run(
@@ -296,7 +309,12 @@ impl Repo {
         for (path, mode, oid) in &records {
             ruled_add(&mut ruled, path, &Entry::from_mode(*mode, *oid)?);
         }
-        let wanted = unique(records.iter().map(|r| r.2));
+        let wanted = unique(
+            records
+                .iter()
+                .map(|r| r.2)
+                .filter(|oid| ruled.contains_key(oid) || !known(*oid)),
+        );
         self.cat_file_batch("blob", &wanted, |oid, size, content| {
             match ruled.get(&oid) {
                 None => hash_stream(oid, size, content),

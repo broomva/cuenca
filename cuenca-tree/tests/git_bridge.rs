@@ -1169,3 +1169,58 @@ fn any_alternates_content_is_refused_by_every_reader() {
     ));
     assert!(matches!(repo.read_blobs([a]), Err(GitError::Alternates)));
 }
+
+/// Remove a loose object from the repository, so any read of it fails.
+fn drop_object(w: &Work, oid: &str) {
+    let path = w
+        .path()
+        .join(".git/objects")
+        .join(&oid[..2])
+        .join(&oid[2..]);
+    std::fs::remove_file(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+}
+
+/// BRO-3517: a blob the caller already holds is not read again, so a store following a
+/// remote reads only what changed. The proof is a blob git no longer has: `read_tree`
+/// fails on it and `read_tree_known` does not, and both give the same tree.
+#[test]
+fn a_known_blob_is_not_read_and_the_tree_is_the_same() {
+    let w = Work::new();
+    let t = tree_from_index(
+        &w,
+        &[
+            ("100644", "kept.txt", b"kept\n"),
+            ("100644", "changed.txt", b"new\n"),
+        ],
+    );
+    let repo = Repo::open(w.path());
+    let full = repo.read_tree(&t.to_hex()).unwrap();
+    let kept = full.get("kept.txt").unwrap().oid();
+    drop_object(&w, &kept.to_hex());
+    assert!(repo.read_tree(&t.to_hex()).is_err(), "the blob is gone");
+    let known = repo
+        .read_tree_known(&t.to_hex(), |oid| oid == kept)
+        .unwrap();
+    assert_eq!(known.git_tree_id(), full.git_tree_id());
+    // A blob nobody holds is still read: the missing one is not skipped by accident.
+    assert!(repo.read_tree_known(&t.to_hex(), |_| false).is_err());
+}
+
+/// A blob a content rule applies to (a symlink target, a `.gitattributes`) is read and
+/// checked even when the caller says it holds it: the rule depends on the path.
+#[test]
+fn a_known_blob_under_a_content_rule_is_still_read() {
+    let w = Work::new();
+    let t = tree_from_index(
+        &w,
+        &[("120000", "link", b"target"), ("100644", "a.txt", b"a\n")],
+    );
+    let repo = Repo::open(w.path());
+    let full = repo.read_tree(&t.to_hex()).unwrap();
+    let link = full.get("link").unwrap().oid();
+    drop_object(&w, &link.to_hex());
+    assert!(
+        repo.read_tree_known(&t.to_hex(), |_| true).is_err(),
+        "the symlink's target is read whatever the caller holds"
+    );
+}
