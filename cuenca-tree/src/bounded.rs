@@ -118,9 +118,10 @@ pub fn run_watched(
     watch: &[&str],
 ) -> Result<Output, RunError> {
     let mut child = Running::spawn(cmd, what, limits)?;
+    // An empty pattern is in every stream: seen from the start, and not searched for.
+    child.seen = watch.iter().map(|w| w.is_empty()).collect();
     child.watch = watch.iter().map(|w| w.as_bytes().to_vec()).collect();
-    child.seen = vec![false; watch.len()];
-    child.input = input.to_vec();
+    child.set_input(input.to_vec());
     child.finish()
 }
 
@@ -138,6 +139,8 @@ pub struct Running {
     stdout: Option<ChildStdout>,
     stderr: Option<ChildStderr>,
     out: Vec<u8>,
+    /// Every stdout byte read so far, gathered or streamed: what the cap is held to.
+    printed: u64,
     err: VecDeque<u8>,
     /// The stderr patterns watched for, whether each was seen, and the end of what was
     /// read so far, so a pattern split across two reads is still found.
@@ -175,6 +178,7 @@ impl Running {
             stdout: None,
             stderr: None,
             out: Vec::new(),
+            printed: 0,
             err: VecDeque::new(),
             watch: Vec::new(),
             seen: Vec::new(),
@@ -199,6 +203,61 @@ impl Running {
             return Err(running.fail_io(e.into()));
         }
         Ok(running)
+    }
+
+    /// What is written to the child's stdin as the pipes are driven; stdin is closed
+    /// once it is all written. Set before the first read.
+    pub fn set_input(&mut self, input: Vec<u8>) {
+        self.input = input;
+        self.written = 0;
+    }
+
+    /// Read what the child prints next into `buf`, writing its input and keeping its
+    /// stderr meanwhile, within the deadline and the stdout cap: `Ok(0)` at the end of
+    /// its stdout. For a protocol read as it streams (`cat-file --batch`); what is read
+    /// here is not in [`Output::stdout`].
+    pub fn read(&mut self, buf: &mut [u8]) -> Result<usize, RunError> {
+        if buf.is_empty() {
+            return Ok(0);
+        }
+        loop {
+            if self.past_deadline() {
+                let _ = self.reap();
+                return Err(self.timed_out());
+            }
+            let Some(pipe) = &mut self.stdout else {
+                return Ok(0);
+            };
+            match pipe.read(buf) {
+                Ok(0) => {
+                    self.stdout = None;
+                    return Ok(0);
+                }
+                Ok(n) => {
+                    self.count(n)?;
+                    return Ok(n);
+                }
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
+                Err(e) => return Err(self.fail_io(e)),
+            }
+            let wait = self.remaining().map_or(SLICE, |left| left.min(SLICE));
+            self.pump(true, wait)?;
+        }
+    }
+
+    /// Count `n` more stdout bytes against the cap.
+    fn count(&mut self, n: usize) -> Result<(), RunError> {
+        self.printed += n as u64;
+        if self.printed > self.limits.stdout_cap {
+            let _ = self.reap();
+            return Err(RunError::Capped {
+                what: self.what.clone(),
+                cap: self.limits.stdout_cap,
+                reached: self.printed,
+            });
+        }
+        Ok(())
     }
 
     /// Drive the pipes until stdout and stderr are closed, the input is written (or
@@ -427,11 +486,14 @@ impl Running {
                         let mut window = std::mem::take(&mut self.carry);
                         window.extend_from_slice(&buf[..n]);
                         for (pattern, seen) in self.watch.iter().zip(self.seen.iter_mut()) {
-                            if !*seen && window.windows(pattern.len()).any(|w| w == pattern) {
+                            if !*seen
+                                && !pattern.is_empty()
+                                && window.windows(pattern.len()).any(|w| w == pattern)
+                            {
                                 *seen = true;
                             }
                         }
-                        let keep = self.watch.iter().map(Vec::len).max().unwrap_or(1) - 1;
+                        let keep = self.watch.iter().map(Vec::len).max().unwrap_or(1).max(1) - 1;
                         self.carry = window[window.len().saturating_sub(keep)..].to_vec();
                     }
                     self.err.extend(&buf[..n]);
@@ -459,15 +521,7 @@ impl Running {
                     return Ok(());
                 }
                 Ok(n) => {
-                    let reached = (self.out.len() + n) as u64;
-                    if reached > self.limits.stdout_cap {
-                        let _ = self.reap();
-                        return Err(RunError::Capped {
-                            what: self.what.clone(),
-                            cap: self.limits.stdout_cap,
-                            reached,
-                        });
-                    }
+                    self.count(n)?;
                     self.out.extend_from_slice(&buf[..n]);
                     return Ok(());
                 }
@@ -476,6 +530,27 @@ impl Running {
                 Err(e) => return Err(self.fail_io(e)),
             }
         }
+    }
+}
+
+/// A [`Running`] child's stdout as an [`io::Read`], for a protocol parser. A
+/// [`RunError`] comes out as an [`io::Error`] wrapping it ([`RunError::from_io`]).
+pub struct Stdout(pub Running);
+
+impl Read for Stdout {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf).map_err(io::Error::other)
+    }
+}
+
+impl RunError {
+    /// The [`RunError`] an [`io::Error`] from [`Stdout`] carries, or the error as it is.
+    pub fn from_io(e: io::Error) -> Result<Self, io::Error> {
+        if e.get_ref().is_some_and(|inner| inner.is::<RunError>()) {
+            let inner = e.into_inner().expect("checked above");
+            return Ok(*inner.downcast::<RunError>().expect("checked above"));
+        }
+        Err(e)
     }
 }
 
@@ -615,15 +690,35 @@ mod tests {
     }
 
     #[test]
-    fn sustained_input_still_ends_at_the_deadline() {
-        let start = Instant::now();
-        let e = run(
-            sh("cat >/dev/null"),
-            &vec![0u8; 256 << 20],
-            "cat",
-            Limits::within(Duration::from_millis(5), 16),
+    fn an_empty_watched_pattern_is_seen_and_does_not_panic() {
+        let out = run_watched(
+            sh("printf diagnostic >&2"),
+            b"",
+            "push",
+            Limits::within(Duration::from_secs(30), 16),
+            &["", "diag"],
         )
-        .unwrap_err();
+        .unwrap();
+        assert_eq!(out.stderr_seen, [true, true]);
+    }
+
+    #[test]
+    fn sustained_input_still_ends_at_the_deadline() {
+        // The input is ready before the deadline starts, so writing it is what the
+        // deadline cuts short.
+        let input = vec![0u8; 256 << 20];
+        let start = Instant::now();
+        let mut child = Running::spawn(
+            sh("cat >/dev/null"),
+            "cat",
+            Limits::within(Duration::from_millis(50), 16),
+        )
+        .unwrap();
+        child.set_input(input);
+        while child.written == 0 {
+            child.pump(false, Duration::from_millis(20)).unwrap();
+        }
+        let e = child.finish().unwrap_err();
         assert!(matches!(e, RunError::TimedOut { .. }), "{e}");
         assert!(
             start.elapsed() < Duration::from_secs(2),

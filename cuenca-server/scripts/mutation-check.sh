@@ -242,7 +242,7 @@ mutate src/land.rs '                    let export = match git.remote_branch(&re
                         Some(at) => git.adopt(&remote, &self.a.store, id, landing.main, at)?,
                         None => self.build(&git, &remote, &landing, None)?,
                     };' '                    let export = self.build(&git, &remote, &landing, None)?;' --test land a_branch_with_the_drafts_tree
-mutate src/land.rs '            Ok(None) if std::time::Instant::now() >= deadline => {' '            Ok(None) if false => {' --test land a_hung_call
+mutate src/land.rs '    let limits = Limits::within(config.timeout, stdout_cap);' '    let limits = Limits::within(Duration::from_secs(3600), stdout_cap);' --test land a_hung_call
 
 mutate src/land.rs '            if !on_main.contains(&oid)' '            if false' --test land a_fork_with_several
 mutate src/land.rs '        let main = landing.main;' '        let main = changeset.base;' --test land a_fork_with_several

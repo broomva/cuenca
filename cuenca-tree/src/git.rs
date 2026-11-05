@@ -12,6 +12,12 @@
 //! rules a tree of ids cannot see ([`check_content`]) are applied on both paths, once
 //! per blob id.
 //!
+//! Every call runs in its own process group ([`crate::bounded`]), within the
+//! repository's one deadline for the whole operation ([`Repo::with_deadline`]) and the
+//! stdout cap of its kind of call ([`RepoCaps`]). `cat-file --batch` is bounded field
+//! by field: each header line to [`MAX_BATCH_HEADER`] bytes, and each body to exactly
+//! the size `--batch-check` reported, or the canonical body's for a tree (ADR 0002).
+//!
 //! Needs git 2.25 or later (`rev-parse --show-object-format`).
 //!
 //! Scope: SHA-1 repositories with UTF-8 paths and no alternates. A SHA-256 repository
@@ -35,16 +41,18 @@
 //! into a store the authority owns (spec section 2a). Reading an agent's own store
 //! tells the reader what that agent's git serves, nothing more.
 
+use crate::bounded::{self, Limits, RunError, Running};
 use crate::entry::{Blob, BlobHasher, Entry, HashFailure, Mode};
 use crate::error::{SymlinkProblem, TreeError};
 use crate::oid::GitOid;
 use crate::path::RepoPath;
 use crate::tree::{MAX_GITATTRIBUTES_BYTES, MAX_SYMLINK_TARGET, Tree, check_content};
 use std::collections::{HashMap, HashSet};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
+use std::process::Command;
+use std::time::{Duration, Instant};
 use thiserror::Error;
 
 /// The content of blobs, by git id.
@@ -54,12 +62,82 @@ pub type Blobs = HashMap<GitOid, Vec<u8>>;
 pub const DEFAULT_MAX_BLOB_BYTES: u64 = 256 * 1024 * 1024;
 /// The most [`Repo::read_blobs`] loads into memory in one call by default.
 pub const DEFAULT_MAX_TOTAL_BYTES: u64 = 1024 * 1024 * 1024;
+/// The longest header line `cat-file --batch` may print for one object, its newline
+/// included: git's `<oid> <type> <size>\n` is under 100 bytes (ADR 0002).
+pub const MAX_BATCH_HEADER: usize = 256;
+
+/// The most stdout each kind of git call a [`Repo`] makes may print (ADR 0002). A call
+/// past its cap has its process group killed and fails with [`GitError::Capped`], which
+/// names the field. The caps are hard limits, independent of any deadline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct RepoCaps {
+    /// A call that prints an id, a path or a line of configuration. 8 KiB.
+    pub small: u64,
+    /// `ls-tree -r -t -z` of a whole tree. 256 MiB.
+    pub ls_tree: u64,
+    /// `cat-file --batch-check` of a list of objects. 64 MiB.
+    pub batch_check: u64,
+}
+
+impl Default for RepoCaps {
+    fn default() -> Self {
+        Self {
+            small: 8 * 1024,
+            ls_tree: 256 * 1024 * 1024,
+            batch_check: 64 * 1024 * 1024,
+        }
+    }
+}
+
+/// Which of [`RepoCaps`] a call is held to.
+#[derive(Debug, Clone, Copy)]
+enum Cap {
+    Small,
+    LsTree,
+    BatchCheck,
+}
+
+impl Cap {
+    fn of(self, caps: &RepoCaps) -> (u64, &'static str) {
+        match self {
+            Self::Small => (caps.small, "small"),
+            Self::LsTree => (caps.ls_tree, "ls_tree"),
+            Self::BatchCheck => (caps.batch_check, "batch_check"),
+        }
+    }
+}
 
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum GitError {
     #[error("could not run git: {0}")]
     Io(#[from] std::io::Error),
+    /// The repository's deadline ([`Repo::with_deadline`]) passed during the call; its
+    /// process group was killed.
+    #[error("git {args} did not end before the deadline and was killed, after {elapsed:?}")]
+    TimedOut { args: String, elapsed: Duration },
+    /// The call printed past its stdout cap ([`RepoCaps`], field `field`); its process
+    /// group was killed.
+    #[error(
+        "git {args} printed at least {reached} bytes, past its {cap}-byte output cap ({field}), and was killed"
+    )]
+    Capped {
+        args: String,
+        field: &'static str,
+        cap: u64,
+        reached: u64,
+    },
+    /// `cat-file --batch` printed a header line that is too long or not terminated.
+    #[error("cat-file --batch printed a header over {MAX_BATCH_HEADER} bytes or unterminated")]
+    BadHeader,
+    /// `cat-file --batch` declared a size other than the one expected for the object:
+    /// `--batch-check`'s for a blob, the canonical body's for a tree.
+    #[error("object {oid} is {declared} bytes in cat-file --batch, not the {expected} expected")]
+    SizeMismatch {
+        oid: GitOid,
+        declared: u64,
+        expected: u64,
+    },
     #[error("git {args} failed: {stderr}")]
     Failed { args: String, stderr: String },
     #[error("unexpected output from git {0}")]
@@ -117,19 +195,46 @@ pub const REDIRECTING_ENV: &[&str] = &[
 #[derive(Debug, Clone)]
 pub struct Repo {
     path: PathBuf,
+    git: PathBuf,
     max_blob_bytes: u64,
     max_total_bytes: u64,
     isolated_config: bool,
+    deadline: Option<Instant>,
+    caps: RepoCaps,
 }
 
 impl Repo {
     pub fn open(path: impl Into<PathBuf>) -> Self {
         Self {
             path: path.into(),
+            git: PathBuf::from("git"),
             max_blob_bytes: DEFAULT_MAX_BLOB_BYTES,
             max_total_bytes: DEFAULT_MAX_TOTAL_BYTES,
             isolated_config: false,
+            deadline: None,
+            caps: RepoCaps::default(),
         }
+    }
+
+    /// Run `git` as this binary rather than the `git` on `PATH`.
+    pub fn with_git(mut self, git: impl Into<PathBuf>) -> Self {
+        self.git = git.into();
+        self
+    }
+
+    /// End every call this repository makes by `deadline`: one deadline for a whole
+    /// operation, however many calls it takes (ADR 0002). A call still running then has
+    /// its process group killed and fails with [`GitError::TimedOut`]. Without one,
+    /// calls run as long as they take.
+    pub fn with_deadline(mut self, deadline: Instant) -> Self {
+        self.deadline = Some(deadline);
+        self
+    }
+
+    /// Hold each call's stdout to `caps` instead of [`RepoCaps::default`].
+    pub fn with_caps(mut self, caps: RepoCaps) -> Self {
+        self.caps = caps;
+        self
     }
 
     /// Set the largest single blob, and the most in total, that [`Repo::read_blobs`]
@@ -148,7 +253,7 @@ impl Repo {
     }
 
     fn command(&self, args: &[&str]) -> Command {
-        let mut cmd = Command::new("git");
+        let mut cmd = Command::new(&self.git);
         cmd.arg("-C").arg(&self.path).args(args);
         if self.isolated_config {
             for (key, _) in std::env::vars_os() {
@@ -169,30 +274,31 @@ impl Repo {
         cmd
     }
 
-    fn run(&self, args: &[&str], stdin: &[u8]) -> Result<Vec<u8>, GitError> {
-        let mut child = self
-            .command(args)
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let mut input = child.stdin.take().expect("stdin is piped");
-        let stdin = stdin.to_vec();
-        let writer = std::thread::spawn(move || input.write_all(&stdin));
-        let output = child.wait_with_output()?;
-        let written = writer.join().expect("stdin writer does not panic");
+    fn limits(&self, cap: u64) -> Limits {
+        Limits {
+            deadline: self.deadline,
+            stdout_cap: cap,
+        }
+    }
+
+    /// Run git with `args` and `stdin` in its own process group, within the deadline
+    /// and the stdout cap `cap` names.
+    fn run(&self, args: &[&str], stdin: &[u8], cap: Cap) -> Result<Vec<u8>, GitError> {
+        let (limit, field) = cap.of(&self.caps);
+        let what = args.join(" ");
+        let output = bounded::run(self.command(args), stdin, &what, self.limits(limit))
+            .map_err(|e| run_error(e, field))?;
         // git's own failure explains a broken pipe on its stdin, so it is reported first.
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
             return Err(match promisor_miss(&stderr) {
                 Some(oid) => GitError::Missing(oid),
-                None => GitError::Failed {
-                    args: args.join(" "),
-                    stderr,
-                },
+                None => GitError::Failed { args: what, stderr },
             });
         }
-        written?;
+        if let Some(e) = output.stdin_error {
+            return Err(e.into());
+        }
         Ok(output.stdout)
     }
 
@@ -201,7 +307,7 @@ impl Repo {
     /// is checked against the id it asked for; a second store could hold a different
     /// copy under the same id, and which copy git serves depends on the process.
     fn check_repository(&self) -> Result<(), GitError> {
-        let out = self.run(&["rev-parse", "--show-object-format"], b"")?;
+        let out = self.run(&["rev-parse", "--show-object-format"], b"", Cap::Small)?;
         match String::from_utf8_lossy(&out).trim() {
             "sha1" => {}
             other => return Err(GitError::UnsupportedObjectFormat(other.to_string())),
@@ -210,7 +316,7 @@ impl Repo {
         // a path that does not exist), relative to the repository path unless absolute.
         // `--git-common-dir` predates every git this bridge supports, unlike
         // `--path-format`.
-        let out = self.run(&["rev-parse", "--git-common-dir"], b"")?;
+        let out = self.run(&["rev-parse", "--git-common-dir"], b"", Cap::Small)?;
         let line = out.strip_suffix(b"\n").unwrap_or(&out);
         if line.is_empty() || line.contains(&b'\n') {
             return Err(GitError::Parse("rev-parse --git-common-dir".into()));
@@ -242,7 +348,11 @@ impl Repo {
 
     fn resolve_tree_checked(&self, treeish: &str) -> Result<GitOid, GitError> {
         let spec = format!("{treeish}^{{tree}}");
-        let out = self.run(&["rev-parse", "--verify", "--end-of-options", &spec], b"")?;
+        let out = self.run(
+            &["rev-parse", "--verify", "--end-of-options", &spec],
+            b"",
+            Cap::Small,
+        )?;
         let hex = String::from_utf8_lossy(&out).trim().to_string();
         Ok(GitOid::from_hex(&hex)?)
     }
@@ -250,11 +360,25 @@ impl Repo {
     /// Read the tree `treeish` names, hashing every blob from its bytes, and check that
     /// the tree id cuenca computes for it is the one git holds.
     pub fn read_tree(&self, treeish: &str) -> Result<Tree, GitError> {
+        self.read_tree_known(treeish, |_| false)
+    }
+
+    /// [`Repo::read_tree`], but a blob `known` accepts is not read here: the caller holds
+    /// it already, checked against its id, or reads and checks it itself (following
+    /// reads the blobs a store lacks in batches, ADR 0002). Every blob a content rule
+    /// applies to is still read and checked, and every tree object is still compared
+    /// byte for byte, so the tree's structure is validated exactly as before.
+    pub fn read_tree_known(
+        &self,
+        treeish: &str,
+        known: impl Fn(GitOid) -> bool,
+    ) -> Result<Tree, GitError> {
         self.check_repository()?;
         let root = self.resolve_tree_checked(treeish)?;
         let listing = self.run(
             &["ls-tree", "-r", "-t", "-z", "--full-tree", &root.to_hex()],
             b"",
+            Cap::LsTree,
         )?;
 
         let mut records = Vec::new();
@@ -296,7 +420,13 @@ impl Repo {
         for (path, mode, oid) in &records {
             ruled_add(&mut ruled, path, &Entry::from_mode(*mode, *oid)?);
         }
-        let wanted = unique(records.iter().map(|r| r.2));
+        let wanted = unique(
+            records
+                .iter()
+                .map(|r| r.2)
+                .filter(|oid| ruled.contains_key(oid) || !known(*oid)),
+        );
+        let wanted = self.sized_blobs(&wanted)?;
         self.cat_file_batch("blob", &wanted, |oid, size, content| {
             match ruled.get(&oid) {
                 None => hash_stream(oid, size, content),
@@ -319,18 +449,28 @@ impl Repo {
         // read and must be, byte for byte, the canonical body cuenca computed for its id.
         let objects = tree.git_objects();
         let bodies: HashMap<GitOid, Vec<u8>> = objects.iter().map(|o| (o.oid, o.body())).collect();
-        let ids = unique(objects.iter().map(|o| o.oid));
-        self.cat_file_batch("tree", &ids, |oid, size, content| {
+        let ids: Vec<(GitOid, u64)> = unique(objects.iter().map(|o| o.oid))
+            .into_iter()
+            .map(|oid| (oid, bodies[&oid].len() as u64))
+            .collect();
+        self.cat_file_batch("tree", &ids, |oid, _, content| {
             let expected = &bodies[&oid];
-            if size != expected.len() as u64 {
-                return Err(GitError::StoreMismatch(oid));
-            }
             let mut stored = Vec::with_capacity(expected.len());
             content.read_to_end(&mut stored)?;
+            // A short body is git stopping, not a substituted object: its own failure
+            // says why.
+            if stored.len() < expected.len() {
+                return Err(GitError::EndedEarly("cat-file --batch".into()));
+            }
             if stored != *expected {
                 return Err(GitError::StoreMismatch(oid));
             }
             Ok(())
+        })
+        .map_err(|e| match e {
+            // A tree object of another size is not the canonical body: substituted.
+            GitError::SizeMismatch { oid, .. } => GitError::StoreMismatch(oid),
+            e => e,
         })?;
         Ok(tree)
     }
@@ -339,11 +479,11 @@ impl Repo {
     /// repository's memory limits ([`Repo::with_memory_limits`]).
     pub fn read_blobs(&self, oids: impl IntoIterator<Item = GitOid>) -> Result<Blobs, GitError> {
         self.check_repository()?;
-        let wanted = unique(oids);
-        let mut out = Blobs::with_capacity(wanted.len());
+        let wanted = self.sized_blobs(&unique(oids))?;
         let (per_blob, total) = (self.max_blob_bytes, self.max_total_bytes);
+        // Refused by `--batch-check`'s sizes before any content is read.
         let mut loaded = 0u64;
-        self.cat_file_batch("blob", &wanted, |oid, size, content| {
+        for &(oid, size) in &wanted {
             if size > per_blob {
                 return Err(GitError::TooLarge {
                     oid,
@@ -355,10 +495,35 @@ impl Repo {
             if loaded > total {
                 return Err(GitError::TotalTooLarge { limit: total });
             }
+        }
+        let mut out = Blobs::with_capacity(wanted.len());
+        self.cat_file_batch("blob", &wanted, |oid, size, content| {
             out.insert(oid, read_checked(oid, size, content, per_blob)?);
             Ok(())
         })?;
         Ok(out)
+    }
+
+    /// The size of each blob in `oids`, from `cat-file --batch-check`: an object that is
+    /// missing or not a blob is an error.
+    pub fn blob_sizes(&self, oids: &[GitOid]) -> Result<HashMap<GitOid, u64>, GitError> {
+        self.check_repository()?;
+        Ok(self
+            .sized_blobs(&unique(oids.iter().copied()))?
+            .into_iter()
+            .collect())
+    }
+
+    /// `oids` with their sizes, in order; every one must be a blob the store has.
+    fn sized_blobs(&self, oids: &[GitOid]) -> Result<Vec<(GitOid, u64)>, GitError> {
+        let present = self.present(oids)?;
+        oids.iter()
+            .map(|oid| match present.get(oid) {
+                Some((kind, size)) if kind == "blob" => Ok((*oid, *size)),
+                Some(_) => Err(GitError::WrongType(*oid)),
+                None => Err(GitError::Missing(*oid)),
+            })
+            .collect()
     }
 
     /// The content of every blob `tree` refers to, each checked against its id.
@@ -386,16 +551,20 @@ impl Repo {
     /// `index-pack` into a store the authority owns (spec section 2a).
     pub fn write_tree(&self, tree: &Tree, blobs: &Blobs) -> Result<GitOid, GitError> {
         self.check_repository()?;
-        let promisor = self
-            .run(
-                &[
-                    "config",
-                    "--get-regexp",
-                    "^(extensions\\.partialclone|remote\\..*\\.promisor)$",
-                ],
-                b"",
-            )
-            .unwrap_or_default();
+        // No match is git's failure (exit 1); a deadline or a cap is not.
+        let promisor = match self.run(
+            &[
+                "config",
+                "--get-regexp",
+                "^(extensions\\.partialclone|remote\\..*\\.promisor)$",
+            ],
+            b"",
+            Cap::Small,
+        ) {
+            Ok(out) => out,
+            Err(GitError::Failed { .. }) => Vec::new(),
+            Err(e) => return Err(e),
+        };
         if !promisor.is_empty() {
             return Err(GitError::PartialClone);
         }
@@ -424,7 +593,7 @@ impl Repo {
                 .collect::<Vec<_>>(),
         )?;
         for oid in &blob_oids {
-            match present.get(oid).map(String::as_str) {
+            match present.get(oid).map(|(kind, _)| kind.as_str()) {
                 Some("blob") => {}
                 Some(_) => return Err(GitError::WrongType(*oid)),
                 None if !blobs.contains_key(oid) => return Err(GitError::NoContent(*oid)),
@@ -434,10 +603,10 @@ impl Repo {
 
         // Content rules for blobs the store already has and the caller did not send are
         // checked here too, so a refused write stores nothing.
-        let unsent: Vec<GitOid> = ruled
+        let unsent: Vec<(GitOid, u64)> = ruled
             .keys()
-            .filter(|o| present.contains_key(*o) && !blobs.contains_key(*o))
-            .copied()
+            .filter(|o| !blobs.contains_key(*o))
+            .filter_map(|o| present.get(o).map(|(_, size)| (*o, *size)))
             .collect();
         self.cat_file_batch("blob", &unsent, |oid, size, content| {
             ruled[&oid].check_stream(oid, size, content)
@@ -447,13 +616,14 @@ impl Repo {
             let out = self.run(
                 &["hash-object", "-w", "--no-filters", "--stdin"],
                 &blobs[oid],
+                Cap::Small,
             )?;
             if GitOid::from_hex(String::from_utf8_lossy(&out).trim())? != *oid {
                 return Err(GitError::Corrupt(*oid));
             }
         }
         for object in &objects {
-            match present.get(&object.oid).map(String::as_str) {
+            match present.get(&object.oid).map(|(kind, _)| kind.as_str()) {
                 Some("tree") => continue,
                 Some(_) => return Err(GitError::WrongType(object.oid)),
                 None => {}
@@ -466,7 +636,7 @@ impl Repo {
                 input.extend_from_slice(name.as_bytes());
                 input.push(0);
             }
-            let out = self.run(&["mktree", "-z"], &input)?;
+            let out = self.run(&["mktree", "-z"], &input, Cap::Small)?;
             let git = GitOid::from_hex(String::from_utf8_lossy(&out).trim())?;
             if git != object.oid {
                 return Err(GitError::TreeMismatch {
@@ -483,16 +653,26 @@ impl Repo {
         Ok(root)
     }
 
-    /// The type of each of `oids` the repository already has.
-    fn present(&self, oids: &[GitOid]) -> Result<HashMap<GitOid, String>, GitError> {
+    /// The type and size of each of `oids` the repository already has.
+    fn present(&self, oids: &[GitOid]) -> Result<HashMap<GitOid, (String, u64)>, GitError> {
+        if oids.is_empty() {
+            return Ok(HashMap::new());
+        }
         let input: String = oids.iter().map(|o| format!("{o}\n")).collect();
-        let out = self.run(&["cat-file", "--batch-check"], input.as_bytes())?;
+        let out = self.run(
+            &["cat-file", "--batch-check"],
+            input.as_bytes(),
+            Cap::BatchCheck,
+        )?;
         let mut present = HashMap::new();
         for line in String::from_utf8_lossy(&out).lines() {
             match line.split(' ').collect::<Vec<_>>().as_slice() {
                 [_, "missing"] => {}
-                [oid, kind, _] => {
-                    present.insert(GitOid::from_hex(oid)?, kind.to_string());
+                [oid, kind, size] => {
+                    let size = size
+                        .parse()
+                        .map_err(|_| GitError::Parse(format!("cat-file --batch-check {line:?}")))?;
+                    present.insert(GitOid::from_hex(oid)?, (kind.to_string(), size));
                 }
                 _ => return Err(GitError::Parse(format!("cat-file --batch-check {line:?}"))),
             }
@@ -500,92 +680,199 @@ impl Repo {
         Ok(present)
     }
 
-    /// Stream each object in `oids`, all of type `kind`, through one
+    /// Stream each object in `objects`, all of type `kind`, through one
     /// `git cat-file --batch`, in order. `each` gets the object's size and a reader over
     /// exactly its content.
+    ///
+    /// The protocol is bounded field by field (ADR 0002): each header line is read with
+    /// a limit of [`MAX_BATCH_HEADER`] bytes, and each body is read to exactly its
+    /// declared size, which must be the size given with the object (`--batch-check`'s
+    /// for a blob, the canonical body's for a tree). So stdout never exceeds the sum of
+    /// the sizes plus one header and one separator newline per object, which is its
+    /// cap too. The call is held to the repository's deadline, and its process group is
+    /// killed however it ends.
     fn cat_file_batch(
         &self,
         kind: &str,
-        oids: &[GitOid],
+        objects: &[(GitOid, u64)],
         mut each: impl FnMut(GitOid, u64, &mut dyn Read) -> Result<(), GitError>,
     ) -> Result<(), GitError> {
-        if oids.is_empty() {
+        if objects.is_empty() {
             return Ok(());
         }
-        let mut child = self
-            .command(&["cat-file", "--batch"])
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()?;
-        let mut input = child.stdin.take().expect("stdin is piped");
-        let request: String = oids.iter().map(|o| format!("{o}\n")).collect();
-        let writer = std::thread::spawn(move || input.write_all(request.as_bytes()));
-        let mut errors = child.stderr.take().expect("stderr is piped");
-        let stderr = std::thread::spawn(move || {
-            let mut text = String::new();
-            let _ = errors.read_to_string(&mut text);
-            text
+        // Every blob body is held to the per-blob cap, before any is read, on every path
+        // that streams blobs (ADR 0002).
+        if kind == "blob"
+            && let Some(&(oid, size)) = objects.iter().find(|(_, size)| *size > self.max_blob_bytes)
+        {
+            return Err(GitError::TooLarge {
+                oid,
+                size,
+                limit: self.max_blob_bytes,
+            });
+        }
+        let bound = objects.iter().fold(0u64, |sum, (_, size)| {
+            sum.saturating_add(*size)
+                .saturating_add(MAX_BATCH_HEADER as u64 + 1)
         });
-        let mut out = BufReader::new(child.stdout.take().expect("stdout is piped"));
+        let what = "cat-file --batch";
+        let mut child = Running::spawn(
+            self.command(&["cat-file", "--batch"]),
+            what,
+            self.limits(bound),
+        )
+        .map_err(|e| run_error(e, "batch"))?;
+        child.set_input(
+            objects
+                .iter()
+                .map(|(o, _)| format!("{o}\n"))
+                .collect::<String>()
+                .into_bytes(),
+        );
+        let mut out = BufReader::new(bounded::Stdout(child));
 
-        let mut header = String::new();
         let result = (|| {
-            for oid in oids {
-                header.clear();
-                if out.read_line(&mut header)? == 0 {
-                    return Err(GitError::EndedEarly("cat-file --batch".into()));
-                }
-                let fields: Vec<&str> = header.trim_end().split(' ').collect();
+            for &(oid, expected) in objects {
+                let header = read_header(&mut out)?;
+                let header = std::str::from_utf8(&header)
+                    .map_err(|_| GitError::Parse(format!("cat-file header {header:?}")))?;
+                let fields: Vec<&str> = header.split(' ').collect();
                 match fields.as_slice() {
-                    [id, "missing"] if *id == oid.to_hex() => return Err(GitError::Missing(*oid)),
+                    [id, "missing"] if *id == oid.to_hex() => return Err(GitError::Missing(oid)),
                     [id, found, size] if *id == oid.to_hex() && *found == kind => {
-                        let size: u64 = size
+                        let declared: u64 = size
                             .parse()
                             .map_err(|_| GitError::Parse("cat-file size".into()))?;
-                        let mut content = (&mut out).take(size);
-                        each(*oid, size, &mut content)?;
+                        if declared != expected {
+                            return Err(GitError::SizeMismatch {
+                                oid,
+                                declared,
+                                expected,
+                            });
+                        }
+                        let mut content = (&mut out).take(declared);
+                        each(oid, declared, &mut content)?;
                         // Whatever `each` left unread is drained, so the stream stays in step.
                         std::io::copy(&mut content, &mut std::io::sink())?;
+                        if content.limit() > 0 {
+                            return Err(GitError::EndedEarly(what.into()));
+                        }
                         let mut newline = [0u8; 1];
                         if out.read(&mut newline)? == 0 {
-                            return Err(GitError::EndedEarly("cat-file --batch".into()));
+                            return Err(GitError::EndedEarly(what.into()));
                         }
                         if newline[0] != b'\n' {
                             return Err(GitError::Parse("cat-file separator".into()));
                         }
                     }
-                    [id, _, _] if *id == oid.to_hex() => return Err(GitError::WrongType(*oid)),
+                    [id, _, _] if *id == oid.to_hex() => return Err(GitError::WrongType(oid)),
                     _ => return Err(GitError::Parse(format!("cat-file header {header:?}"))),
                 }
             }
             Ok(())
         })();
-
-        // On an early error git may die of a closed pipe, failing the writer too, so the
-        // reader's error is the one reported, unless git itself stopped first, in which
-        // case git's own message says why.
-        drop(out);
-        let status = child.wait()?;
-        let written = writer.join().expect("stdin writer does not panic");
-        let stderr = stderr.join().expect("stderr reader does not panic");
-        let failed = || match promisor_miss(&stderr) {
-            Some(oid) => GitError::Missing(oid),
-            None => GitError::Failed {
-                args: "cat-file --batch".into(),
-                stderr: stderr.trim().to_string(),
+        let result = result.map_err(|e| match e {
+            GitError::Io(e) => match RunError::from_io(e) {
+                Ok(run) => run_error(run, "batch"),
+                Err(e) => GitError::Io(e),
             },
-        };
+            e => e,
+        });
+        // Bytes the reader buffered past the last object are output too.
+        let trailing = !out.buffer().is_empty();
+        let child = out.into_inner().0;
         match result {
-            Err(GitError::EndedEarly(_)) if !status.success() => return Err(failed()),
-            Err(e) => return Err(e),
-            Ok(()) => {}
+            // git stopped: its own failure, if it failed, says why.
+            Err(GitError::EndedEarly(_)) => {
+                let finished = child.finish().map_err(|e| run_error(e, "batch"))?;
+                if !finished.status.success() {
+                    return Err(batch_failed(&finished.stderr));
+                }
+                Err(GitError::EndedEarly(what.into()))
+            }
+            // Anything else: dropping the child kills its group.
+            Err(e) => Err(e),
+            Ok(()) => {
+                let finished = child.finish().map_err(|e| run_error(e, "batch"))?;
+                if !finished.status.success() {
+                    return Err(batch_failed(&finished.stderr));
+                }
+                if trailing || !finished.stdout.is_empty() {
+                    return Err(GitError::Parse(
+                        "cat-file --batch printed past its last object".into(),
+                    ));
+                }
+                if let Some(e) = finished.stdin_error {
+                    return Err(e.into());
+                }
+                Ok(())
+            }
         }
-        if !status.success() {
-            return Err(failed());
+    }
+}
+
+/// A header line of `cat-file --batch`, without its newline: at most
+/// [`MAX_BATCH_HEADER`] bytes, newline included, and terminated.
+fn read_header(out: &mut impl BufRead) -> Result<Vec<u8>, GitError> {
+    let mut line = Vec::new();
+    loop {
+        let buf = out.fill_buf()?;
+        if buf.is_empty() {
+            return Err(if line.is_empty() {
+                GitError::EndedEarly("cat-file --batch".into())
+            } else {
+                GitError::BadHeader
+            });
         }
-        written?;
-        Ok(())
+        match buf.iter().position(|b| *b == b'\n') {
+            Some(i) => {
+                if line.len() + i + 1 > MAX_BATCH_HEADER {
+                    return Err(GitError::BadHeader);
+                }
+                line.extend_from_slice(&buf[..i]);
+                out.consume(i + 1);
+                return Ok(line);
+            }
+            None => {
+                let n = buf.len();
+                line.extend_from_slice(buf);
+                out.consume(n);
+                if line.len() >= MAX_BATCH_HEADER {
+                    return Err(GitError::BadHeader);
+                }
+            }
+        }
+    }
+}
+
+/// The [`GitError`] for a call that hit its deadline or the cap of [`RepoCaps`] field
+/// `field`.
+fn run_error(e: RunError, field: &'static str) -> GitError {
+    match e {
+        RunError::Spawn { source, .. } | RunError::Io { source, .. } => GitError::Io(source),
+        RunError::TimedOut { what, elapsed } => GitError::TimedOut {
+            args: what,
+            elapsed,
+        },
+        RunError::Capped { what, cap, reached } => GitError::Capped {
+            args: what,
+            field,
+            cap,
+            reached,
+        },
+    }
+}
+
+/// `cat-file --batch` failed: from its stderr, the object a partial clone refused, or
+/// the failure.
+fn batch_failed(stderr: &[u8]) -> GitError {
+    let stderr = String::from_utf8_lossy(stderr);
+    match promisor_miss(&stderr) {
+        Some(oid) => GitError::Missing(oid),
+        None => GitError::Failed {
+            args: "cat-file --batch".into(),
+            stderr: stderr.trim().to_string(),
+        },
     }
 }
 

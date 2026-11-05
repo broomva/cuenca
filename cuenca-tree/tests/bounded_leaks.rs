@@ -6,7 +6,7 @@
 use std::process::Command;
 use std::time::{Duration, Instant};
 
-use cuenca_tree::bounded::{Limits, RunError, run};
+use cuenca_tree::bounded::{Limits, RunError, Running};
 
 fn fds() -> usize {
     std::fs::read_dir("/dev/fd").unwrap().count()
@@ -45,18 +45,28 @@ fn holders(marker: &str) -> usize {
 fn fifty_stalls_leave_no_process_thread_or_fd() {
     // A sleep length no other process on the host uses, to count only these holders.
     let marker = format!("sleep 61{}", std::process::id() % 1000);
-    let script = format!("{marker} & {marker}");
+    // The holder is started, then the wrapper says so and hangs: each stall is checked
+    // to have a holder, so a loaded host cannot make it pass without one.
+    let script = format!("{marker} & echo ready; {marker}");
     let once = || {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", &script]);
         let start = Instant::now();
-        let e = run(
+        let mut child = Running::spawn(
             cmd,
-            b"",
             "git fetch",
-            Limits::within(Duration::from_millis(200), 1 << 20),
+            Limits::within(Duration::from_millis(500), 1 << 20),
         )
-        .unwrap_err();
+        .unwrap();
+        let mut ready = [0u8; 6];
+        let mut got = 0;
+        while got < ready.len() {
+            let n = child.read(&mut ready[got..]).expect("the holder started");
+            assert!(n > 0, "the wrapper ended before starting its holder");
+            got += n;
+        }
+        assert_eq!(&ready, b"ready\n");
+        let e = child.finish().unwrap_err();
         assert!(matches!(e, RunError::TimedOut { .. }), "{e}");
         assert!(
             start.elapsed() < Duration::from_secs(3),
