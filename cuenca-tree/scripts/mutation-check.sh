@@ -138,4 +138,6 @@ mutate src/bounded.rs '                    self.count(n)?;
 mutate src/git.rs 'let trailing = !out.buffer().is_empty();' 'let trailing = false;' --test git_bounds buffered_with_the_last
 mutate src/git.rs '            if stored.len() < expected.len() {' '            if false {' --test git_bounds truncated_tree_body
 
+mutate src/git.rs 'Some(stop) if stop.load(Ordering::SeqCst) => Err(GitError::Stopped),' 'Some(_) if false => Err(GitError::Stopped),' --test git_bounds stop_flag
+
 exit $survived

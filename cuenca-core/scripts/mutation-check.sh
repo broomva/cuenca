@@ -500,4 +500,8 @@ mutate src/store.rs '        if a == b {
 mutate src/store.rs '    if GitOid::for_object("tree", &object.body()) != oid {' '    if false {' --lib a_damaged_followed_tree
 mutate src/store.rs '.is_some_and(|l| l.main == main.git_tree_id()) =>' '.is_some_and(|_| false) =>' --lib a_second_follow
 
+mutate src/store.rs '    if old == new {
+        return Ok(());
+    }' '' --lib reads_only_what_changed
+
 exit $survived

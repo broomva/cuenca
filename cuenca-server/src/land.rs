@@ -36,6 +36,20 @@
 //! that fork is the failed changeset again. A failing fsck has no owner-side fix
 //! yet (BRO-3484).
 //!
+//! **Main follows the remote** (ADR 0002). After each round's landings, the lander
+//! follows one location with a remote: the one least recently followed. It fetches the
+//! remote's default branch into `refs/cuenca/followed`. When that tree is not the
+//! location's main, it reads the tree's structure (ruled blobs and tree objects checked
+//! as in [`Repo::read_tree`]), sizes the blobs the store lacks with `--batch-check`, and
+//! reads them in batches of at most [`LandConfig::follow_batch_bytes`], each ingested
+//! and committed before the next, so a later follow skips them. Once every blob is
+//! present it records [`cuenca_core::Event::MainFollowed`]. All of a follow's git work
+//! shares one deadline, [`LandConfig::follow_timeout`]; the local store work does not
+//! (owner decision D1). A follow that does not fit fails with the step it reached, the
+//! time it took and the bytes left, shown at `GET /v1/locations` and logged, and main
+//! does not move. A ref lock is never removed: a follow that meets one fails naming it,
+//! and is tried again on later rounds.
+//!
 //! Every git and gh call runs in its own process group, within [`LandConfig::timeout`]
 //! and the stdout cap its kind of call has ([`OutputCaps`]); at either limit the whole
 //! group is killed, helpers included, and the step is retried with an error naming the
@@ -45,26 +59,46 @@
 //! shared gh login at first"; the GitHub App is BRO-3305), as git's credential helper
 //! for `https://github.com` remotes too. Only GitHub remotes land through a PR.
 
-use std::collections::HashMap;
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use cuenca_core::checks::CheckStatus;
 use cuenca_core::{
-    ChangesetId, CoreError, Event, Export, Fork, ForkName, Landing, LandingStep, Location, Store,
-    export_branch,
+    ChangesetId, CoreError, Event, Export, Fork, ForkName, Landing, LandingStep, Location,
+    LocationName, Store, export_branch,
 };
 use cuenca_tree::GitOid;
 use cuenca_tree::bounded::{self, Limits, RunError};
-use cuenca_tree::git::{Blobs, REDIRECTING_ENV, Repo};
+use cuenca_tree::git::{Blobs, DEFAULT_MAX_BLOB_BYTES, GitError, REDIRECTING_ENV, Repo, RepoCaps};
 
 use crate::authority::Authority;
 
-/// How far back the remote's first-parent history is searched for the base's tree.
-const PARENT_SEARCH: usize = 1000;
+/// The first-parent commits searched first for the tree a landing is committed onto:
+/// most lines start near the tip, so this is all most landings read.
+const NEAR_SEARCH: usize = 1000;
+
+/// How far back the search goes when the near window misses. The root of a fork's line
+/// can sit far behind the tip once main follows the remote, so this bounds the work, not
+/// the age of a fork. Its log is held to [`OutputCaps::parent_log`].
+const PARENT_SEARCH: usize = 1_000_000;
+
+/// What a search of the fetched first-parent history for a tree found.
+enum Found {
+    At(GitOid),
+    /// The whole history was searched and no commit has the tree.
+    Absent,
+    /// [`PARENT_SEARCH`] commits were searched without reaching the end of history.
+    BeyondWindow,
+}
+
+/// Where the remote's default branch is fetched to follow main, apart from the ref a
+/// landing fetches into.
+const FOLLOWED: &str = "refs/cuenca/followed";
 
 /// A crash test's hook, called with the name of each point a kill is tested at.
 pub type Fault = Arc<dyn Fn(&str) + Send + Sync>;
@@ -88,6 +122,13 @@ pub struct LandConfig {
     pub timeout: Duration,
     /// The most each kind of git or gh call may print on stdout.
     pub caps: OutputCaps,
+    /// The one deadline of a follow: all of its git work (discovery, fetch, listing,
+    /// sizing and blob reads) together. 60 s (owner decision D2).
+    pub follow_timeout: Duration,
+    /// The most blob bytes a follow reads into memory before ingesting them: missing
+    /// blobs are read in batches of at most this much, and a larger blob, up to the
+    /// per-blob cap, in a batch of its own. 64 MiB.
+    pub follow_batch_bytes: u64,
     /// Called at each point a crash test kills the authority: `export_intent`,
     /// `pushed`, `review_intent`, `pr_opened`.
     pub fault: Option<Fault>,
@@ -103,6 +144,8 @@ impl LandConfig {
             poll: Duration::from_secs(30),
             timeout: Duration::from_secs(600),
             caps: OutputCaps::default(),
+            follow_timeout: Duration::from_secs(60),
+            follow_batch_bytes: 64 * 1024 * 1024,
             fault: None,
         }
     }
@@ -119,8 +162,13 @@ pub struct OutputCaps {
     pub small: u64,
     /// `ls-remote`, `gh pr list` and `gh pr create`. 1 MiB.
     pub listing: u64,
-    /// The parent search's first-parent `log` of up to 1,000 commits. 128 MiB.
+    /// The parent search's first-parent `log`, of up to 1,000,001 commits at about 82
+    /// bytes each. 128 MiB.
     pub parent_log: u64,
+    /// A follow's `ls-tree -r -t` of the whole tree. 256 MiB.
+    pub ls_tree: u64,
+    /// A follow's `cat-file --batch-check` of the blobs the store lacks. 64 MiB.
+    pub batch_check: u64,
 }
 
 impl Default for OutputCaps {
@@ -129,6 +177,8 @@ impl Default for OutputCaps {
             small: 4 * 1024,
             listing: 1024 * 1024,
             parent_log: 128 * 1024 * 1024,
+            ls_tree: 256 * 1024 * 1024,
+            batch_check: 64 * 1024 * 1024,
         }
     }
 }
@@ -166,6 +216,8 @@ impl Lander {
         let worker = Worker {
             a: authority.clone(),
             config,
+            followed_at: RefCell::new(HashMap::new()),
+            stop: stop.clone(),
         };
         let thread = {
             let stop = stop.clone();
@@ -181,10 +233,18 @@ impl Lander {
     }
 }
 
-impl Drop for Lander {
-    fn drop(&mut self) {
+impl Lander {
+    /// Tell the lander to stop after its current step, without waiting for it:
+    /// dropping it then joins the thread.
+    pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         self.authority.wake_lander();
+    }
+}
+
+impl Drop for Lander {
+    fn drop(&mut self) {
+        self.stop();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -221,6 +281,11 @@ type Step<T = ()> = Result<T, LandError>;
 struct Worker {
     a: Arc<Authority>,
     config: LandConfig,
+    /// When each location was last followed (successfully or not), for the order.
+    followed_at: RefCell<HashMap<LocationName, Instant>>,
+    /// The lander's stop flag, handed to the git bridge so a follow starts no git call
+    /// after it is set.
+    stop: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -232,8 +297,14 @@ impl Worker {
         }
     }
 
-    /// Drive every open request on a location with a remote as far as it goes.
+    /// Drive every open request on a location with a remote as far as it goes, then
+    /// follow one location's remote. Landings go first.
     fn round(&self, stop: &AtomicBool) {
+        self.drive_all(stop);
+        self.follow_next(stop);
+    }
+
+    fn drive_all(&self, stop: &AtomicBool) {
         let forks = match self.a.store.forks() {
             Ok(f) => f,
             Err(e) => {
@@ -275,6 +346,170 @@ impl Worker {
         }
     }
 
+    /// Follow the location with a remote least recently followed (never followed first),
+    /// one per round (owner decision D2): a location that keeps failing delays each of
+    /// the others by one round per cycle, not indefinitely. The outcome is logged and
+    /// shown at `GET /v1/locations`.
+    fn follow_next(&self, stop: &AtomicBool) {
+        if stop.load(Ordering::SeqCst) {
+            return;
+        }
+        let locations = match self.a.store.locations() {
+            Ok(l) => l,
+            Err(e) => {
+                tracing::warn!(error = %e, "lander: cannot list locations");
+                return;
+            }
+        };
+        let next = {
+            let at = self.followed_at.borrow();
+            locations
+                .into_iter()
+                .filter(|l| l.remote.is_some())
+                .min_by_key(|l| (at.get(&l.name).copied(), l.name.clone()))
+        };
+        let Some(location) = next else { return };
+        self.followed_at
+            .borrow_mut()
+            .insert(location.name.clone(), Instant::now());
+        match self.follow(&location, stop) {
+            Ok(Some(offset)) => {
+                tracing::info!(location = %location.name, offset, "main followed the remote");
+                self.a.set_follow_error(&location.name, None);
+            }
+            Ok(None) => self.a.set_follow_error(&location.name, None),
+            Err(e) => {
+                tracing::warn!(location = %location.name, error = %e, "main did not follow the remote; trying again on a later round");
+                self.a.set_follow_error(&location.name, Some(e));
+            }
+        }
+    }
+
+    /// Follow `location`'s remote default branch (ADR 0002): the offset of the
+    /// `MainFollowed` record, or `None` when main is that tree already. Every git call
+    /// ends by one deadline, [`LandConfig::follow_timeout`] from now, checked with the
+    /// stop flag before each step; blobs are read in batches, each ingested and
+    /// committed before the next, and main moves only once every blob is present.
+    fn follow(&self, location: &Location, stop: &AtomicBool) -> Result<Option<u64>, String> {
+        let remote = location.remote.as_deref().unwrap_or_default();
+        let mut f = Following {
+            start: Instant::now(),
+            deadline: Instant::now() + self.config.follow_timeout,
+            timeout: self.config.follow_timeout,
+            stop,
+            step: "starting",
+            left: None,
+        };
+        f.next("preparing the repository")?;
+        let git = Git::new(&self.config, location, Some(f.deadline), Some(&self.stop))
+            .map_err(|e| f.failed(e))?;
+
+        f.next("finding the default branch")?;
+        let branch = git.default_branch(remote).map_err(|e| f.failed(e))?;
+        f.next("fetching")?;
+        git.fetch_to(remote, &format!("refs/heads/{branch}"), FOLLOWED)
+            .map_err(|e| f.failed(e))?;
+        f.next("resolving the fetched commit")?;
+        let commit = git
+            .rev_parse(&format!("{FOLLOWED}^{{commit}}"))
+            .map_err(|e| f.failed(e))?;
+        // The tree of that commit, not of the ref again: the ref may have moved since,
+        // and the commit and tree recorded must be one pair.
+        let tree_id = git
+            .rev_parse(&format!("{commit}^{{tree}}"))
+            .map_err(|e| f.failed(e))?;
+        if tree_id == location.main {
+            return Ok(None);
+        }
+
+        // The tree's structure: tree objects byte-checked and ruled blobs checked, as a
+        // full read does; the other blobs are read below, only those the store lacks.
+        f.next("listing the tree")?;
+        let caps = RepoCaps {
+            ls_tree: self.config.caps.ls_tree,
+            batch_check: self.config.caps.batch_check,
+            ..RepoCaps::default()
+        };
+        let repo = Repo::open(&git.dir)
+            .with_isolated_config()
+            .with_git(&self.config.git)
+            .with_deadline(f.deadline)
+            .with_stop(self.stop.clone())
+            .with_caps(caps);
+        let tree = repo
+            .read_tree_known(&tree_id.to_hex(), |_| true)
+            .map_err(|e| f.failed(git_error(e)))?;
+        let store = &self.a.store;
+        let mut missing = Vec::new();
+        let mut seen = HashSet::new();
+        for (_, entry) in tree.entries() {
+            let oid = entry.oid();
+            if seen.insert(oid)
+                && store
+                    .blob_info(oid)
+                    .map_err(|e| f.failed(e.into()))?
+                    .is_none()
+            {
+                missing.push(oid);
+            }
+        }
+
+        f.next("sizing the missing blobs")?;
+        let sizes = repo
+            .blob_sizes(&missing)
+            .map_err(|e| f.failed(git_error(e)))?;
+        let mut batches: Vec<(Vec<GitOid>, u64)> = Vec::new();
+        for oid in missing {
+            let size = sizes[&oid];
+            if size > DEFAULT_MAX_BLOB_BYTES {
+                return Err(f.failed(LandError::Fail(format!(
+                    "blob {oid} is {size} bytes, over the {DEFAULT_MAX_BLOB_BYTES}-byte per-blob cap"
+                ))));
+            }
+            match batches.last_mut() {
+                Some((oids, total))
+                    if *total + size <= self.config.follow_batch_bytes && !oids.is_empty() =>
+                {
+                    oids.push(oid);
+                    *total += size;
+                }
+                _ => batches.push((vec![oid], size)),
+            }
+        }
+        let mut left: u64 = batches.iter().map(|(_, total)| total).sum();
+        for (oids, total) in batches {
+            f.left = Some(left);
+            f.next("reading blobs")?;
+            let blobs = repo
+                .clone()
+                .with_memory_limits(DEFAULT_MAX_BLOB_BYTES, total.max(1))
+                .read_blobs(oids.iter().copied())
+                .map_err(|e| f.failed(git_error(e)))?;
+            // Local store work: not bounded by the deadline (owner decision D1), but no
+            // further blob is staged once the lander is told to stop; an unfinished
+            // batch is not committed.
+            let mut batch = store.blob_batch();
+            for oid in &oids {
+                if stop.load(Ordering::SeqCst) {
+                    return Err(f.failed(LandError::Retry("the authority is stopping".into())));
+                }
+                let content = &blobs[oid];
+                batch
+                    .add(*oid, content.len() as u64, content.as_slice())
+                    .map_err(|e| f.failed(e.into()))?;
+            }
+            batch.commit().map_err(|e| f.failed(e.into()))?;
+            left -= total;
+        }
+        f.left = None;
+        // A step like the others: not recorded once stopping, or past the deadline (a
+        // later round records it at once, every blob being present).
+        f.next("recording the follow")?;
+        store
+            .follow_main(&location.name, &tree, commit)
+            .map_err(|e| f.failed(e.into()))
+    }
+
     /// Move the landing of `id` from `fork` step by step until it is in review, or a
     /// step does not happen.
     fn drive(&self, name: &ForkName, id: ChangesetId) -> Step {
@@ -300,7 +535,7 @@ impl Worker {
             })?;
             // The main this fork's line started from; the landing is committed onto it.
             let root = self.a.store.root_main(&fork.name)?;
-            let git = Git::new(&self.config, &location)?;
+            let git = Git::new(&self.config, &location, None, None)?;
             match &landing.step {
                 LandingStep::Requested => {
                     // An earlier landing of the same changeset (dropped by a takeover,
@@ -386,12 +621,24 @@ impl Worker {
             None => {
                 let base_ref = git.default_branch(remote)?;
                 git.fetch(remote, &format!("refs/heads/{base_ref}"))?;
-                let parent = git.commit_with_tree(main)?.ok_or_else(|| {
-                    LandError::Fail(format!(
-                        "no commit in the last {PARENT_SEARCH} of {remote}'s {base_ref} has tree {main}: \
-                         the location's main is not on the remote"
-                    ))
-                })?;
+                let parent = match git.commit_with_tree(main)? {
+                    Found::At(parent) => parent,
+                    Found::Absent => {
+                        return Err(LandError::Fail(format!(
+                            "no first-parent commit of {remote}'s {base_ref} has tree {main}, the \
+                             main this fork's line started from: that main is not on the remote \
+                             (it was never pushed, or the history was rewritten past it); fork \
+                             again from the location's main"
+                        )));
+                    }
+                    Found::BeyondWindow => {
+                        return Err(LandError::Fail(format!(
+                            "tree {main}, the main this fork's line started from, is not in the \
+                             last {PARENT_SEARCH} first-parent commits of {remote}'s {base_ref}: \
+                             fork again from the location's main"
+                        )));
+                    }
+                };
                 (parent, base_ref)
             }
         };
@@ -504,6 +751,64 @@ impl Worker {
     }
 }
 
+/// One follow operation's progress, for its checks and its error.
+struct Following<'s> {
+    start: Instant,
+    deadline: Instant,
+    timeout: Duration,
+    stop: &'s AtomicBool,
+    step: &'static str,
+    /// The bytes of missing blobs not yet ingested, once they are known.
+    left: Option<u64>,
+}
+
+impl Following<'_> {
+    /// Go on to `step`, unless the authority is stopping or the deadline has passed.
+    fn next(&mut self, step: &'static str) -> Result<(), String> {
+        self.step = step;
+        if self.stop.load(Ordering::SeqCst) {
+            return Err(self.failed(LandError::Retry("the authority is stopping".into())));
+        }
+        if Instant::now() >= self.deadline {
+            return Err(self.failed(LandError::Retry(format!(
+                "the follow deadline ({} s) passed; raise LandConfig::follow_timeout for this \
+                 host if this repeats",
+                self.timeout.as_secs()
+            ))));
+        }
+        Ok(())
+    }
+
+    /// The error of a follow that stopped at its step: the step, the time it took and
+    /// the bytes left.
+    fn failed(&self, e: LandError) -> String {
+        let why = match e {
+            LandError::Retry(e) | LandError::Fail(e) => e,
+            LandError::Gone => "the location is gone".into(),
+        };
+        let left = self
+            .left
+            .map(|b| format!(", {b} bytes of blobs left"))
+            .unwrap_or_default();
+        format!(
+            "following stopped while {} after {:.1} s{left}: {why}",
+            self.step,
+            self.start.elapsed().as_secs_f64()
+        )
+    }
+}
+
+/// A git bridge error as a step error; a cap names the `LandConfig` field that sets it.
+fn git_error(e: GitError) -> LandError {
+    LandError::Retry(match &e {
+        GitError::Capped {
+            field: field @ ("ls_tree" | "batch_check"),
+            ..
+        } => format!("{e}; the cap is set by LandConfig::caps.{field}"),
+        _ => e.to_string(),
+    })
+}
+
 fn in_flight(step: &LandingStep) -> bool {
     matches!(
         step,
@@ -558,13 +863,28 @@ const REFUSALS: [&str; 5] = [
 struct Git<'c> {
     config: &'c LandConfig,
     dir: PathBuf,
+    /// A follow's one deadline, over and above each call's timeout.
+    deadline: Option<Instant>,
+    /// A follow's stop flag: once it is set, no further git call starts.
+    stop: Option<&'c AtomicBool>,
 }
 
 impl<'c> Git<'c> {
-    /// The bare repository of `location`, created on first use.
-    fn new(config: &'c LandConfig, location: &Location) -> Step<Self> {
+    /// The bare repository of `location`, created on first use; every call ends by
+    /// `deadline` too, and none starts once `stop` is set, when there are (a follow's).
+    fn new(
+        config: &'c LandConfig,
+        location: &Location,
+        deadline: Option<Instant>,
+        stop: Option<&'c AtomicBool>,
+    ) -> Step<Self> {
         let dir = config.repos.join(format!("{}.git", location.name));
-        let git = Self { config, dir };
+        let git = Self {
+            config,
+            dir,
+            deadline,
+            stop,
+        };
         if !git.dir.join("HEAD").exists() {
             let tmp = config.repos.join(format!(".{}.git.tmp", location.name));
             let _ = std::fs::remove_dir_all(&tmp);
@@ -618,12 +938,24 @@ impl<'c> Git<'c> {
         cmd
     }
 
+    /// No git call starts once the stop flag is set: checked before every spawn.
+    fn check_stop(&self) -> Step {
+        if self.stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+            return Err(LandError::Retry(
+                "the authority is stopping; no further git call was started".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn run_in(&self, dir: Option<&Path>, args: &[&str], cap: Cap) -> Step<String> {
+        self.check_stop()?;
         let what = format!("git {}", args.first().copied().unwrap_or(""));
         let out = output_within(
             self.command(dir, args),
             b"",
             self.config,
+            self.deadline,
             cap,
             &what,
             &REFUSALS,
@@ -669,7 +1001,21 @@ impl<'c> Git<'c> {
 
     /// Fetch `what` from the remote into `refs/cuenca/fetched`.
     fn fetch(&self, remote: &str, what: &str) -> Step {
-        self.run(
+        self.fetch_to(remote, what, "refs/cuenca/fetched")
+    }
+
+    /// Fetch `what` from the remote into the local ref `to`.
+    ///
+    /// A ref lock is never removed here (ADR 0002): nothing can prove the process that
+    /// took it is dead (a killed call may never have touched the ref, and another git
+    /// process may hold it). A lock present before the fetch, or one the fetch fails on,
+    /// fails the call with an error naming it.
+    fn fetch_to(&self, remote: &str, what: &str, to: &str) -> Step {
+        let lock = self.dir.join(format!("{to}.lock"));
+        if lock.exists() {
+            return Err(LandError::Retry(self.locked(to, &lock)));
+        }
+        let fetched = self.run(
             &[
                 "fetch",
                 "--quiet",
@@ -677,36 +1023,84 @@ impl<'c> Git<'c> {
                 "--no-write-fetch-head",
                 "--",
                 remote,
-                &format!("+{what}:refs/cuenca/fetched"),
+                &format!("+{what}:{to}"),
             ],
             Cap::Small,
-        )?;
-        Ok(())
+        );
+        match fetched {
+            // git names the lock it could not take and why; only this ref's own lock,
+            // held by someone ("File exists"), is this error. Any other failure (another
+            // lock, no permission, a full disk) is reported as it is.
+            Err(LandError::Retry(e))
+                if e.contains(&format!("{to}.lock")) && e.contains("File exists") =>
+            {
+                tracing::warn!(error = %e, "git fetch failed on a ref lock");
+                Err(LandError::Retry(self.locked(to, &lock)))
+            }
+            Err(e) => Err(e),
+            Ok(_) => Ok(()),
+        }
     }
 
-    /// The newest first-parent commit of what was fetched whose tree is `tree`.
-    fn commit_with_tree(&self, tree: GitOid) -> Step<Option<GitOid>> {
-        let out = self.run(
-            &[
-                "log",
-                "--first-parent",
-                "--format=%H %T",
-                "-n",
-                &PARENT_SEARCH.to_string(),
-                "refs/cuenca/fetched",
-            ],
-            Cap::ParentLog,
-        )?;
-        for line in out.lines() {
-            if let Some((commit, t)) = line.split_once(' ')
-                && t == tree.to_hex()
-            {
-                return GitOid::from_hex(commit)
-                    .map(Some)
-                    .map_err(|e| LandError::Retry(e.to_string()));
+    /// The error for the lock of ref `to` in the way. The status names the lock within
+    /// the location's bare repository; the host path goes to the log only.
+    fn locked(&self, to: &str, lock: &Path) -> String {
+        tracing::warn!(
+            lock = %lock.display(),
+            repository = %self.dir.display(),
+            "a ref lock is in the way of following; it is never removed automatically"
+        );
+        format!(
+            "the ref lock {to}.lock in the location's bare repository is in the way: a git \
+             process may hold it, or a killed one left it. It is never removed \
+             automatically; once no git process works in the repository (its path is in \
+             the authority's log), remove the file"
+        )
+    }
+
+    /// The object `rev` names in the bare repository.
+    fn rev_parse(&self, rev: &str) -> Step<GitOid> {
+        let out = self.run(&["rev-parse", "--verify", "--quiet", rev], Cap::Small)?;
+        GitOid::from_hex(out.trim()).map_err(|e| LandError::Retry(format!("{rev}: {e}")))
+    }
+
+    /// The newest first-parent commit of what was fetched whose tree is `tree`. The near
+    /// window is read first, so a line rooted near the tip costs a few kilobytes; only a
+    /// miss with the window full reads the deep one.
+    fn commit_with_tree(&self, tree: GitOid) -> Step<Found> {
+        for window in [NEAR_SEARCH, PARENT_SEARCH] {
+            // One commit past the window, so a history exactly the window's length ends
+            // the search as absent rather than beyond it.
+            let out = self.run(
+                &[
+                    "log",
+                    "--first-parent",
+                    "--format=%H %T",
+                    "-n",
+                    &(window + 1).to_string(),
+                    "refs/cuenca/fetched",
+                ],
+                Cap::ParentLog,
+            )?;
+            let mut seen = 0;
+            for line in out.lines() {
+                seen += 1;
+                if seen > window {
+                    break;
+                }
+                if let Some((commit, t)) = line.split_once(' ')
+                    && t == tree.to_hex()
+                {
+                    return GitOid::from_hex(commit)
+                        .map(Found::At)
+                        .map_err(|e| LandError::Retry(e.to_string()));
+                }
+            }
+            if seen <= window {
+                return Ok(Found::Absent);
             }
         }
-        Ok(None)
+        Ok(Found::BeyondWindow)
     }
 
     /// Take the export already at `at` on the remote's branch for `id` as this
@@ -752,13 +1146,23 @@ impl<'c> Git<'c> {
     }
 
     fn has_commit(&self, commit: GitOid) -> Step<bool> {
+        self.check_stop()?;
         let cmd = self.command(Some(&self.dir), &["cat-file", "-t", &commit.to_hex()]);
-        let out = output_within(cmd, b"", self.config, Cap::Small, "git cat-file", &[])?;
+        let out = output_within(
+            cmd,
+            b"",
+            self.config,
+            self.deadline,
+            Cap::Small,
+            "git cat-file",
+            &[],
+        )?;
         Ok(out.status.success() && out.stdout == b"commit\n")
     }
 
     /// Commit `tree` onto `parent`: the same inputs give the same id.
     fn commit(&self, tree: GitOid, parent: GitOid, at_secs: u64, message: &str) -> Step<GitOid> {
+        self.check_stop()?;
         let date = format!("{at_secs} +0000");
         let mut cmd = self.command(
             Some(&self.dir),
@@ -782,6 +1186,7 @@ impl<'c> Git<'c> {
             cmd,
             message.as_bytes(),
             self.config,
+            self.deadline,
             Cap::Small,
             "git commit-tree",
             &[],
@@ -858,7 +1263,7 @@ impl Gh<'_> {
             "gh {}",
             args.iter().take(2).copied().collect::<Vec<_>>().join(" ")
         );
-        let out = output_within(cmd, input, self.config, Cap::Listing, &what, &[])?;
+        let out = output_within(cmd, input, self.config, None, Cap::Listing, &what, &[])?;
         if !out.status.success() {
             return Err(LandError::Retry(format!(
                 "gh {} failed: {}",
@@ -944,14 +1349,24 @@ fn output_within(
     cmd: Command,
     input: &[u8],
     config: &LandConfig,
+    deadline: Option<Instant>,
     cap: Cap,
     what: &str,
     watch: &[&str],
 ) -> Step<bounded::Output> {
     let (stdout_cap, field) = cap.of(&config.caps);
-    let limits = Limits::within(config.timeout, stdout_cap);
+    let mut limits = Limits::within(config.timeout, stdout_cap);
+    // A follow's deadline binds when it comes first.
+    let follow = deadline.filter(|d| limits.deadline.is_some_and(|own| *d < own));
+    if let Some(d) = follow {
+        limits.deadline = Some(d);
+    }
     let out = bounded::run_watched(cmd, input, what, limits, watch).map_err(|e| {
         LandError::Retry(match e {
+            RunError::TimedOut { .. } if follow.is_some() => format!(
+                "{what} did not end by the follow deadline ({} s) and was killed",
+                config.follow_timeout.as_secs()
+            ),
             RunError::TimedOut { .. } => format!(
                 "{what} did not end within {} s and was killed",
                 config.timeout.as_secs()
@@ -1026,6 +1441,8 @@ mod tests {
         let git = Git {
             config: &config,
             dir: tmp.path().to_path_buf(),
+            deadline: None,
+            stop: None,
         };
         // A script just written can be busy for a moment (ETXTBSY) when another test
         // thread forks while it is open; that is a retry, not this test's answer.
@@ -1052,6 +1469,7 @@ mod tests {
             cmd,
             &vec![b'x'; 1 << 20],
             &config,
+            None,
             Cap::Listing,
             "gh pr create",
             &[],

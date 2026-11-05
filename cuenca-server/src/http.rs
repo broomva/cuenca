@@ -18,7 +18,7 @@
 //! | Method | Path | Does |
 //! |---|---|---|
 //! | GET | `/v1/whoami` | the caller's principal, kind, node and grant |
-//! | GET | `/v1/locations` | locations whose main the caller reads |
+//! | GET | `/v1/locations` | locations whose main the caller reads, with `follow_error` when the last follow failed |
 //! | GET | `/v1/locations/{location}/tree` | the location's main tree |
 //! | GET | `/v1/locations/{location}/blobs/{oid}` | a blob of that tree |
 //! | GET | `/v1/forks` | forks the caller reads |
@@ -344,11 +344,20 @@ async fn whoami(Extension(c): Me) -> ApiResult {
 async fn locations(State(a): Shared, Extension(c): Me) -> ApiResult {
     blocking(&a, move |a| {
         let all = a.store.locations()?;
-        to_json(
-            all.into_iter()
-                .filter(|l| c.sees_location(l))
-                .collect::<Vec<_>>(),
-        )
+        // A location whose last follow of its remote failed shows why (ADR 0002).
+        let shown: Vec<Value> = all
+            .into_iter()
+            .filter(|l| c.sees_location(l))
+            .map(|l| {
+                let error = a.follow_error(&l.name);
+                let mut v = serde_json::to_value(&l).unwrap_or(Value::Null);
+                if let (Some(e), Some(o)) = (error, v.as_object_mut()) {
+                    o.insert("follow_error".into(), Value::String(e));
+                }
+                v
+            })
+            .collect();
+        to_json(shown)
     })
     .await
 }
