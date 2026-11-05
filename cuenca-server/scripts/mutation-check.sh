@@ -456,4 +456,9 @@ mutate src/land.rs 'if e.contains(&format!("{to}.lock")) && e.contains("File exi
 mutate src/land.rs ' && e.contains("File exists") =>' ' =>' --test follow without_permission
 mutate src/land.rs 'if self.stop.is_some_and(|s| s.load(Ordering::SeqCst)) {' 'if false {' --test follow a_stopping_lander
 
+mutate src/land.rs '                if stop.load(Ordering::SeqCst) {
+                    return Err(f.failed(LandError::Retry("the authority is stopping".into())));
+                }
+' '' --test follow ingests_nothing_more
+
 exit $survived

@@ -233,10 +233,18 @@ impl Lander {
     }
 }
 
-impl Drop for Lander {
-    fn drop(&mut self) {
+impl Lander {
+    /// Tell the lander to stop after its current step, without waiting for it:
+    /// dropping it then joins the thread.
+    pub fn stop(&self) {
         self.stop.store(true, Ordering::SeqCst);
         self.authority.wake_lander();
+    }
+}
+
+impl Drop for Lander {
+    fn drop(&mut self) {
+        self.stop();
         if let Some(t) = self.thread.take() {
             let _ = t.join();
         }
@@ -477,9 +485,14 @@ impl Worker {
                 .with_memory_limits(DEFAULT_MAX_BLOB_BYTES, total.max(1))
                 .read_blobs(oids.iter().copied())
                 .map_err(|e| f.failed(git_error(e)))?;
-            // Local store work: not bounded by the deadline (owner decision D1).
+            // Local store work: not bounded by the deadline (owner decision D1), but no
+            // further blob is staged once the lander is told to stop; an unfinished
+            // batch is not committed.
             let mut batch = store.blob_batch();
             for oid in &oids {
+                if stop.load(Ordering::SeqCst) {
+                    return Err(f.failed(LandError::Retry("the authority is stopping".into())));
+                }
                 let content = &blobs[oid];
                 batch
                     .add(*oid, content.len() as u64, content.as_slice())
@@ -489,7 +502,9 @@ impl Worker {
             left -= total;
         }
         f.left = None;
-        f.step = "recording the follow";
+        // A step like the others: not recorded once stopping, or past the deadline (a
+        // later round records it at once, every blob being present).
+        f.next("recording the follow")?;
         store
             .follow_main(&location.name, &tree, commit)
             .map_err(|e| f.failed(e.into()))

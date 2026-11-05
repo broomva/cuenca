@@ -467,8 +467,26 @@ fn a_lock_path_without_permission_is_not_a_held_lock() {
     assert!(!e.contains("never removed automatically"), "{e}");
 }
 
+/// A git wrapper at `dir/git-pause` that logs every call to `dir/calls`, and pauses a
+/// call matching `pattern`: it creates `dir/reached`, then waits (30 s at most) for
+/// `dir/go` before running the real git.
+fn pausing(dir: &Path, pattern: &str) -> PathBuf {
+    let script = dir.join("git-pause");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{d}/calls'\ncase \" $* \" in {pattern}) : > '{d}/reached'; i=0; while [ ! -f '{d}/go' ] && [ $i -lt 300 ]; do sleep 0.1; i=$((i+1)); done ;; esac\nexec git \"$@\"\n",
+            d = dir.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    script
+}
+
 /// Once the lander is told to stop, a follow starts no further git call: stopping
-/// while the commit is being resolved, the tree is never resolved.
+/// while the commit is being resolved, the tree is never resolved. The wrapper holds
+/// the commit's resolution until the stop has been requested.
 #[test]
 fn a_stopping_lander_starts_no_further_git_call() {
     let s = Server::start();
@@ -476,33 +494,67 @@ fn a_stopping_lander_starts_no_further_git_call() {
     let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
     register(&s, &up, "l1");
     merge_on_remote(&up, &[("merged.txt", b"m\n")]);
-    let calls = tmp.path().join("calls");
-    let reached = tmp.path().join("reached");
-    // Logs every call; the commit's resolution says it has started, then answers after
-    // a second, long enough for the test to stop the lander meanwhile.
-    let script = tmp.path().join("git-logs");
-    std::fs::write(
-        &script,
-        format!(
-            "#!/bin/sh\necho \"$*\" >> '{calls}'\ncase \" $* \" in *'refs/cuenca/followed^{{commit}}'*) : > '{reached}'; sleep 1 ;; esac\nexec git \"$@\"\n",
-            calls = calls.display(),
-            reached = reached.display()
-        ),
-    )
-    .unwrap();
-    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
     let mut config = up.land_config(tmp.path().join("repos"));
-    config.git = script;
+    config.git = pausing(tmp.path(), "*'refs/cuenca/followed^{commit}'*");
     let lander = lander(&s, config);
-    assert!(within(Duration::from_secs(30), || reached.exists()));
-    // Dropping the lander sets its stop flag and waits for the thread.
+    assert!(within(Duration::from_secs(30), || tmp
+        .path()
+        .join("reached")
+        .exists()));
+    lander.stop();
+    std::fs::write(tmp.path().join("go"), "").unwrap();
     drop(lander);
-    let log = std::fs::read_to_string(&calls).unwrap();
+    let log = std::fs::read_to_string(tmp.path().join("calls")).unwrap();
     assert!(
         !log.lines().any(|l| l.contains("^{tree}")),
         "a git call started after the stop:\n{log}"
     );
     assert_ne!(main_of(store(&s), "l1"), remote_tree(&up));
+}
+
+/// Stopping while a batch of blobs is read: no blob of it is ingested and main does
+/// not move, even though the read itself completes.
+#[test]
+fn a_stopping_lander_ingests_nothing_more_and_records_no_follow() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    register(&s, &up, "l1");
+    let main = main_of(store(&s), "l1");
+    merge_on_remote(
+        &up,
+        &[("a.txt", b"stopping a\n"), ("b.txt", b"stopping b\n")],
+    );
+    let mut config = up.land_config(tmp.path().join("repos"));
+    // The tree objects' batch runs first; the blobs' batch (two blobs) is held.
+    let seen = tmp.path().join("seen");
+    let script = pausing(tmp.path(), "*' --batch '*");
+    let body = std::fs::read_to_string(&script).unwrap().replace(
+        "*' --batch '*) :",
+        &format!(
+            "*' --batch '*) [ ! -f '{s}' ] && {{ : > '{s}'; exec git \"$@\"; }}; :",
+            s = seen.display()
+        ),
+    );
+    std::fs::write(&script, body).unwrap();
+    config.git = script;
+    let lander = lander(&s, config);
+    assert!(within(Duration::from_secs(30), || tmp
+        .path()
+        .join("reached")
+        .exists()));
+    lander.stop();
+    std::fs::write(tmp.path().join("go"), "").unwrap();
+    drop(lander);
+    assert_eq!(main_of(store(&s), "l1"), main);
+    for content in [&b"stopping a\n"[..], b"stopping b\n"] {
+        assert!(
+            store(&s)
+                .blob_info(GitOid::for_blob(content))
+                .unwrap()
+                .is_none()
+        );
+    }
 }
 
 /// A blob bigger than a batch and under the per-blob cap follows, in a batch of its
