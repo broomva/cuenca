@@ -1,11 +1,11 @@
-use std::collections::{BTreeMap, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::io::Read;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use cuenca_tree::{
-    Blob, Changeset, ContentHash, Entry, GitOid, Mode, Op, RepoPath, Tree, check_content,
-    has_content_rule,
+    Blob, Changeset, ContentHash, Entry, GitOid, Mode, Op, RepoPath, Tree, TreeObject,
+    check_content, has_content_rule,
 };
 use redb::{
     Database, Durability, ReadableTable, ReadableTableMetadata, TableDefinition, WriteTransaction,
@@ -980,6 +980,18 @@ impl Store {
         main: &Tree,
         commit: GitOid,
     ) -> Result<Option<u64>> {
+        self.follow_main_with(location, main, commit, |_| {})
+    }
+
+    /// [`Store::follow_main`], calling `between` after main is read and before the
+    /// follow is recorded, so a test can move main in between.
+    fn follow_main_with(
+        &self,
+        location: &LocationName,
+        main: &Tree,
+        commit: GitOid,
+        between: impl FnOnce(&Self),
+    ) -> Result<Option<u64>> {
         let loc = self
             .location(location)?
             .ok_or_else(|| CoreError::UnknownLocation(location.to_string()))?;
@@ -990,14 +1002,24 @@ impl Store {
             return Ok(None);
         }
         self.check_entries(main.entries())?;
+        between(self);
         let event = Event::MainFollowed {
             location: location.clone(),
             main: main.git_tree_id(),
             commit,
         };
-        let (offset, _) =
-            self.record(event, |txn| store_tree(&mut txn.open_table(TREES)?, main))?;
-        Ok(Some(offset))
+        match self.record(event, |txn| store_tree(&mut txn.open_table(TREES)?, main)) {
+            Ok((offset, _)) => Ok(Some(offset)),
+            // Another follow to the same tree got there first: nothing to record.
+            Err(CoreError::Inconsistent(_))
+                if self
+                    .location(location)?
+                    .is_some_and(|l| l.main == main.git_tree_id()) =>
+            {
+                Ok(None)
+            }
+            Err(e) => Err(e),
+        }
     }
 
     /// Record the authority's intent to push `export` for the landing of `id` (before
@@ -1617,8 +1639,12 @@ fn history_tags() -> &'static regex::bytes::Regex {
 /// main's tree. `LocationAdded` sets it; `MainAdvanced` moves it to the landed
 /// changeset's target, the fork's head and so the whole of its drafts (not the head
 /// changeset's ops, whose base is the previous draft: BRO-3603); `MainFollowed` moves it
-/// to the followed tree. Each tree main takes adds all its `(path, blob)` pairs to
-/// `held`, and each move records the paths whose entry differs between the two trees.
+/// to the followed tree. Each tree main takes adds its `(path, blob)` pairs to `held`,
+/// and each move records the paths whose entry differs between the two trees.
+///
+/// The trees are compared object by object ([`diff_trees`]): a subtree whose id did not
+/// change is not read, so a move costs what it changed, not the size of main. Only the
+/// pairs a move adds are inserted: the others are in `held` already.
 fn main_history(
     log: &impl ReadableTable<u64, Bytes>,
     index: &impl ReadableTable<Bytes, u64>,
@@ -1626,7 +1652,7 @@ fn main_history(
     location: &LocationName,
 ) -> Result<History> {
     let mut history = History::default();
-    let mut main: Option<Tree> = None;
+    let mut main: Option<GitOid> = None;
     for item in log.iter()? {
         let (k, v) = item?;
         // Only three kinds of record matter; the rest (drafts and intents, the bulk of
@@ -1655,37 +1681,96 @@ fn main_history(
             } if l == *location => main,
             _ => continue,
         };
-        let tree = load_tree(trees, tree)?;
-        for (path, entry) in tree.entries() {
-            history.held.insert((path.clone(), entry.oid()));
-        }
-        if let Some(before) = &main {
-            history
-                .moves
-                .push((record.at_ms, changed_paths(before, &tree)));
+        let mut changed = Vec::new();
+        let mut read = |oid| tree_children(trees, oid);
+        diff_trees(
+            &mut read,
+            main,
+            Some(tree),
+            "",
+            &mut history.held,
+            &mut changed,
+        )?;
+        if main.is_some() {
+            changed.sort();
+            history.moves.push((record.at_ms, changed));
         }
         main = Some(tree);
     }
     Ok(history)
 }
 
-/// The paths whose entry differs between `before` and `after`: added, deleted, or with
-/// another blob or mode.
-fn changed_paths(before: &Tree, after: &Tree) -> Vec<RepoPath> {
-    let old: BTreeMap<&RepoPath, &Entry> = before.entries().collect();
-    let new: BTreeMap<&RepoPath, &Entry> = after.entries().collect();
-    let mut paths: Vec<RepoPath> = new
-        .iter()
-        .filter(|(path, entry)| old.get(*path) != Some(*entry))
-        .map(|(path, _)| (*path).clone())
-        .collect();
-    paths.extend(
-        old.keys()
-            .filter(|path| !new.contains_key(*path))
-            .map(|path| (*path).clone()),
-    );
-    paths.sort();
-    paths
+/// The children of the stored tree object `oid`, checked to hash back to `oid`, so a
+/// damaged table cannot hand out another object under the same id.
+fn tree_children(
+    trees: &impl ReadableTable<Bytes, Bytes>,
+    oid: GitOid,
+) -> Result<Vec<(Mode, String, GitOid)>> {
+    let value = trees
+        .get(oid.as_bytes().as_slice())?
+        .ok_or(CoreError::MissingTree(oid))?;
+    let stored: Children = from_json(value.value())?;
+    let mut children = Vec::with_capacity(stored.len());
+    for (mode, name, child) in stored {
+        children.push((Mode::parse(&mode)?, name, child));
+    }
+    let object = TreeObject { oid, children };
+    if GitOid::for_object("tree", &object.body()) != oid {
+        return Err(CoreError::CorruptTree(oid));
+    }
+    Ok(object.children)
+}
+
+/// The children of one tree object, by its id.
+type ReadTree<'a> = dyn FnMut(GitOid) -> Result<Vec<(Mode, String, GitOid)>> + 'a;
+
+/// Compare the trees `old` and `new` (either may be absent) under `prefix`, reading
+/// each tree object through `read`: every `(path, blob)` of `new` that is not in `old`
+/// goes into `held`, and every path whose entry differs (added, deleted, another blob
+/// or mode) into `changed`. A subtree with the same id on both sides is equal and not
+/// read.
+fn diff_trees(
+    read: &mut ReadTree<'_>,
+    old: Option<GitOid>,
+    new: Option<GitOid>,
+    prefix: &str,
+    held: &mut BTreeSet<(RepoPath, GitOid)>,
+    changed: &mut Vec<RepoPath>,
+) -> Result<()> {
+    let mut side = |oid: Option<GitOid>| -> Result<BTreeMap<String, (Mode, GitOid)>> {
+        Ok(match oid {
+            Some(oid) => read(oid)?
+                .into_iter()
+                .map(|(mode, name, child)| (name, (mode, child)))
+                .collect(),
+            None => BTreeMap::new(),
+        })
+    };
+    let (before, after) = (side(old)?, side(new)?);
+    let names: BTreeSet<&String> = before.keys().chain(after.keys()).collect();
+    for name in names {
+        let (a, b) = (before.get(name), after.get(name));
+        if a == b {
+            continue;
+        }
+        let path = format!("{prefix}{name}");
+        let subtree =
+            |e: Option<&(Mode, GitOid)>| e.filter(|(m, _)| *m == Mode::Tree).map(|(_, o)| *o);
+        let entry = |e: Option<&(Mode, GitOid)>| e.filter(|(m, _)| *m != Mode::Tree).copied();
+        let (a_dir, b_dir) = (subtree(a), subtree(b));
+        if a_dir.is_some() || b_dir.is_some() {
+            diff_trees(read, a_dir, b_dir, &format!("{path}/"), held, changed)?;
+        }
+        let (a_entry, b_entry) = (entry(a), entry(b));
+        if a_entry.is_some() || b_entry.is_some() {
+            let path = RepoPath::new(path)?;
+            if let Some((_, oid)) = b_entry {
+                held.insert((path.clone(), oid));
+            }
+            changed.push(path);
+        }
+    }
+    Ok(())
 }
 
 /// Rebuild the tree `root` from its stored objects, and check that it hashes back to
@@ -2926,6 +3011,142 @@ mod tests {
             .unwrap();
         assert_eq!(calls, 2);
         assert_eq!(landed.gates.base, moved.git_tree_id());
+        store.replay_check().unwrap();
+    }
+
+    /// A move that changes only a path's mode (a file made executable, same blob) is a
+    /// move of that path: it counts for `governance_rate` like any other change.
+    #[test]
+    fn a_mode_only_follow_is_a_move_of_its_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let r = LocationName::new("r").unwrap();
+        let oid = GitOid::for_blob(b"rules");
+        store.ingest_blob(oid, 5, &b"rules"[..]).unwrap();
+        let agents = RepoPath::new("AGENTS.md").unwrap();
+        let file = Tree::from_entries([(agents.clone(), Entry::File(oid))]).unwrap();
+        let exec = Tree::from_entries([(agents.clone(), Entry::Executable(oid))]).unwrap();
+        store.add_location(&r, Some(REMOTE), &file).unwrap();
+        follow(&store, &r, &exec);
+        let h = history(&store, &r);
+        assert_eq!(h.moves.len(), 1);
+        assert_eq!(h.moves[0].1, std::slice::from_ref(&agents));
+        assert_eq!(h.held.len(), 1);
+    }
+
+    /// History reads the stored tree objects it needs, each checked against its id: a
+    /// followed tree whose stored object was altered fails the read.
+    #[test]
+    fn a_damaged_followed_tree_fails_main_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let r = LocationName::new("r").unwrap();
+        store
+            .add_location(&r, Some(REMOTE), &files(&store, &[("a", b"1")]))
+            .unwrap();
+        let next = files(&store, &[("a", b"2")]);
+        follow(&store, &r, &next);
+        let txn = store.begin().unwrap();
+        {
+            let mut trees = txn.open_table(TREES).unwrap();
+            let root = next.git_tree_id();
+            let mut children: Children = from_json(
+                trees
+                    .get(root.as_bytes().as_slice())
+                    .unwrap()
+                    .unwrap()
+                    .value(),
+            )
+            .unwrap();
+            children[0].1 = "b".into();
+            trees
+                .insert(root.as_bytes().as_slice(), to_json(&children).as_slice())
+                .unwrap();
+        }
+        txn.commit().unwrap();
+        let txn = store.db.begin_read().unwrap();
+        let read = main_history(
+            &txn.open_table(LOG).unwrap(),
+            &txn.open_table(CHANGESETS).unwrap(),
+            &txn.open_table(TREES).unwrap(),
+            &r,
+        );
+        assert!(
+            matches!(read, Err(CoreError::CorruptTree(o)) if o == next.git_tree_id()),
+            "{read:?}"
+        );
+    }
+
+    /// A move costs what it changed, not the size of main: one file changed in a
+    /// 5,000-file tree reads four tree objects (both roots and both versions of the one
+    /// directory that changed), and gives that one path and pair.
+    #[test]
+    fn a_small_move_of_a_large_tree_reads_only_what_changed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let mut entries = Vec::new();
+        for i in 0..5000u32 {
+            let oid = GitOid::for_blob(format!("{i}\n").as_bytes());
+            entries.push((
+                RepoPath::new(format!("d{}/f{i}", i % 50)).unwrap(),
+                Entry::File(oid),
+            ));
+        }
+        let before = Tree::from_entries(entries.clone()).unwrap();
+        let moved = GitOid::for_blob(b"moved\n");
+        entries[7].1 = Entry::File(moved);
+        let after = Tree::from_entries(entries.clone()).unwrap();
+        let txn = store.begin().unwrap();
+        {
+            let mut trees = txn.open_table(TREES).unwrap();
+            store_tree(&mut trees, &before).unwrap();
+            store_tree(&mut trees, &after).unwrap();
+        }
+        txn.commit().unwrap();
+        let rtxn = store.db.begin_read().unwrap();
+        let trees = rtxn.open_table(TREES).unwrap();
+        let mut reads = 0;
+        let mut read = |oid| {
+            reads += 1;
+            tree_children(&trees, oid)
+        };
+        let (mut held, mut changed) = (BTreeSet::new(), Vec::new());
+        diff_trees(
+            &mut read,
+            Some(before.git_tree_id()),
+            Some(after.git_tree_id()),
+            "",
+            &mut held,
+            &mut changed,
+        )
+        .unwrap();
+        assert_eq!(reads, 4);
+        let path = entries[7].0.clone();
+        assert_eq!(changed, std::slice::from_ref(&path));
+        assert_eq!(held, BTreeSet::from([(path, moved)]));
+    }
+
+    /// Two follows to the same tree racing: the one that records second finds main
+    /// already there and records nothing, rather than failing.
+    #[test]
+    fn a_second_follow_to_the_same_tree_records_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(dir.path()).unwrap();
+        let r = LocationName::new("r").unwrap();
+        store
+            .add_location(&r, Some(REMOTE), &files(&store, &[("a", b"1")]))
+            .unwrap();
+        let next = files(&store, &[("a", b"2")]);
+        let commit = GitOid::for_blob(b"c");
+        let len = store.len().unwrap();
+        let second = store
+            .follow_main_with(&r, &next, commit, |s| {
+                // The first follow records between the second's read and its record.
+                s.follow_main(&r, &next, commit).unwrap().unwrap();
+            })
+            .unwrap();
+        assert_eq!(second, None);
+        assert_eq!(store.len().unwrap(), len + 1);
         store.replay_check().unwrap();
     }
 }

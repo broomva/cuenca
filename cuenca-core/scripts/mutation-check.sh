@@ -492,9 +492,12 @@ mutate src/store.rs '                    .target
 ' '                    .base
 ' --lib a_landing_after_three_drafts
 mutate src/store.rs 'main_advanced|main_followed)' 'main_advanced)' --lib history_tags
-mutate src/store.rs '            .filter(|path| !new.contains_key(*path))' '            .filter(|_| false)' --lib every_kind_of_move
-mutate src/store.rs '        for (path, entry) in tree.entries() {
-            history.held.insert((path.clone(), entry.oid()));' '        for (path, entry) in tree.entries().take(0) {
-            history.held.insert((path.clone(), entry.oid()));' --lib a_blob_followed_away
+mutate src/store.rs '        if a_entry.is_some() || b_entry.is_some() {' '        if b_entry.is_some() {' --lib every_kind_of_move
+mutate src/store.rs '                held.insert((path.clone(), oid));' '                let _ = oid;' --lib a_blob_followed_away
+mutate src/store.rs '        if a == b {
+            continue;
+        }' '' --lib reads_only_what_changed
+mutate src/store.rs '    if GitOid::for_object("tree", &object.body()) != oid {' '    if false {' --lib a_damaged_followed_tree
+mutate src/store.rs '.is_some_and(|l| l.main == main.git_tree_id()) =>' '.is_some_and(|_| false) =>' --lib a_second_follow
 
 exit $survived
