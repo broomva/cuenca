@@ -445,13 +445,15 @@ mutate src/land.rs 'let refused = out.stderr_seen.iter().any(|seen| *seen) || re
 mutate src/land.rs '.min_by_key(|l| (at.get(&l.name).copied(), l.name.clone()))' '.max_by_key(|l| (at.get(&l.name).copied(), l.name.clone()))' --test follow a_hung_remote
 mutate src/land.rs '        if lock.exists() {' '        if std::fs::remove_file(&lock).is_ok() && lock.exists() {' --test follow a_ref_lock
 mutate src/land.rs '            batch.commit().map_err(|e| f.failed(e.into()))?;' '            drop(batch);' --test follow across_rounds
-mutate src/land.rs 'Git::new(&self.config, location, Some(f.deadline))' 'Git::new(&self.config, location, None)' --test follow slow_steps
+mutate src/land.rs 'Git::new(&self.config, location, Some(f.deadline), Some(&self.stop))' 'Git::new(&self.config, location, None, Some(&self.stop))' --test follow slow_steps
 mutate src/land.rs '        for window in [NEAR_SEARCH, PARENT_SEARCH] {' '        for window in [NEAR_SEARCH] {' --test follow rooted_1101
 
 mutate src/land.rs '        Repo::open(&self.dir)
             .with_git(&self.config.git)' '        Repo::open(&self.dir)' --test land a_hung_tree_write
 
 mutate src/land.rs '.rev_parse(&format!("{commit}^{{tree}}"))' '.rev_parse(&format!("{FOLLOWED}^{{tree}}"))' --test follow the_tree_of_the_commit
-mutate src/land.rs 'if e.contains(&format!("{to}.lock")) =>' 'if e.contains(".lock") =>' --test follow another_lock
+mutate src/land.rs 'if e.contains(&format!("{to}.lock")) && e.contains("File exists") =>' 'if e.contains(".lock") =>' --test follow another_lock
+mutate src/land.rs ' && e.contains("File exists") =>' ' =>' --test follow without_permission
+mutate src/land.rs 'if self.stop.is_some_and(|s| s.load(Ordering::SeqCst)) {' 'if false {' --test follow a_stopping_lander
 
 exit $survived

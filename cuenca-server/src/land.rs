@@ -393,7 +393,8 @@ impl Worker {
             left: None,
         };
         f.next("preparing the repository")?;
-        let git = Git::new(&self.config, location, Some(f.deadline)).map_err(|e| f.failed(e))?;
+        let git = Git::new(&self.config, location, Some(f.deadline), Some(&self.stop))
+            .map_err(|e| f.failed(e))?;
 
         f.next("finding the default branch")?;
         let branch = git.default_branch(remote).map_err(|e| f.failed(e))?;
@@ -519,7 +520,7 @@ impl Worker {
             })?;
             // The main this fork's line started from; the landing is committed onto it.
             let root = self.a.store.root_main(&fork.name)?;
-            let git = Git::new(&self.config, &location, None)?;
+            let git = Git::new(&self.config, &location, None, None)?;
             match &landing.step {
                 LandingStep::Requested => {
                     // An earlier landing of the same changeset (dropped by a takeover,
@@ -849,17 +850,25 @@ struct Git<'c> {
     dir: PathBuf,
     /// A follow's one deadline, over and above each call's timeout.
     deadline: Option<Instant>,
+    /// A follow's stop flag: once it is set, no further git call starts.
+    stop: Option<&'c AtomicBool>,
 }
 
 impl<'c> Git<'c> {
     /// The bare repository of `location`, created on first use; every call ends by
-    /// `deadline` too, when there is one (a follow's).
-    fn new(config: &'c LandConfig, location: &Location, deadline: Option<Instant>) -> Step<Self> {
+    /// `deadline` too, and none starts once `stop` is set, when there are (a follow's).
+    fn new(
+        config: &'c LandConfig,
+        location: &Location,
+        deadline: Option<Instant>,
+        stop: Option<&'c AtomicBool>,
+    ) -> Step<Self> {
         let dir = config.repos.join(format!("{}.git", location.name));
         let git = Self {
             config,
             dir,
             deadline,
+            stop,
         };
         if !git.dir.join("HEAD").exists() {
             let tmp = config.repos.join(format!(".{}.git.tmp", location.name));
@@ -914,7 +923,18 @@ impl<'c> Git<'c> {
         cmd
     }
 
+    /// No git call starts once the stop flag is set: checked before every spawn.
+    fn check_stop(&self) -> Step {
+        if self.stop.is_some_and(|s| s.load(Ordering::SeqCst)) {
+            return Err(LandError::Retry(
+                "the authority is stopping; no further git call was started".into(),
+            ));
+        }
+        Ok(())
+    }
+
     fn run_in(&self, dir: Option<&Path>, args: &[&str], cap: Cap) -> Step<String> {
+        self.check_stop()?;
         let what = format!("git {}", args.first().copied().unwrap_or(""));
         let out = output_within(
             self.command(dir, args),
@@ -993,9 +1013,12 @@ impl<'c> Git<'c> {
             Cap::Small,
         );
         match fetched {
-            // git names the lock it could not take; only this ref's own lock is this
-            // error, and any other failure is reported as it is.
-            Err(LandError::Retry(e)) if e.contains(&format!("{to}.lock")) => {
+            // git names the lock it could not take and why; only this ref's own lock,
+            // held by someone ("File exists"), is this error. Any other failure (another
+            // lock, no permission, a full disk) is reported as it is.
+            Err(LandError::Retry(e))
+                if e.contains(&format!("{to}.lock")) && e.contains("File exists") =>
+            {
                 tracing::warn!(error = %e, "git fetch failed on a ref lock");
                 Err(LandError::Retry(self.locked(to, &lock)))
             }
@@ -1108,6 +1131,7 @@ impl<'c> Git<'c> {
     }
 
     fn has_commit(&self, commit: GitOid) -> Step<bool> {
+        self.check_stop()?;
         let cmd = self.command(Some(&self.dir), &["cat-file", "-t", &commit.to_hex()]);
         let out = output_within(
             cmd,
@@ -1123,6 +1147,7 @@ impl<'c> Git<'c> {
 
     /// Commit `tree` onto `parent`: the same inputs give the same id.
     fn commit(&self, tree: GitOid, parent: GitOid, at_secs: u64, message: &str) -> Step<GitOid> {
+        self.check_stop()?;
         let date = format!("{at_secs} +0000");
         let mut cmd = self.command(
             Some(&self.dir),
@@ -1402,6 +1427,7 @@ mod tests {
             config: &config,
             dir: tmp.path().to_path_buf(),
             deadline: None,
+            stop: None,
         };
         // A script just written can be busy for a moment (ETXTBSY) when another test
         // thread forks while it is open; that is a retry, not this test's answer.

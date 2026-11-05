@@ -442,6 +442,69 @@ fn a_fetch_failing_on_another_lock_is_not_the_followed_refs_lock() {
     assert!(!e.contains("never removed automatically"), "{e}");
 }
 
+/// A fetch that fails for another reason on the followed ref's lock path (no
+/// permission) is reported as git said it, not as a lock held by someone.
+#[test]
+fn a_lock_path_without_permission_is_not_a_held_lock() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    register(&s, &up, "l1");
+    let a1 = agent(&s, &["l1"]);
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.git = wrapper(
+        tmp.path(),
+        "noperm",
+        "*' fetch '*",
+        "echo \"fatal: cannot lock ref 'refs/cuenca/followed': Unable to create '/r/refs/cuenca/followed.lock': Permission denied\" >&2; exit 128",
+    );
+    let _lander = lander(&s, config);
+    merge_on_remote(&up, &[("merged.txt", b"m\n")]);
+    assert!(within(Duration::from_secs(30), || {
+        follow_error(&s, &a1, "l1").is_some_and(|e| e.contains("Permission denied"))
+    }));
+    let e = follow_error(&s, &a1, "l1").unwrap();
+    assert!(!e.contains("never removed automatically"), "{e}");
+}
+
+/// Once the lander is told to stop, a follow starts no further git call: stopping
+/// while the commit is being resolved, the tree is never resolved.
+#[test]
+fn a_stopping_lander_starts_no_further_git_call() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    register(&s, &up, "l1");
+    merge_on_remote(&up, &[("merged.txt", b"m\n")]);
+    let calls = tmp.path().join("calls");
+    let reached = tmp.path().join("reached");
+    // Logs every call; the commit's resolution says it has started, then answers after
+    // a second, long enough for the test to stop the lander meanwhile.
+    let script = tmp.path().join("git-logs");
+    std::fs::write(
+        &script,
+        format!(
+            "#!/bin/sh\necho \"$*\" >> '{calls}'\ncase \" $* \" in *'refs/cuenca/followed^{{commit}}'*) : > '{reached}'; sleep 1 ;; esac\nexec git \"$@\"\n",
+            calls = calls.display(),
+            reached = reached.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&script, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.git = script;
+    let lander = lander(&s, config);
+    assert!(within(Duration::from_secs(30), || reached.exists()));
+    // Dropping the lander sets its stop flag and waits for the thread.
+    drop(lander);
+    let log = std::fs::read_to_string(&calls).unwrap();
+    assert!(
+        !log.lines().any(|l| l.contains("^{tree}")),
+        "a git call started after the stop:\n{log}"
+    );
+    assert_ne!(main_of(store(&s), "l1"), remote_tree(&up));
+}
+
 /// A blob bigger than a batch and under the per-blob cap follows, in a batch of its
 /// own.
 #[test]
