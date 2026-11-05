@@ -451,4 +451,7 @@ mutate src/land.rs '        for window in [NEAR_SEARCH, PARENT_SEARCH] {' '     
 mutate src/land.rs '        Repo::open(&self.dir)
             .with_git(&self.config.git)' '        Repo::open(&self.dir)' --test land a_hung_tree_write
 
+mutate src/land.rs '.rev_parse(&format!("{commit}^{{tree}}"))' '.rev_parse(&format!("{FOLLOWED}^{{tree}}"))' --test follow the_tree_of_the_commit
+mutate src/land.rs 'if e.contains(&format!("{to}.lock")) =>' 'if e.contains(".lock") =>' --test follow another_lock
+
 exit $survived

@@ -371,6 +371,8 @@ fn a_ref_lock_is_left_in_place_and_following_resumes_once_it_is_removed() {
     assert_eq!(main_of(store(&s), "l1"), main);
     let e = follow_error(&s, &a1, "l1").unwrap();
     assert!(e.contains("never removed automatically"), "{e}");
+    // The status names the lock in the repository, not the host's paths.
+    assert!(!e.contains(&repos.display().to_string()), "{e}");
 
     std::fs::remove_file(&lock).unwrap();
     assert!(within(Duration::from_secs(30), || main_of(store(&s), "l1")
@@ -379,6 +381,65 @@ fn a_ref_lock_is_left_in_place_and_following_resumes_once_it_is_removed() {
         &s, &a1, "l1"
     )
     .is_none()));
+}
+
+/// The commit and tree a follow records are one pair: the tree is resolved from the
+/// commit the fetch gave, not from the ref again, which another git process may have
+/// moved in between. Here the ref is moved back to the old commit right after the
+/// commit is resolved, on every round.
+#[test]
+fn a_follow_records_the_tree_of_the_commit_it_resolved() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    register(&s, &up, "l1");
+    let first = up.git(&["rev-parse", "main"]);
+    let merged = merge_on_remote(&up, &[("merged.txt", b"m\n")]);
+    let tip = up.git(&["rev-parse", "main"]);
+    let repos = tmp.path().join("repos");
+    let mut config = up.land_config(repos.clone());
+    config.git = wrapper(
+        tmp.path(),
+        "moves",
+        "*'refs/cuenca/followed^{commit}'*",
+        &format!(
+            "git \"$@\"; s=$?; git -C '{repo}' update-ref refs/cuenca/followed {first}; exit $s",
+            repo = repos.join("l1.git").display()
+        ),
+    );
+    let _lander = lander(&s, config);
+    assert!(
+        within(Duration::from_secs(30), || main_of(store(&s), "l1")
+            == merged),
+        "main did not follow"
+    );
+    let loc1 = store(&s).location(&loc("l1")).unwrap().unwrap();
+    assert_eq!(loc1.followed.map(|f| f.commit.to_hex()), Some(tip));
+}
+
+/// A fetch that fails on some other lock is reported as git said it, not as the
+/// followed ref's lock with its recovery advice.
+#[test]
+fn a_fetch_failing_on_another_lock_is_not_the_followed_refs_lock() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    register(&s, &up, "l1");
+    let a1 = agent(&s, &["l1"]);
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.git = wrapper(
+        tmp.path(),
+        "otherlock",
+        "*' fetch '*",
+        "echo \"fatal: Unable to create '/elsewhere/packed-refs.lock': File exists.\" >&2; exit 128",
+    );
+    let _lander = lander(&s, config);
+    merge_on_remote(&up, &[("merged.txt", b"m\n")]);
+    assert!(within(Duration::from_secs(30), || {
+        follow_error(&s, &a1, "l1").is_some_and(|e| e.contains("packed-refs.lock"))
+    }));
+    let e = follow_error(&s, &a1, "l1").unwrap();
+    assert!(!e.contains("never removed automatically"), "{e}");
 }
 
 /// A blob bigger than a batch and under the per-blob cap follows, in a batch of its
@@ -413,9 +474,21 @@ fn an_update_too_big_for_one_follow_follows_across_rounds() {
     register(&s, &up, "l1");
     let a1 = agent(&s, &["l1"]);
     let mut config = up.land_config(tmp.path().join("repos"));
-    // Each blob read takes 1 s of a 2.5 s deadline; batches are 1 MiB.
-    config.git = wrapper(tmp.path(), "slowread", "*' --batch '*", "sleep 1");
-    config.follow_timeout = Duration::from_millis(2500);
+    // Every third `cat-file --batch` hangs: each round reads the tree objects (one call)
+    // and one 1 MiB batch, then hangs on the next until the deadline. So each follow
+    // gets exactly one batch in, whatever the host's speed, and must keep it.
+    let count = tmp.path().join("count");
+    config.git = wrapper(
+        tmp.path(),
+        "onebatch",
+        "*' --batch '*",
+        &format!(
+            "n=$(cat '{c}' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{c}'; \
+             if [ $((n % 3)) -eq 0 ]; then exec sleep 30; fi",
+            c = count.display()
+        ),
+    );
+    config.follow_timeout = Duration::from_secs(5);
     config.follow_batch_bytes = 1024 * 1024;
     let files: Vec<(String, Vec<u8>)> = (0..6)
         .map(|i| (format!("part{i}.bin"), vec![b'a' + i as u8; 1024 * 1024]))
@@ -427,7 +500,7 @@ fn an_update_too_big_for_one_follow_follows_across_rounds() {
     let merged = merge_on_remote(&up, &refs);
     let _lander = lander(&s, config);
     let saw_partial = std::cell::Cell::new(false);
-    let followed = within(Duration::from_secs(90), || {
+    let followed = within(Duration::from_secs(120), || {
         if follow_error(&s, &a1, "l1").is_some_and(|e| e.contains("bytes of blobs left")) {
             saw_partial.set(true);
         }

@@ -52,6 +52,8 @@ use std::io::{BufRead, BufReader, Read};
 use std::os::unix::ffi::OsStrExt;
 use std::path::PathBuf;
 use std::process::Command;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use thiserror::Error;
 
@@ -112,6 +114,9 @@ impl Cap {
 pub enum GitError {
     #[error("could not run git: {0}")]
     Io(#[from] std::io::Error),
+    /// The stop flag ([`Repo::with_stop`]) was set: no further call was started.
+    #[error("stopped before the next git call")]
+    Stopped,
     /// The repository's deadline ([`Repo::with_deadline`]) passed during the call; its
     /// process group was killed.
     #[error("git {args} did not end before the deadline and was killed, after {elapsed:?}")]
@@ -201,6 +206,7 @@ pub struct Repo {
     isolated_config: bool,
     deadline: Option<Instant>,
     caps: RepoCaps,
+    stop: Option<Arc<AtomicBool>>,
 }
 
 impl Repo {
@@ -213,6 +219,7 @@ impl Repo {
             isolated_config: false,
             deadline: None,
             caps: RepoCaps::default(),
+            stop: None,
         }
     }
 
@@ -229,6 +236,21 @@ impl Repo {
     pub fn with_deadline(mut self, deadline: Instant) -> Self {
         self.deadline = Some(deadline);
         self
+    }
+
+    /// Start no further git call once `stop` is set: the operation fails with
+    /// [`GitError::Stopped`] before its next call (an authority shutting down).
+    pub fn with_stop(mut self, stop: Arc<AtomicBool>) -> Self {
+        self.stop = Some(stop);
+        self
+    }
+
+    /// [`GitError::Stopped`] if the stop flag is set: checked before every spawn.
+    fn check_stop(&self) -> Result<(), GitError> {
+        match &self.stop {
+            Some(stop) if stop.load(Ordering::SeqCst) => Err(GitError::Stopped),
+            _ => Ok(()),
+        }
     }
 
     /// Hold each call's stdout to `caps` instead of [`RepoCaps::default`].
@@ -284,6 +306,7 @@ impl Repo {
     /// Run git with `args` and `stdin` in its own process group, within the deadline
     /// and the stdout cap `cap` names.
     fn run(&self, args: &[&str], stdin: &[u8], cap: Cap) -> Result<Vec<u8>, GitError> {
+        self.check_stop()?;
         let (limit, field) = cap.of(&self.caps);
         let what = args.join(" ");
         let output = bounded::run(self.command(args), stdin, &what, self.limits(limit))
@@ -716,6 +739,7 @@ impl Repo {
                 .saturating_add(MAX_BATCH_HEADER as u64 + 1)
         });
         let what = "cat-file --batch";
+        self.check_stop()?;
         let mut child = Running::spawn(
             self.command(&["cat-file", "--batch"]),
             what,

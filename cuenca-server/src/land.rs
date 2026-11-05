@@ -217,6 +217,7 @@ impl Lander {
             a: authority.clone(),
             config,
             followed_at: RefCell::new(HashMap::new()),
+            stop: stop.clone(),
         };
         let thread = {
             let stop = stop.clone();
@@ -274,6 +275,9 @@ struct Worker {
     config: LandConfig,
     /// When each location was last followed (successfully or not), for the order.
     followed_at: RefCell<HashMap<LocationName, Instant>>,
+    /// The lander's stop flag, handed to the git bridge so a follow starts no git call
+    /// after it is set.
+    stop: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -388,6 +392,7 @@ impl Worker {
             step: "starting",
             left: None,
         };
+        f.next("preparing the repository")?;
         let git = Git::new(&self.config, location, Some(f.deadline)).map_err(|e| f.failed(e))?;
 
         f.next("finding the default branch")?;
@@ -399,8 +404,10 @@ impl Worker {
         let commit = git
             .rev_parse(&format!("{FOLLOWED}^{{commit}}"))
             .map_err(|e| f.failed(e))?;
+        // The tree of that commit, not of the ref again: the ref may have moved since,
+        // and the commit and tree recorded must be one pair.
         let tree_id = git
-            .rev_parse(&format!("{FOLLOWED}^{{tree}}"))
+            .rev_parse(&format!("{commit}^{{tree}}"))
             .map_err(|e| f.failed(e))?;
         if tree_id == location.main {
             return Ok(None);
@@ -418,6 +425,7 @@ impl Worker {
             .with_isolated_config()
             .with_git(&self.config.git)
             .with_deadline(f.deadline)
+            .with_stop(self.stop.clone())
             .with_caps(caps);
         let tree = repo
             .read_tree_known(&tree_id.to_hex(), |_| true)
@@ -970,7 +978,7 @@ impl<'c> Git<'c> {
     fn fetch_to(&self, remote: &str, what: &str, to: &str) -> Step {
         let lock = self.dir.join(format!("{to}.lock"));
         if lock.exists() {
-            return Err(LandError::Retry(self.locked(&lock)));
+            return Err(LandError::Retry(self.locked(to, &lock)));
         }
         let fetched = self.run(
             &[
@@ -985,22 +993,30 @@ impl<'c> Git<'c> {
             Cap::Small,
         );
         match fetched {
-            Err(LandError::Retry(e)) if e.contains(".lock") => {
-                Err(LandError::Retry(format!("{}: {e}", self.locked(&lock))))
+            // git names the lock it could not take; only this ref's own lock is this
+            // error, and any other failure is reported as it is.
+            Err(LandError::Retry(e)) if e.contains(&format!("{to}.lock")) => {
+                tracing::warn!(error = %e, "git fetch failed on a ref lock");
+                Err(LandError::Retry(self.locked(to, &lock)))
             }
             Err(e) => Err(e),
             Ok(_) => Ok(()),
         }
     }
 
-    /// The error for a ref lock in the way.
-    fn locked(&self, lock: &Path) -> String {
+    /// The error for the lock of ref `to` in the way. The status names the lock within
+    /// the location's bare repository; the host path goes to the log only.
+    fn locked(&self, to: &str, lock: &Path) -> String {
+        tracing::warn!(
+            lock = %lock.display(),
+            repository = %self.dir.display(),
+            "a ref lock is in the way of following; it is never removed automatically"
+        );
         format!(
-            "the ref lock {} is in the way: a git process may hold it, or a killed one left \
-             it. It is never removed automatically; once no git process works in {}, remove \
-             the file",
-            lock.display(),
-            self.dir.display()
+            "the ref lock {to}.lock in the location's bare repository is in the way: a git \
+             process may hold it, or a killed one left it. It is never removed \
+             automatically; once no git process works in the repository (its path is in \
+             the authority's log), remove the file"
         )
     }
 

@@ -405,3 +405,22 @@ fn streamed_output_past_the_batch_cap_fails_as_a_cap() {
     assert!(matches!(e, GitError::Capped { field: "batch", .. }), "{e}");
     assert!(start.elapsed() < Duration::from_secs(10));
 }
+
+/// Once the stop flag is set, the bridge starts no further git call: a read fails with
+/// `Stopped` at once instead of running a git that would hang.
+#[test]
+fn a_set_stop_flag_starts_no_git_call() {
+    let (w, head) = work();
+    let tmp = tempfile::tempdir().unwrap();
+    let hang = wrapper(tmp.path(), "*", "exec sleep 30");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+    let start = Instant::now();
+    let e = Repo::open(w.path())
+        .with_git(&hang)
+        .with_deadline(start + Duration::from_secs(10))
+        .with_stop(stop)
+        .read_tree(&head.to_hex())
+        .unwrap_err();
+    assert!(matches!(e, GitError::Stopped), "{e}");
+    assert!(start.elapsed() < Duration::from_secs(5));
+}
