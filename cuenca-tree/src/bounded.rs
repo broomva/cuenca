@@ -715,7 +715,7 @@ mod tests {
         )
         .unwrap();
         child.set_input(input);
-        while child.written == 0 {
+        while child.written == 0 && child.stdin_error.is_none() {
             child.pump(false, Duration::from_millis(20)).unwrap();
         }
         let e = child.finish().unwrap_err();

@@ -36,6 +36,8 @@ pub struct Authority {
     lander_wake: (Mutex<u64>, std::sync::Condvar),
     /// The last error each landing hit, while it is retried.
     pub(crate) landing_errors: crate::land::LandingErrors,
+    /// The last error each location's follow hit (ADR 0002), for `GET /v1/locations`.
+    follow_errors: Mutex<HashMap<cuenca_core::LocationName, String>>,
     /// The volume, once a materialiser keeps it: shared so that forking an owner fork
     /// snapshots it first, with no materialiser pass in between.
     volume: OnceLock<Arc<Mutex<Volume>>>,
@@ -131,6 +133,7 @@ impl Authority {
             revocation: std::sync::RwLock::new(()),
             lander_wake: (Mutex::new(0), std::sync::Condvar::new()),
             landing_errors: Default::default(),
+            follow_errors: Mutex::new(HashMap::new()),
             volume: OnceLock::new(),
         })
     }
@@ -158,6 +161,31 @@ impl Authority {
 
     pub(crate) fn set_landing_error(&self, fork: &cuenca_core::ForkName, error: Option<String>) {
         self.landing_errors.set(fork, error);
+    }
+
+    pub(crate) fn set_follow_error(
+        &self,
+        location: &cuenca_core::LocationName,
+        error: Option<String>,
+    ) {
+        let mut all = self.follow_errors.lock().expect("follow errors lock");
+        match error {
+            Some(e) => {
+                all.insert(location.clone(), e);
+            }
+            None => {
+                all.remove(location);
+            }
+        }
+    }
+
+    /// The last error following `location`'s remote hit, if its last follow failed.
+    pub fn follow_error(&self, location: &cuenca_core::LocationName) -> Option<String> {
+        self.follow_errors
+            .lock()
+            .expect("follow errors lock")
+            .get(location)
+            .cloned()
     }
 
     /// Share the volume a materialiser keeps ([`crate::materialise::Materialiser`]).

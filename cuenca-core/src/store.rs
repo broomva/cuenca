@@ -1737,6 +1737,11 @@ fn diff_trees(
     held: &mut BTreeSet<(RepoPath, GitOid)>,
     changed: &mut Vec<RepoPath>,
 ) -> Result<()> {
+    // Equal ids are equal trees: neither is read (a landing whose drafts cancel out
+    // leaves main's tree as it was).
+    if old == new {
+        return Ok(());
+    }
     let mut side = |oid: Option<GitOid>| -> Result<BTreeMap<String, (Mode, GitOid)>> {
         Ok(match oid {
             Some(oid) => read(oid)?
@@ -3121,6 +3126,17 @@ mod tests {
         )
         .unwrap();
         assert_eq!(reads, 4);
+        // The same tree on both sides reads nothing.
+        let mut none = |_: GitOid| -> Result<Vec<(Mode, String, GitOid)>> { panic!("read") };
+        diff_trees(
+            &mut none,
+            Some(after.git_tree_id()),
+            Some(after.git_tree_id()),
+            "",
+            &mut BTreeSet::new(),
+            &mut Vec::new(),
+        )
+        .unwrap();
         let path = entries[7].0.clone();
         assert_eq!(changed, std::slice::from_ref(&path));
         assert_eq!(held, BTreeSet::from([(path, moved)]));

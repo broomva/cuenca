@@ -566,6 +566,28 @@ fn a_git_call_past_its_output_cap_is_killed_and_names_its_field() {
     assert_eq!(up.creates().len(), 1);
 }
 
+/// The export's tree is written through the git bridge as the configured git, within
+/// the call timeout: a `write_tree` call that hangs is killed and the step retried, and
+/// the landing goes on once it answers (ADR 0002).
+#[test]
+fn a_hung_tree_write_is_killed_and_retried() {
+    let s = Server::start();
+    let tmp = tempfile::tempdir().unwrap();
+    let up = Upstream::new(tmp.path(), &[("README", "one\n")]);
+    let (a1, _id) = requested(&s, &up, Some(&up.url));
+    let mut config = up.land_config(tmp.path().join("repos"));
+    config.git = git_wrapper(tmp.path(), "git-mktree-hangs", "mktree", "exec sleep 30");
+    config.timeout = Duration::from_secs(3);
+    let _lander = Lander::spawn(s.authority.clone(), config).unwrap();
+    let error = landing_error(&s, &a1);
+    assert!(
+        error.starts_with("writing the tree: git mktree -z did not end before the deadline"),
+        "{error}"
+    );
+    std::fs::remove_file(tmp.path().join("flag")).unwrap();
+    wait_for(s.authority.store(), &f1(), in_review);
+}
+
 /// A hung git call whose grandchild holds its stdout is killed at the timeout, the
 /// grandchild with it, and retried (ADR 0002, BRO-3599): no process outlives the call.
 #[test]
