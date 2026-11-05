@@ -944,6 +944,35 @@ fn a_line_of_forks_keeps_the_main_it_started_from() {
     assert_eq!(store.root_main(&p.fork).unwrap(), root);
 }
 
+/// ADR 0002: main following the remote changes no fork that exists; the next fork
+/// starts from the followed main, and following the same tree again records nothing.
+#[test]
+fn a_follow_keeps_every_forks_root() {
+    let (_d, store) = store();
+    let main = tree(&store, &[("a", b"1")]);
+    store
+        .add_location(&loc("r"), Some("https://github.com/o/r"), &main)
+        .unwrap();
+    store.create_fork(&fork("f"), &loc("r"), &agent()).unwrap();
+    let followed = tree(&store, &[("a", b"1"), ("b", b"merged")]);
+    let at = cuenca_tree::GitOid::for_blob(b"a commit id stand-in");
+    assert!(
+        store
+            .follow_main(&loc("r"), &followed, at)
+            .unwrap()
+            .is_some()
+    );
+    assert_eq!(store.follow_main(&loc("r"), &followed, at).unwrap(), None);
+    assert_eq!(store.root_main(&fork("f")).unwrap(), main.git_tree_id());
+    assert_eq!(
+        store.fork(&fork("f")).unwrap().unwrap().base,
+        main.git_tree_id()
+    );
+    store.create_fork(&fork("h"), &loc("r"), &agent()).unwrap();
+    assert_eq!(store.root_main(&fork("h")).unwrap(), followed.git_tree_id());
+    store.replay_check().unwrap();
+}
+
 /// An unknown fork has no root.
 #[test]
 fn an_unknown_fork_has_no_root() {

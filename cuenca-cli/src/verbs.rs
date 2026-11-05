@@ -750,6 +750,13 @@ fn summarise(record: &cuenca_core::Record) -> (Value, String) {
         } => {
             format!("main of {location} advanced to {changeset} from {fork}")
         }
+        Event::MainFollowed {
+            location,
+            main,
+            commit,
+        } => {
+            format!("main of {location} followed its remote to {main} at commit {commit}")
+        }
         Event::LandingIntent {
             fork, changeset, ..
         } => {
@@ -1115,6 +1122,30 @@ mod tests {
 
     fn id(n: u8) -> ChangesetId {
         ChangesetId::from_hex(&format!("{n:02x}").repeat(32)).unwrap()
+    }
+
+    /// ADR 0002: a follow reads as one log line naming the location, tree and commit.
+    #[test]
+    fn a_follow_is_one_log_line() {
+        let record = cuenca_core::Record {
+            offset: 7,
+            at_ms: 0,
+            event: Event::MainFollowed {
+                location: cuenca_core::LocationName::new("l1").unwrap(),
+                main: cuenca_tree::GitOid::for_blob(b"tree"),
+                commit: cuenca_tree::GitOid::for_blob(b"commit"),
+            },
+        };
+        let (json, line) = summarise(&record);
+        assert_eq!(json["event"]["event"], "main_followed");
+        assert_eq!(
+            line,
+            format!(
+                "     7  main of l1 followed its remote to {} at commit {}\n",
+                cuenca_tree::GitOid::for_blob(b"tree"),
+                cuenca_tree::GitOid::for_blob(b"commit")
+            )
+        );
     }
 
     #[test]

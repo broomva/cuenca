@@ -84,7 +84,7 @@ pub use owner::{
     sibling_name,
 };
 pub use state::{
-    Export, Fork, Landing, LandingStep, Location, MAX_LANDING_TEXT, MainMove, Verified,
+    Export, Fork, Landing, LandingStep, Location, MAX_LANDING_TEXT, MainFollow, MainMove, Verified,
     export_branch,
 };
 pub use store::{

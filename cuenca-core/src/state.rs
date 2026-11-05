@@ -30,8 +30,24 @@ pub struct Location {
     pub remote: Option<String>,
     /// The tree of its main.
     pub main: GitOid,
-    /// The last move of main, if any.
+    /// The last move of main by a landing ([`crate::Event::MainAdvanced`]), if any.
     pub main_moved: Option<MainMove>,
+    /// For a location with a git remote, the last time main followed it
+    /// ([`crate::Event::MainFollowed`]); `None` until main first follows. Its offset is,
+    /// with [`MainMove::offset`], the move key a landing intent is fenced on
+    /// (ADR 0002): both are set only by their events, so a replay derives them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub followed: Option<MainFollow>,
+}
+
+/// One time a location's main followed its remote.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+pub struct MainFollow {
+    /// The remote commit whose tree main took.
+    pub commit: GitOid,
+    /// The offset of the `MainFollowed` record.
+    pub offset: u64,
 }
 
 /// One move of a location's main.
@@ -383,6 +399,7 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
                 remote: remote.clone(),
                 main: *main,
                 main_moved: None,
+                followed: None,
             })?;
         }
         Event::ForkCreated {
@@ -576,6 +593,31 @@ pub(crate) fn apply(view: &mut impl View, offset: u64, event: &Event) -> Result<
             landing.step = LandingStep::Landed { offset };
             state.landing = Some(landing);
             view.put_fork(&state)?;
+        }
+        Event::MainFollowed {
+            location: at,
+            main,
+            commit,
+        } => {
+            let mut loc = location(view, at)?;
+            // A location without a remote moves only when the owner lands a fork on it.
+            if loc.remote.is_none() {
+                return Err(CoreError::NoRemote(at.to_string()));
+            }
+            if loc.main == *main {
+                return Err(CoreError::Inconsistent(format!(
+                    "main of {at:?} is already {main}; following it again records nothing"
+                )));
+            }
+            // Forks keep the base they started from; only the next forks start here. A
+            // verify recorded against the old main no longer counts, since a landing
+            // needs one against main as it is now.
+            loc.main = *main;
+            loc.followed = Some(MainFollow {
+                commit: *commit,
+                offset,
+            });
+            view.put_location(&loc)?;
         }
         Event::LandingIntent {
             fork: name,
