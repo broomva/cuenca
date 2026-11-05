@@ -19,10 +19,28 @@ fn wrapper(dir: &Path, pattern: &str, action: &str) -> PathBuf {
     let path = dir.join("git-wrapper");
     std::fs::write(
         &path,
-        format!("#!/bin/sh\ncase \" $* \" in {pattern}) {action} ;; esac\nexec git \"$@\"\n"),
+        format!(
+            "#!/bin/sh\n[ -n \"$CUENCA_PROBE\" ] && exit 0\ncase \" $* \" in {pattern}) {action} ;; esac\nexec git \"$@\"\n"
+        ),
     )
     .unwrap();
     std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    // A test thread that forked while the script was open for writing holds it until
+    // its child execs, and exec then fails with ETXTBSY. Once one exec succeeds no
+    // writer is left, so every later run of the script is safe.
+    let start = std::time::Instant::now();
+    loop {
+        match std::process::Command::new(&path)
+            .env("CUENCA_PROBE", "1")
+            .status()
+        {
+            Err(e) if e.raw_os_error() == Some(26) && start.elapsed().as_secs() < 10 => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => panic!("cannot run the wrapper: {e}"),
+            Ok(_) => break,
+        }
+    }
     path
 }
 
@@ -344,4 +362,46 @@ fn bytes_buffered_with_the_last_batch_object_are_refused() {
         .read_blobs(blob_ids(&w))
         .unwrap_err();
     assert!(matches!(e, GitError::Parse(_)), "{e}");
+}
+
+/// `write_tree` reads a ruled blob the repository already has and the caller did not
+/// send; that read is held to the per-blob cap too.
+#[test]
+fn a_write_holds_an_unsent_ruled_blob_to_the_per_blob_cap() {
+    let mut w = Work::new();
+    w.write(
+        ".gitattributes",
+        Kind::File,
+        b"*.txt text eol=lf\n# fifty bytes or so\n",
+    );
+    w.write("a.txt", Kind::File, b"a\n");
+    w.snapshot();
+    let tree = w.model_tree();
+    let e = Repo::open(w.path())
+        .with_memory_limits(10, 1 << 20)
+        .write_tree(&tree, &Default::default())
+        .unwrap_err();
+    assert!(matches!(e, GitError::TooLarge { limit: 10, .. }), "{e}");
+}
+
+/// A batch reader whose git prints far more than its objects declare is stopped by
+/// the batch's stdout cap as the output streams, naming the cap.
+#[test]
+fn streamed_output_past_the_batch_cap_fails_as_a_cap() {
+    let (w, _) = work();
+    let tmp = tempfile::tempdir().unwrap();
+    let flood = wrapper(
+        tmp.path(),
+        "*' --batch '*",
+        "head -c 10000 /dev/zero; exec sleep 30",
+    );
+    let a = GitOid::for_blob(b"a\n");
+    let start = Instant::now();
+    let e = Repo::open(w.path())
+        .with_git(&flood)
+        .with_deadline(start + Duration::from_secs(30))
+        .read_blobs([a])
+        .unwrap_err();
+    assert!(matches!(e, GitError::Capped { field: "batch", .. }), "{e}");
+    assert!(start.elapsed() < Duration::from_secs(10));
 }

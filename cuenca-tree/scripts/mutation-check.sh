@@ -132,7 +132,9 @@ mutate src/git.rs '                        if declared != expected {' '         
 mutate src/git.rs '                if line.len() >= MAX_BATCH_HEADER {' '                if false {' --test git_bounds overlong
 mutate src/git.rs '.filter(|oid| ruled.contains_key(oid) || !known(*oid)),' '.filter(|oid| !known(*oid)),' --test git_bounds read_tree_known
 
-mutate src/git.rs 'wanted.iter().find(|(_, size)| *size > self.max_blob_bytes)' 'wanted.iter().find(|_| false)' --test git_bounds per_blob_cap
+mutate src/git.rs 'objects.iter().find(|(_, size)| *size > self.max_blob_bytes)' 'objects.iter().find(|_| false)' --test git_bounds per_blob_cap
+mutate src/bounded.rs '                    self.count(n)?;
+                    return Ok(n);' '                    return Ok(n);' --test git_bounds streamed_output_past
 mutate src/git.rs 'let trailing = !out.buffer().is_empty();' 'let trailing = false;' --test git_bounds buffered_with_the_last
 mutate src/git.rs '            if stored.len() < expected.len() {' '            if false {' --test git_bounds truncated_tree_body
 

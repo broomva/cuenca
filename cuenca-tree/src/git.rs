@@ -427,14 +427,6 @@ impl Repo {
                 .filter(|oid| ruled.contains_key(oid) || !known(*oid)),
         );
         let wanted = self.sized_blobs(&wanted)?;
-        // Every body read is held to the per-blob cap, before any is read (ADR 0002).
-        if let Some(&(oid, size)) = wanted.iter().find(|(_, size)| *size > self.max_blob_bytes) {
-            return Err(GitError::TooLarge {
-                oid,
-                size,
-                limit: self.max_blob_bytes,
-            });
-        }
         self.cat_file_batch("blob", &wanted, |oid, size, content| {
             match ruled.get(&oid) {
                 None => hash_stream(oid, size, content),
@@ -707,6 +699,17 @@ impl Repo {
     ) -> Result<(), GitError> {
         if objects.is_empty() {
             return Ok(());
+        }
+        // Every blob body is held to the per-blob cap, before any is read, on every path
+        // that streams blobs (ADR 0002).
+        if kind == "blob"
+            && let Some(&(oid, size)) = objects.iter().find(|(_, size)| *size > self.max_blob_bytes)
+        {
+            return Err(GitError::TooLarge {
+                oid,
+                size,
+                limit: self.max_blob_bytes,
+            });
         }
         let bound = objects.iter().fold(0u64, |sum, (_, size)| {
             sum.saturating_add(*size)
