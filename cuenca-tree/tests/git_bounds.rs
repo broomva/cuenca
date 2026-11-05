@@ -252,3 +252,96 @@ fn read_tree_known_skips_only_unruled_blobs() {
         Err(GitError::Missing(o)) if o == attrs
     ));
 }
+
+/// Every blob body a tree read streams is held to the per-blob cap, like
+/// `read_blobs`, before any is read; a blob the caller knows is not read at all.
+#[test]
+fn a_tree_read_holds_each_blob_to_the_per_blob_cap() {
+    let mut w = Work::new();
+    w.write("big.txt", Kind::File, b"ten bytes!");
+    let head = w.snapshot();
+    let repo = Repo::open(w.path()).with_memory_limits(4, 1 << 20);
+    for e in [
+        repo.read_tree(&head.to_hex()).unwrap_err(),
+        repo.read_tree_known(&head.to_hex(), |_| false).unwrap_err(),
+    ] {
+        assert!(
+            matches!(
+                e,
+                GitError::TooLarge {
+                    size: 10,
+                    limit: 4,
+                    ..
+                }
+            ),
+            "{e}"
+        );
+    }
+    repo.read_tree_known(&head.to_hex(), |_| true).unwrap();
+}
+
+/// Output past the last object, even bytes the reader already buffered with it, fails
+/// the batch.
+#[test]
+fn bytes_after_the_last_batch_object_are_refused() {
+    let (w, _) = work();
+    let tmp = tempfile::tempdir().unwrap();
+    let junk = wrapper(
+        tmp.path(),
+        "*' --batch '*",
+        "git \"$@\"; s=$?; printf JUNK; exit $s",
+    );
+    let e = Repo::open(w.path())
+        .with_git(&junk)
+        .with_deadline(Instant::now() + Duration::from_secs(30))
+        .read_blobs(blob_ids(&w))
+        .unwrap_err();
+    assert!(matches!(e, GitError::Parse(_)), "{e}");
+}
+
+/// A tree body cut short by a git that then fails reports git's failure, not a
+/// substituted object.
+#[test]
+fn a_truncated_tree_body_reports_gits_failure() {
+    let mut w = Work::new();
+    w.write("a.txt", Kind::File, b"a\n");
+    let head = w.snapshot();
+    let tmp = tempfile::tempdir().unwrap();
+    let cut = wrapper(
+        tmp.path(),
+        "*' --batch '*",
+        "git \"$@\" | head -c 60; echo boom >&2; exit 1",
+    );
+    let e = Repo::open(w.path())
+        .with_git(&cut)
+        .with_deadline(Instant::now() + Duration::from_secs(30))
+        .read_tree_known(&head.to_hex(), |_| true)
+        .unwrap_err();
+    match &e {
+        GitError::Failed { stderr, .. } => assert!(stderr.contains("boom"), "{e}"),
+        e => panic!("{e}"),
+    }
+}
+
+/// The same, with the junk in the same write as the last object, so the reader has it
+/// buffered when the last object ends.
+#[test]
+fn bytes_buffered_with_the_last_batch_object_are_refused() {
+    let (w, _) = work();
+    let tmp = tempfile::tempdir().unwrap();
+    let out = tmp.path().join("out");
+    let junk = wrapper(
+        tmp.path(),
+        "*' --batch '*",
+        &format!(
+            "git \"$@\" > '{o}'; s=$?; printf JUNK >> '{o}'; cat '{o}'; exit $s",
+            o = out.display()
+        ),
+    );
+    let e = Repo::open(w.path())
+        .with_git(&junk)
+        .with_deadline(Instant::now() + Duration::from_secs(30))
+        .read_blobs(blob_ids(&w))
+        .unwrap_err();
+    assert!(matches!(e, GitError::Parse(_)), "{e}");
+}

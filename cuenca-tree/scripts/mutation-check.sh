@@ -85,7 +85,7 @@ mutate src/git.rs 'Ok(blob) if blob.oid() == oid => Ok(()),' 'Ok(_) => Ok(()),' 
 mutate src/git.rs 'if let Some(empty) = dirs.iter().find(|d| !parents.contains(d.as_str()))' 'if let Some(empty) = dirs.iter().find(|_| false)' --test git_bridge
 mutate src/git.rs '"sha1" => {}' '_ => {}' --test git_bridge
 mutate src/git.rs 'return Err(GitError::PartialClone);' '' --test git_bridge
-mutate src/git.rs '[id, _, _] if *id == oid.to_hex() => return Err(GitError::WrongType(*oid)),' '' --test git_bridge
+mutate src/git.rs '[id, _, _] if *id == oid.to_hex() => return Err(GitError::WrongType(oid)),' '' --test git_bridge
 mutate src/git.rs 'verify_bytes(*oid, content)?;' '' --test git_bridge
 mutate src/path.rs '|| folds_to(component, ".gitmodules")' '' --lib
 mutate src/git.rs 'self.read_tree(&root.to_hex())?;' '' --test git_bridge
@@ -114,7 +114,7 @@ mutate src/bounded.rs '        self.kill_group();
 mutate src/bounded.rs 'self.remaining().is_some_and(|left| left.is_zero())' 'false' --test bounded a_hung_wrapper
 mutate src/bounded.rs '                if !exited {' '                if true {' --test bounded a_normal_exit_with_an_inherited_pipe
 mutate src/bounded.rs '            if open || self.stdin.is_some() {' '            if open {' --lib input_is_written_after_the_outputs_close
-mutate src/bounded.rs 'if reached > self.limits.stdout_cap {' 'if false {' --test bounded past_its_cap
+mutate src/bounded.rs 'if self.printed > self.limits.stdout_cap {' 'if false {' --test bounded past_its_cap
 mutate src/bounded.rs 'self.err.drain(..over);' '' --lib stderr_keeps_only_its_tail
 
 mutate src/bounded.rs '                    self.err.drain(..over);
@@ -131,5 +131,9 @@ mutate src/git.rs 'Self::LsTree => (caps.ls_tree, "ls_tree"),' 'Self::LsTree => 
 mutate src/git.rs '                        if declared != expected {' '                        if false {' --test git_bounds batch_size_other
 mutate src/git.rs '                if line.len() >= MAX_BATCH_HEADER {' '                if false {' --test git_bounds overlong
 mutate src/git.rs '.filter(|oid| ruled.contains_key(oid) || !known(*oid)),' '.filter(|oid| !known(*oid)),' --test git_bounds read_tree_known
+
+mutate src/git.rs 'wanted.iter().find(|(_, size)| *size > self.max_blob_bytes)' 'wanted.iter().find(|_| false)' --test git_bounds per_blob_cap
+mutate src/git.rs 'let trailing = !out.buffer().is_empty();' 'let trailing = false;' --test git_bounds buffered_with_the_last
+mutate src/git.rs '            if stored.len() < expected.len() {' '            if false {' --test git_bounds truncated_tree_body
 
 exit $survived

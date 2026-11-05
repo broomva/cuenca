@@ -427,6 +427,14 @@ impl Repo {
                 .filter(|oid| ruled.contains_key(oid) || !known(*oid)),
         );
         let wanted = self.sized_blobs(&wanted)?;
+        // Every body read is held to the per-blob cap, before any is read (ADR 0002).
+        if let Some(&(oid, size)) = wanted.iter().find(|(_, size)| *size > self.max_blob_bytes) {
+            return Err(GitError::TooLarge {
+                oid,
+                size,
+                limit: self.max_blob_bytes,
+            });
+        }
         self.cat_file_batch("blob", &wanted, |oid, size, content| {
             match ruled.get(&oid) {
                 None => hash_stream(oid, size, content),
@@ -457,6 +465,11 @@ impl Repo {
             let expected = &bodies[&oid];
             let mut stored = Vec::with_capacity(expected.len());
             content.read_to_end(&mut stored)?;
+            // A short body is git stopping, not a substituted object: its own failure
+            // says why.
+            if stored.len() < expected.len() {
+                return Err(GitError::EndedEarly("cat-file --batch".into()));
+            }
             if stored != *expected {
                 return Err(GitError::StoreMismatch(oid));
             }
@@ -762,6 +775,8 @@ impl Repo {
             },
             e => e,
         });
+        // Bytes the reader buffered past the last object are output too.
+        let trailing = !out.buffer().is_empty();
         let child = out.into_inner().0;
         match result {
             // git stopped: its own failure, if it failed, says why.
@@ -779,7 +794,7 @@ impl Repo {
                 if !finished.status.success() {
                     return Err(batch_failed(&finished.stderr));
                 }
-                if !finished.stdout.is_empty() {
+                if trailing || !finished.stdout.is_empty() {
                     return Err(GitError::Parse(
                         "cat-file --batch printed past its last object".into(),
                     ));
